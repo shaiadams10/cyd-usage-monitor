@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Updated the pinned production server image from
+  `python:3.11.15-slim-bookworm` to `python:3.14.0-slim-bookworm` and verified
+  the current server test suite and container startup on Python 3.14.
 - Fixed the WebAssembly CI smoke test to validate the stable semantic module
   exports exposed by the generated Emscripten wrapper instead of brittle,
   optimization-dependent raw WASM export letters.

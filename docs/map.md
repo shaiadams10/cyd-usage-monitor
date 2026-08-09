@@ -20,7 +20,7 @@
 | `cyd-usage-monitor/CHANGELOG.md` | Unreleased and historical project changes | 2026-08-09 |
 | `cyd-usage-monitor/diagram.json` | JSON configuration | 2026-08-09 |
 | `cyd-usage-monitor/docker-compose.yml` | Hardened app/collector/Tunnel orchestration with a private-address-only device port | 2026-08-09 |
-| `cyd-usage-monitor/Dockerfile` | Docker image definition including the protected flashing guide artifact | 2026-08-09 |
+| `cyd-usage-monitor/Dockerfile` | Python 3.14 server image definition including the protected flashing guide artifact | 2026-08-09 |
 | `cyd-usage-monitor/include/lv_conf.h` | Physical LVGL 8.4 Canvas, Arc, Chart, layout, memory, font, and theme configuration | 2026-08-09 |
 | `cyd-usage-monitor/include/mascot_img.h` | Project file | 2026-08-09 |
 | `cyd-usage-monitor/include/secrets.h` | Project file | 2026-08-09 |
