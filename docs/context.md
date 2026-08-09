@@ -3,11 +3,15 @@
 ## Current State
 
 CYD Usage Monitor is a self-hosted quota dashboard for the ESP32-2432S028R
-Cheap Yellow Display. It collects usage snapshots through locally
-authenticated Codex and Antigravity CLI panels, serves an Access-protected
-public browser dashboard plus a separate private-LAN device API from
-Python/Docker, and renders the selected account on physical and WebAssembly
-LVGL displays.
+Cheap Yellow Display. It collects usage snapshots through locally authenticated
+Codex and Antigravity CLI panels plus OpenRouter's documented management API,
+serves an Access-protected dashboard and separate private-LAN device API, and
+renders normalized usage on physical and WebAssembly LVGL displays.
+
+The device now boots into a two-app pastel launcher. Usage Monitor displays the
+selected Codex or Antigravity profile, while OpenRouter independently displays
+account credits, period spend, seven completed days, and the top model. Both
+apps use scoped LAN polling, Home navigation, and matching WebAssembly behavior.
 
 The repository currently contains one self-contained project under
 `cyd-usage-monitor/`. Project Brain Protocol v1.1.0 is initialized at the
@@ -16,6 +20,83 @@ authoritative outside the managed Brain Protocol block.
 
 ## Recent Changes
 <!-- Newest first. Max 10 entries. Oldest auto-compress to History Summary. -->
+
+### 2026-08-09 — Browser Usage Controls and Account Actions
+- Restored Usage Monitor pointer interaction in the WebAssembly preview by
+  placing its full-screen Antigravity content behind Home and Next controls.
+- Connected the preview's Next button to the dashboard's active-profile
+  selection and verified launcher, Home, and account rotation in a real browser.
+- Kept all four isolated CLI profile actions on one row, removed the redundant
+  green connected/quota line, and moved OpenRouter removal into a compact card
+  header control.
+- Rebuilt and deployed the dashboard and WASM assets with a timestamped remote
+  rollback; verified healthy services, exact live asset hashes, route protection,
+  and Cloudflare Access.
+- Refreshed the curated 12-file source graph to 234 nodes, 502 edges, and 9
+  communities without dependency caches or generated assets.
+- Files affected: `docs/{context.md,map.md}` and
+  `cyd-usage-monitor/{CHANGELOG.md,README.md,server/dashboard.html,`
+  `server/static/lvgl/{cyd_lvgl.js,cyd_lvgl.wasm},server/test_server.py,`
+  `simulator/lvgl_cyd_sim.c}`.
+
+### 2026-08-09 — OpenRouter Credits and Usage App
+- Added a second launcher app for account-wide OpenRouter credits and spend,
+  including a balance arc, period cards, seven-day chart, top model, Home
+  navigation, and `O` shortcut on physical and WebAssembly LVGL.
+- Added dashboard-managed mode-`0600` Management API key storage, official
+  read-only credits/keys/activity collection, cached normalized telemetry,
+  route-isolated APIs, protected setup/removal, and dashboard overview status.
+- Added aggregation, pagination, failure, secret-boundary, stale-state, route,
+  build, and interactive 320×240 visual/touch verification.
+- Deployed the server, collector, dashboard, and WebAssembly assets to the
+  configured monitor host with a timestamped rollback archive; verified the
+  protected setup form, isolated admin/device APIs, healthy services, and
+  Cloudflare Access boundary while preserving private runtime state.
+- Updated provider security contracts and operator documentation for the
+  documented OpenRouter API exception.
+- Files affected: `AGENTS.md`, `docs/{context.md,map.md}`, and the OpenRouter
+  collector/server/tests, dashboard/WASM, firmware/LVGL, README, changelog,
+  token guide, and project contract under `cyd-usage-monitor/`.
+
+### 2026-08-09 — Wokwi Touch Keybinds and Utilities
+- Added semantic Wokwi Serial Monitor shortcuts that route through the same
+  navigation and account-action requests as touchscreen controls: `U` opens
+  Usage Monitor, `H` returns Home, `N` advances accounts, and `?` prints help.
+- Renamed the protected dashboard Flash tab to Utilities and added a matching
+  keyboard cheat sheet while preserving the secure flashing workflow.
+- Reworked the dashboard preview container so it remains in a wider right rail
+  at normal desktop widths and scales the logical 320×240 canvas to 340×255.
+- Compacted only the WebAssembly Antigravity grid to add explicit right and
+  bottom gutters; the physical CYD layout remains unchanged.
+- Deployed the refreshed dashboard and WebAssembly assets to the configured
+  monitor host after creating a timestamped remote rollback copy; preserved
+  telemetry data, CLI profiles, collector state, and Tunnel configuration.
+- Updated dashboard regression coverage and operator documentation.
+- Refreshed the curated dependency-free Graphify graph across 12 source files
+  to 208 nodes, 437 edges, and 9 communities.
+- Files affected: `docs/context.md`, `docs/map.md`, and
+  `cyd-usage-monitor/{CHANGELOG.md,README.md,instructions/TOKEN_GUIDE.md,server/dashboard.html,`
+  `server/static/lvgl/cyd_lvgl.js,server/static/lvgl/cyd_lvgl.wasm,server/test_server.py,`
+  `simulator/lvgl_cyd_sim.c,src/main.cpp}`.
+
+### 2026-08-09 — Pastel CYD App Launcher
+- Created and remotely pushed a public-safe pre-launcher checkpoint, plus a
+  verified local Git bundle and ACL-protected hash-manifested snapshot of
+  ignored configuration and local project state.
+- Added a pastel `CYD Apps` boot launcher with a reusable app descriptor, a
+  compact Canvas-drawn usage gauge, press/entry/screen animations, connection
+  status, and the existing Usage Monitor as its first app.
+- Made Wi-Fi startup non-blocking, scoped telemetry polling/account actions to
+  Usage Monitor, added Home navigation, and replaced the fixed touch delay with
+  a stable-release latch.
+- Mirrored launcher and Home navigation in WebAssembly, added pointer input to
+  the dashboard canvas, and visually verified both navigation directions.
+- Refreshed the curated dependency-free Graphify graph across its 12 tracked
+  source files to 207 nodes, 434 edges, and 9 communities.
+- Files affected: `docs/context.md`, `docs/map.md`, and
+  `cyd-usage-monitor/{CHANGELOG.md,README.md,include/lv_conf.h,server/dashboard.html,`
+  `server/static/lvgl/cyd_lvgl.js,server/static/lvgl/cyd_lvgl.wasm,server/test_server.py,`
+  `simulator/build-wasm.ps1,simulator/lv_conf.h,simulator/lvgl_cyd_sim.c,src/main.cpp}`.
 
 ### 2026-08-09 — Restored LAN-only CYD and Wokwi Telemetry
 - Replaced device-side Cloudflare HTTPS with short-timeout local HTTP to the
@@ -126,70 +207,31 @@ authoritative outside the managed Brain Protocol block.
 - Files affected: `cyd-usage-monitor/src/main.cpp`, `README.md`, and
   `CHANGELOG.md`.
 
-### 2026-08-09 — Graphify Activated
-- Generated a deterministic, source-only Graphify knowledge graph without an
-  external or local language model.
-- Analyzed 12 tracked C/C++, Python, and PowerShell source files while
-  excluding generated assets, documentation, local secrets, and untracked
-  files.
-- Produced 175 nodes, 373 edges, and 13 communities in the ignored
-  `graphify-out/` directory.
-- Normalized generated source references to repository-relative paths and
-  recorded the active graph in `docs/map.md`.
-
-### 2026-08-09 — Secure Operator Runbook Added
-- Added a public-safe runbook documenting the remote-only Tunnel boundary,
-  Cloudflare-plus-Basic dashboard login, password retrieval and rotation,
-  credential placement, deployment verification, rollback, and Git release
-  checks.
-- Kept the exact operator host and all real secrets exclusively in ignored
-  configuration while linking the runbook from the project README.
-- Files affected: `cyd-usage-monitor/instructions/DEPLOYMENT_RUNBOOK.md`,
-  `README.md`, `CHANGELOG.md`, and `docs/map.md`.
-
-### 2026-08-09 — Remote Tunnel Deployment Verified
-- Deployed the hardened application, collector, and Cloudflare connector to
-  the operator-confirmed remote Linux origin while preserving the existing
-  dashboard password, telemetry state, CLI profiles, and a timestamped
-  rollback copy.
-- Migrated runtime state into a private data directory, removed the direct
-  port 8000 listener, and restricted both data and CLI profile directories to
-  the operator account.
-- Verified layered device authentication (`403` without Access, `401` without
-  the application token, `200` with both), route-limited ingress, owner-only
-  dashboard redirection, live telemetry, and four healthy Tunnel connections.
-- Recorded the exact deployment host and directory only in ignored `.env`;
-  tracked files retain value-free placeholders suitable for the public repo.
-- Files affected: `cyd-usage-monitor/.env.example`, `AGENTS.md`, and
-  `README.md`; ignored `.env` and `include/secrets.h` hold operator/device
-  configuration.
-
-### 2026-08-09 — Cloudflare Tunnel and Access Deployment
-- Added a pinned `cloudflared` service and moved the monitor application from
-  host networking to a private Compose ingress network with no published port.
-- Added separate Cloudflare Access protection for the human dashboard and CYD
-  device API, including firmware service-token headers, trusted HTTPS CA
-  validation, and bounded NTP synchronization.
-- Created the operator's remotely managed Tunnel, route-limited ingress, DNS
-  records, owner-only dashboard policy, and device-only Service Auth policy.
-- Documented minimal API permissions, credential separation, deployment, and
-  release hygiene. Real Tunnel and device credentials remain only in ignored
-  `.env` and `include/secrets.h` files.
-- Files affected: `cyd-usage-monitor/.env.example`, `docker-compose.yml`,
-  `include/secrets.h.example`, `src/main.cpp`, `README.md`, `CHANGELOG.md`, and
-  `instructions/TOKEN_GUIDE.md`.
-
 ## History Summary
 <!-- Compressed summaries of older changes go here -->
 
+- Graphify was activated on 2026-08-09 as a deterministic, source-only graph
+  over 12 tracked C/C++, Python, and PowerShell files, with repository-relative
+  references and no dependency, generated-asset, secret, or LLM input.
 - Project Brain Protocol v1.1.0 was initialized on 2026-08-09 with the
   discovered ESP32/Python/Docker architecture, build commands, repository
   map, context ledger, and preserved workspace policies.
+- Initial deployment hardening introduced the Cloudflare Tunnel, separated
+  human and device authentication, protected runtime secrets, and documented
+  the public-release security boundary before later returning CYD telemetry to
+  a private-LAN-only path.
+- The hardened application and Tunnel were deployed to the operator-confirmed
+  host with private runtime state, rollback protection, verified layered
+  authentication, live telemetry, and no tracked deployment identifiers.
+- A public-safe operator runbook documented the remote-only Tunnel boundary,
+  layered dashboard login, credential operations, deployment verification,
+  rollback, and Git release checks.
 
 ## Next Steps
 <!-- What should be worked on next? -->
 
-*No application work is scheduled by the protocol setup.*
+- Evaluate optional OpenRouter low-balance/spend alerts only if thresholds and
+  delivery behavior are explicitly defined; collection is currently read-only.
 
 ## Known Issues
 <!-- Active bugs, tech debt, or blockers -->

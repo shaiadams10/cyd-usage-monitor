@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HTTP API and dashboard for CLI-collected AI quota snapshots."""
+"""HTTP API and dashboard for normalized AI usage snapshots."""
 from __future__ import annotations
 
 import base64
@@ -30,6 +30,8 @@ PROFILES_FILE = DATA_DIR / "cli-profiles.json"
 CONTROL_FILE = DATA_DIR / "collector-control.json"
 RUNTIME_FILE = DATA_DIR / "collector-runtime.json"
 STATE_FILE = DATA_DIR / "telemetry.json"
+OPENROUTER_SECRET_FILE = DATA_DIR / "openrouter-secret.json"
+OPENROUTER_STATE_FILE = DATA_DIR / "openrouter-telemetry.json"
 ALERTS_FILE = DATA_DIR / "alert-status.json"
 SETTINGS_FILE = DATA_DIR / "monitor-settings.json"
 ADMIN_SECRET_FILE = DATA_DIR / ".monitor-admin-password"
@@ -117,6 +119,26 @@ def unavailable(provider: str, message: str) -> dict:
         "primary_tag": "Collector Error", "primary_sub": message[:96], "extra_credits": "None",
         "status_ticker": "* " + message[:100], "collected_at": None,
     }
+
+
+def openrouter_public_status() -> dict:
+    configured = OPENROUTER_SECRET_FILE.is_file()
+    snapshot = read_json(OPENROUTER_STATE_FILE, {})
+    if not configured:
+        return {"provider": "openrouter", "status": "unconfigured", "account_label": "OpenRouter", "configured": False}
+    if not snapshot:
+        return {"provider": "openrouter", "status": "error", "account_label": "OpenRouter", "configured": True, "error": "Waiting for the collector"}
+    result = copy.deepcopy(snapshot)
+    result["configured"] = True
+    if result.get("status") == "ok" and is_stale(result):
+        result = {
+            "provider": "openrouter", "status": "error", "configured": True,
+            "account_label": result.get("account_label", "OpenRouter"),
+            "error": "Last OpenRouter result is stale", "collected_at": result.get("collected_at"),
+        }
+    if result.get("status") != "ok":
+        result["error"] = str(result.get("error", "OpenRouter telemetry unavailable"))[:120]
+    return result
 
 
 def cyd_payload() -> dict:
@@ -312,6 +334,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.device_authorized():
                     return self.send_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
                 return self.send_json(cyd_payload())
+            if path == "/api/v1/openrouter-status":
+                if not self.device_authorized():
+                    return self.send_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                return self.send_json(openrouter_public_status())
             if path == "/api/v1/next-account":
                 if not self.device_authorized():
                     return self.send_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
@@ -346,7 +372,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if path in {"/api/v1/cyd-status", "/api/v1/next-account"}:
+        if path in {"/api/v1/cyd-status", "/api/v1/next-account", "/api/v1/openrouter-status"}:
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         if path == "/api/v1/collector-status":
             if not self.require_admin():
@@ -357,11 +383,16 @@ class Handler(BaseHTTPRequestHandler):
                 "runtime": public_runtime(), "workflow": active_workflow(),
                 "alerts": read_json(ALERTS_FILE, {"configured": False, "last_event": None}),
                 "alert_settings": alert_settings(),
+                "openrouter": openrouter_public_status(),
             })
         if path == "/api/admin/cyd-status":
             if not self.require_admin():
                 return
             return self.send_json(cyd_payload())
+        if path == "/api/admin/openrouter-status":
+            if not self.require_admin():
+                return
+            return self.send_json(openrouter_public_status())
         if path == "/":
             if not self.require_admin():
                 return
@@ -409,6 +440,27 @@ class Handler(BaseHTTPRequestHandler):
                     config["active_profile_id"] = profile["id"]
             update_json(PROFILES_FILE, {"profiles": [], "active_profile_id": None}, add_profile)
             return self.send_json(profile, HTTPStatus.CREATED)
+        if path == "/api/admin/openrouter-config":
+            key_value = body.get("key", "")
+            label_value = body.get("label", "")
+            if not isinstance(key_value, str) or not isinstance(label_value, str):
+                return self.send_json({"error": "key and label must be text"}, HTTPStatus.BAD_REQUEST)
+            key, label = key_value.strip(), label_value.strip() or "OpenRouter"
+            if not key or len(key) > 512:
+                return self.send_json({"error": "a valid OpenRouter management key is required"}, HTTPStatus.BAD_REQUEST)
+            if len(label) > 80:
+                return self.send_json({"error": "label must be 80 characters or fewer"}, HTTPStatus.BAD_REQUEST)
+            write_json(OPENROUTER_SECRET_FILE, {"key": key, "label": label, "updated_at": utcnow()})
+            request_id = append_request("collect_openrouter")
+            return self.send_json({"status": "accepted", "configured": True, "request_id": request_id}, HTTPStatus.ACCEPTED)
+        if path == "/api/admin/remove-openrouter-config":
+            with data_lock(DATA_DIR):
+                for target in (OPENROUTER_SECRET_FILE, OPENROUTER_STATE_FILE):
+                    try:
+                        target.unlink()
+                    except FileNotFoundError:
+                        pass
+            return self.send_json({"status": "ok", "configured": False})
         if path == "/api/admin/active-profile":
             profile_id = body.get("profile_id")
             if not isinstance(profile_id, str):

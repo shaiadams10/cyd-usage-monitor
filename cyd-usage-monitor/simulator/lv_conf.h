@@ -13,11 +13,18 @@
 #define LV_FONT_MONTSERRAT_14 1
 #define LV_FONT_MONTSERRAT_16 1
 #define LV_FONT_MONTSERRAT_20 1
+#define LV_FONT_MONTSERRAT_24 1
 #define LV_FONT_MONTSERRAT_32 1
 #define LV_FONT_DEFAULT &lv_font_montserrat_14
 
 #define LV_USE_BAR 1
+#define LV_USE_ARC 1
+#define LV_USE_BTN 1
+#define LV_USE_CANVAS 1
+#define LV_USE_CHART 1
 #define LV_USE_LABEL 1
+#define LV_USE_FLEX 1
+#define LV_USE_GRID 1
 #define LV_USE_THEME_DEFAULT 1
 #define LV_THEME_DEFAULT_DARK 1
 

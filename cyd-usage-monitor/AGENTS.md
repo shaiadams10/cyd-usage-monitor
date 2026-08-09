@@ -2,10 +2,12 @@
 
 Read this file and the workspace `AGENTS.md` before changing this project.
 
-1. Collect provider usage only through the authenticated Codex `/status` and
-   Antigravity `/usage` CLI panels. Do not import credential files or call
-   private provider APIs.
-2. Keep `.env`, `include/secrets.h`, CLI profiles, runtime snapshots, logs,
+1. Collect Codex and Antigravity usage only through their authenticated
+   `/status` and `/usage` CLI panels. OpenRouter may use only its documented
+   read endpoints with the dashboard-managed Management API key. Do not import
+   credential files, call private provider APIs, or use OpenRouter mutation
+   endpoints.
+2. Keep `.env`, `include/secrets.h`, CLI profiles, OpenRouter keys, runtime snapshots, logs,
    private endpoints, and routing identifiers out of Git, browser output, and
    logs. Use value-free examples and configurable paths instead.
 3. Treat `server/collector.py`, `server/server.py`, `server/dashboard.html`,

@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- Fixed Usage Monitor pointer handling in the browser LVGL preview by keeping
+  the full-screen Antigravity content layer behind its Home and Next controls,
+  and connected Next to the dashboard's active-profile selection.
+- Tightened the Accounts layout: all four isolated-profile actions remain on
+  one row, the redundant connected/quota text was removed, and the OpenRouter
+  removal action now sits as a compact header control.
+- Added an independent OpenRouter launcher app with an LVGL balance arc,
+  today/week/month spend cards, a seven-day bar chart, and top-model summary on
+  both the physical CYD and interactive WebAssembly preview. The host collector
+  now aggregates documented OpenRouter credits, key usage, and completed-day
+  activity using a dashboard-managed Management API key kept in private
+  runtime storage; new route-isolated APIs expose only normalized telemetry.
+- Added protected OpenRouter setup, replacement, removal, overview telemetry,
+  collector aggregation tests, device/API security tests, and the `O` Wokwi
+  shortcut. OpenRouter remains independent from Codex/Antigravity profile
+  selection and performs no account or key mutations.
+- Added semantic Wokwi serial shortcuts that simulate the launcher and Usage
+  Monitor touch targets: `U` opens Usage Monitor, `H` returns Home, `N` switches
+  accounts, and `?` prints help. Renamed the dashboard Flash tab to
+  **Utilities** and added the same keybind cheat sheet above the flashing guide.
+  The live LVGL preview now stays centered in the right rail at normal desktop
+  widths, renders slightly larger for inspection, and uses simulator-only
+  Antigravity grid gutters so its right and bottom card borders are not clipped.
+- Added a pastel LVGL app launcher as the deterministic CYD boot screen, with
+  a compact Canvas-drawn Usage Monitor icon, reusable app descriptors, animated
+  tile/screen transitions, background Wi-Fi connection, app-scoped polling,
+  release-latched touch startup, and a Home control. The WebAssembly preview is
+  now pointer-interactive and mirrors launcher navigation.
 - Restored fast LAN-only CYD and Wokwi telemetry: the server now has isolated
   dashboard and device listeners, Compose binds the Bearer-protected device API
   only to a configured private address, firmware rejects non-RFC1918 endpoints,

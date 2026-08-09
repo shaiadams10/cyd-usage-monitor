@@ -1,7 +1,8 @@
 # CYD Usage Monitor
 
 > A self-hosted usage dashboard that collects quota snapshots from locally
-> authenticated OpenAI Codex and Google Antigravity CLIs, presents them in a
+> authenticated OpenAI Codex and Google Antigravity CLIs plus the documented
+> OpenRouter management API, presents them in a
 > browser, and displays the selected account on an ESP32 Cheap Yellow Display.
 
 ---
@@ -108,9 +109,11 @@ PowerShell with Emscripten 3.1.74 available.
 
 ## Conventions and Architecture
 
-- Provider authentication remains inside isolated official CLI profiles. The
-  collector parses the CLIs' visible usage panels and writes normalized local
-  snapshots; it must not import credentials or call private provider APIs.
+- Codex and Antigravity authentication remains inside isolated official CLI
+  profiles. The collector parses their visible usage panels and must not import
+  credentials or call private provider APIs. OpenRouter is the sole documented
+  public-API exception: its dashboard-managed Management API key remains in
+  private runtime storage and only normalized credits/activity are persisted.
 - The protected browser dashboard and authenticated CYD API consume the
   normalized snapshot. The physical display and browser preview share LVGL
   assets and behavior.

@@ -1,17 +1,18 @@
 # CYD CLI Usage Monitor
 
 An ESP32 Cheap Yellow Display (ESP32-2432S028R) that displays usage snapshots
-from locally authenticated OpenAI Codex and Google Antigravity CLIs. A small
-Docker-hosted dashboard manages isolated CLI profiles and serves the CYD API.
+from locally authenticated OpenAI Codex and Google Antigravity CLIs plus
+account-wide OpenRouter credits and spend. A small Docker-hosted dashboard
+manages isolated CLI profiles, private OpenRouter setup, and the CYD API.
 
 ![CYD Usage Monitor dashboard](../docs/images/cyd-usage-monitor-dashboard.png)
 
 ## How it works
 
 ```text
-Codex /status + Antigravity /usage
-                 |
-     collector (isolated CLI profiles)
+Codex /status + Antigravity /usage + OpenRouter documented read APIs
+                            |
+       collector (isolated CLI profiles + private management key)
                  |
        normalized telemetry snapshot
            |                         |
@@ -21,9 +22,11 @@ Codex /status + Antigravity /usage
  ESP32-2432S028R / Wokwi
 ```
 
-The collector reads only the CLIs' visible quota panels. It does not copy
-browser cookies, `auth.json`, refresh tokens, or provider credentials, and it
-does not call private provider HTTP APIs.
+The collector reads only the Codex and Antigravity CLIs' visible quota panels.
+It does not copy browser cookies, `auth.json`, refresh tokens, or provider
+credentials, and it does not call private provider HTTP APIs. OpenRouter is a
+narrow exception using only its documented credits, key-list, and activity
+read endpoints.
 
 ## Hardware
 
@@ -54,7 +57,12 @@ does not call private provider HTTP APIs.
   Tunnel. Firmware rejects non-RFC1918 endpoint addresses before attaching
   its Bearer token.
 - Keep the Compose data directory and CLI profile directory private. They may
-  contain dashboard state, CLI credentials, and account usage data.
+  contain dashboard state, CLI credentials, the OpenRouter Management API key,
+  and account usage data.
+- OpenRouter setup accepts its Management API key only through the protected
+  dashboard. The mode-`0600` runtime secret is never returned to the browser,
+  firmware, device API, logs, or CLI subprocesses; removing OpenRouter deletes
+  both the key and its normalized snapshot.
 - Optional WAHA alert credentials remain only in `.env`; the dashboard never
   returns the API key, and provider CLI child processes do not inherit it.
 - Removing an account queues deletion of its complete isolated CLI credential
@@ -141,7 +149,9 @@ address configured in ignored `.env`. Visit the Access-protected dashboard
 hostname, pass the Cloudflare identity check, then sign in as `admin`, create
 an account profile, and complete the CLI login flow. The collector stores each
 CLI profile in its isolated private directory and polls usage every 90 seconds
-by default.
+by default. To enable OpenRouter, use **Accounts / OpenRouter account** to save
+a dedicated Management API key and display label. Saving queues an immediate
+collection; the monitor never creates, edits, or deletes OpenRouter keys.
 
 ### 4. Configure the CYD firmware
 
@@ -164,17 +174,36 @@ pio run -e esp32-2432S028R --target upload
 For port discovery, first-device setup, safe verification, troubleshooting,
 and credential-loss response, follow
 [`instructions/FLASHING_GUIDE.md`](instructions/FLASHING_GUIDE.md). The
-protected dashboard also includes a **Flash** tab with the same quick workflow
-and a link to the canonical guide.
+protected dashboard also includes a **Utilities** tab with the same quick
+workflow, a Wokwi keyboard-shortcut cheat sheet, and a link to the canonical
+guide.
 
 The build uses Espressif's standard `min_spiffs` partition table. This retains
 two OTA-capable application slots while giving the LVGL firmware substantially
 more room than the default layout; the monitor does not use SPIFFS.
 
+On every boot the CYD now opens a pastel **CYD Apps** launcher instead of
+entering telemetry directly. Wi-Fi connects in the background while the menu
+remains responsive. Tap **Usage Monitor** for the selected Codex/Antigravity
+account or **OpenRouter** for the independent credits-and-spend screen, then use
+the Home button in either header to return to the launcher. The OpenRouter app
+shows remaining credits, today/week/month spend, seven completed UTC days, and
+the top model for that seven-day window. Each app polls cached LAN telemetry
+every three seconds only while visible; upstream collection remains on the
+90-second host schedule.
+
 ### 5. Optional local UI preview
 
-The dashboard includes an LVGL WebAssembly preview built from the shared CYD
-visual assets. Rebuild it after changing `simulator/lvgl_cyd_sim.c`:
+The dashboard includes an interactive LVGL WebAssembly preview built from the
+shared CYD visual assets and launcher behavior. Click or tap either launcher
+tile and use the simulated Home button. Usage Monitor's Next control selects
+the following saved CLI profile in the dashboard as well as updating the
+preview. Its preview stays in the
+right-hand dashboard rail at normal desktop widths and scales the logical
+320×240 display to 340×255 for easier inspection. The WebAssembly-only
+Antigravity grid uses additional edge gutters so all four cards remain fully
+visible without changing the physical CYD layout. Rebuild it after changing
+`simulator/lvgl_cyd_sim.c`:
 
 ```powershell
 .\simulator\build-wasm.ps1
@@ -195,11 +224,20 @@ pio run -e esp32-2432S028R
 
 Restart Wokwi after every rebuild. The server and firmware reuse the local
 HTTP/1.1 connection across three-second status polls. The account-change endpoint
-returns the new telemetry in its response, avoiding a second request. Use the
-small arrow button in the display header (or `n`/space in the serial console)
-to switch accounts; touches elsewhere on the display do not trigger actions.
-The initial local fetch happens before the regular interaction loop. A `[NET]`
-diagnostic indicates a wrong LAN address, unreachable server, or closed port.
+returns the new telemetry in its response, avoiding a second request. Focus the
+Wokwi Serial Monitor and use these semantic touch shortcuts:
+
+- `U` opens Usage Monitor from the launcher.
+- `O` opens OpenRouter from the launcher.
+- `H` returns to the launcher.
+- `N` switches to the next account while Usage Monitor is open.
+- `?` prints the shortcut cheat sheet in the Serial Monitor.
+
+The legacy space shortcut still switches accounts for compatibility. The same
+cheat sheet is available in the protected dashboard's **Utilities** tab. The
+first fetch occurs when Usage Monitor opens or as soon as the background Wi-Fi
+connection becomes ready. A `[NET]` diagnostic indicates a wrong LAN address,
+unreachable server, or closed port.
 
 ## Optional WAHA alerts
 
