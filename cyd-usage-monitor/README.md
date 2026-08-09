@@ -268,10 +268,12 @@ uses illustrative account labels. Do not commit `.env`, `include/secrets.h`, `da
 rules.
 
 Pinned PlatformIO, library, Docker, and Emscripten versions make local and CI
-builds repeatable. GitHub CI runs server/API tests, Compose and Docker checks,
-the firmware build, and a clean WebAssembly regeneration with JavaScript syntax
-and semantic module-export ABI smoke checks. The ABI check uses the generated
-Emscripten wrapper rather than optimization-dependent raw WASM export names.
+builds repeatable. The production server image is pinned to
+`python:3.14.0-slim-bookworm`. GitHub CI runs server/API tests, Compose and
+Docker checks, the firmware build, and a clean WebAssembly regeneration with
+JavaScript syntax and semantic module-export ABI smoke checks. The ABI check
+uses the generated Emscripten wrapper rather than optimization-dependent raw
+WASM export names.
 Tests keep all runtime state in temporary directories so clean Linux and
 Windows runners do not depend on host paths or permissions. Simulator sources
 are sorted and path-normalized before compilation; generated binaries can still

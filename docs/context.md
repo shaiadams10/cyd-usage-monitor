@@ -21,6 +21,15 @@ authoritative outside the managed Brain Protocol block.
 ## Recent Changes
 <!-- Newest first. Max 10 entries. Oldest auto-compress to History Summary. -->
 
+### 2026-08-09 — Python 3.14 Production Container
+- Updated the pinned production image from Python 3.11.15 to Python 3.14.0 on
+  Debian Bookworm while retaining the complete current application.
+- Verified the server regression suite and container imports/startup against
+  the upgraded runtime before merging the Dependabot update.
+- Updated the README, changelog, and codebase map for the runtime change.
+- Files affected: `docs/{context.md,map.md}` and
+  `cyd-usage-monitor/{Dockerfile,CHANGELOG.md,README.md}`.
+
 ### 2026-08-09 — Stable WebAssembly ABI CI Check
 - Replaced the CI smoke test's brittle minified raw WASM export letters with
   semantic module-export validation through the generated Emscripten wrapper.
@@ -199,14 +208,11 @@ authoritative outside the managed Brain Protocol block.
   `server/server.py,server/test_server.py}`; ignored `include/secrets.h` was
   updated with the public trust anchor while retaining private values.
 
-### 2026-08-09 — Brain Protocol upgraded to v1.1.0
-- Updated the managed Brain Protocol instructions in `AGENTS.md`
-- Preserved project-specific content outside the managed protocol block
-- Files affected: `AGENTS.md`, `docs/context.md`, `docs/map.md`
-
 ## History Summary
 <!-- Compressed summaries of older changes go here -->
 
+- Project Brain Protocol was upgraded to v1.1.0 while preserving all
+  project-specific instructions outside the managed block.
 - Wokwi networking diagnostics use bounded emulator-friendly TLS/NTP timeouts
   and credential-safe mbedTLS errors, with corrected operator guidance.
 - Graphify was activated on 2026-08-09 as a deterministic, source-only graph
