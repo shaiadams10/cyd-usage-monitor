@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "author": "Antigravity",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-devkit-c-v4", "id": "esp", "top": 40, "left": 0, "attrs": {} },
+    { "type": "wokwi-ili9341", "id": "lcd1", "top": 20, "left": 240, "rotate": 90, "attrs": {} },
+    { "type": "wokwi-rgb-led", "id": "rgb1", "top": 300, "left": 120, "attrs": {} }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "esp:3V3", "lcd1:VCC", "red", [ "v0" ] ],
+    [ "esp:GND.1", "lcd1:GND", "black", [ "v0" ] ],
+    [ "esp:15", "lcd1:CS", "yellow", [ "v0" ] ],
+    [ "esp:2", "lcd1:D/C", "green", [ "v0" ] ],
+    [ "esp:13", "lcd1:MOSI", "blue", [ "v0" ] ],
+    [ "esp:14", "lcd1:SCK", "orange", [ "v0" ] ],
+    [ "esp:12", "lcd1:MISO", "purple", [ "v0" ] ],
+    [ "esp:21", "lcd1:LED", "white", [ "v0" ] ],
+    [ "esp:33", "lcd1:T_CS", "yellow", [ "v0" ] ],
+    [ "esp:36", "lcd1:T_IRQ", "red", [ "v0" ] ],
+    [ "esp:25", "lcd1:T_CLK", "orange", [ "v0" ] ],
+    [ "esp:32", "lcd1:T_DIN", "blue", [ "v0" ] ],
+    [ "esp:39", "lcd1:T_DO", "purple", [ "v0" ] ],
+    [ "esp:GND.2", "rgb1:COM", "black", [ "v0" ] ],
+    [ "esp:4", "rgb1:R", "red", [ "v0" ] ],
+    [ "esp:16", "rgb1:G", "green", [ "v0" ] ],
+    [ "esp:17", "rgb1:B", "blue", [ "v0" ] ]
+  ]
+}

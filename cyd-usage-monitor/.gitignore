@@ -1,0 +1,14 @@
+.pio/
+.vscode/
+.env
+.env.*
+!.env.example
+include/secrets.h
+data/
+profiles/
+__pycache__/
+server/__pycache__/
+*.py[cod]
+*.log
+*.pem
+*.key

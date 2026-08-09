@@ -1,0 +1,61 @@
+services:
+  cyd-monitor-app:
+    build: .
+    user: "${CYD_MONITOR_UID:-1000}:${CYD_MONITOR_GID:-1000}"
+    init: true
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    network_mode: host
+    restart: always
+    stop_grace_period: 15s
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      MONITOR_ADMIN_PASSWORD: ${MONITOR_ADMIN_PASSWORD:-}
+      CYD_API_TOKEN: ${CYD_API_TOKEN:-}
+      CYD_MONITOR_DATA_DIR: /app/data
+      CYD_MONITOR_POLL_SECONDS: ${CYD_MONITOR_POLL_SECONDS:-90}
+    volumes:
+      - ${CYD_MONITOR_HOST_DATA_DIR:-./data}:/app/data
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=16m
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; s=socket.create_connection(('127.0.0.1',8000),3); s.close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  cyd-monitor-collector:
+    build: .
+    user: "${CYD_MONITOR_UID:-1000}:${CYD_MONITOR_GID:-1000}"
+    init: true
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    command: ["python3", "/app/collector.py"]
+    network_mode: host
+    restart: always
+    stop_grace_period: 20s
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      CYD_MONITOR_DATA_DIR: /app/data
+      CYD_MONITOR_POLL_SECONDS: ${CYD_MONITOR_POLL_SECONDS:-90}
+      CYD_MONITOR_PROFILE_ROOT: /profiles
+      AGY_BIN: /opt/cyd-cli/agy
+      CODEX_BIN: /opt/cyd-codex/node_modules/.bin/codex
+      CYD_NODE_BIN: /opt/cyd-cli/node-bin
+      WAHA_URL: ${WAHA_URL:-http://127.0.0.1:3000}
+      WAHA_API_KEY: ${WAHA_API_KEY:-}
+      WAHA_SESSION: ${WAHA_SESSION:-default}
+      WAHA_ALERT_CHAT_ID: ${WAHA_ALERT_CHAT_ID:-}
+    volumes:
+      - ${CYD_MONITOR_HOST_DATA_DIR:-./data}:/app/data
+      - ${CYD_MONITOR_HOST_PROFILE_DIR:-./profiles}:/profiles
+      - ${AGY_HOST_PATH:?Set AGY_HOST_PATH in .env}:/opt/cyd-cli/agy:ro
+      - ${CODEX_HOST_DIR:?Set CODEX_HOST_DIR in .env}:/opt/cyd-codex:ro
+      - ${NODE_BIN_HOST_DIR:?Set NODE_BIN_HOST_DIR in .env}:/opt/cyd-cli/node-bin:ro
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m
