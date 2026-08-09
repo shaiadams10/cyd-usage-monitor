@@ -270,11 +270,13 @@ rules.
 Pinned PlatformIO, library, Docker, and Emscripten versions make local and CI
 builds repeatable. GitHub CI runs server/API tests, Compose and Docker checks,
 the firmware build, and a clean WebAssembly regeneration with JavaScript syntax
-and exported-ABI smoke checks. Tests keep all
-runtime state in temporary directories so clean Linux and Windows runners do
-not depend on host paths or permissions. Simulator sources are sorted and
-path-normalized before compilation; generated binaries can still differ between
-operating-system toolchain environments while remaining functionally equivalent.
+and semantic module-export ABI smoke checks. The ABI check uses the generated
+Emscripten wrapper rather than optimization-dependent raw WASM export names.
+Tests keep all runtime state in temporary directories so clean Linux and
+Windows runners do not depend on host paths or permissions. Simulator sources
+are sorted and path-normalized before compilation; generated binaries can still
+differ between operating-system toolchain environments while remaining
+functionally equivalent.
 
 Provider names belong to their respective owners. The tiny RGB565 pictures are
 unofficial project-created compatibility artwork; see the repository

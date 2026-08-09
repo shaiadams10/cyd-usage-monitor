@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fixed the WebAssembly CI smoke test to validate the stable semantic module
+  exports exposed by the generated Emscripten wrapper instead of brittle,
+  optimization-dependent raw WASM export letters.
 - Fixed Usage Monitor pointer handling in the browser LVGL preview by keeping
   the full-screen Antigravity content layer behind its Home and Next controls,
   and connected Next to the dashboard's active-profile selection.

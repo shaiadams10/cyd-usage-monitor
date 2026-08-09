@@ -21,6 +21,15 @@ authoritative outside the managed Brain Protocol block.
 ## Recent Changes
 <!-- Newest first. Max 10 entries. Oldest auto-compress to History Summary. -->
 
+### 2026-08-09 — Stable WebAssembly ABI CI Check
+- Replaced the CI smoke test's brittle minified raw WASM export letters with
+  semantic module-export validation through the generated Emscripten wrapper.
+- Verified all eight public simulator functions and initialized the module in
+  Node after a clean pinned-toolchain rebuild.
+- Updated the README and changelog to document the stable ABI verification.
+- Files affected: `.github/workflows/ci.yml`, `docs/{context.md,map.md}`, and
+  `cyd-usage-monitor/{CHANGELOG.md,README.md}`.
+
 ### 2026-08-09 — Browser Usage Controls and Account Actions
 - Restored Usage Monitor pointer interaction in the WebAssembly preview by
   placing its full-screen Antigravity content behind Home and Next controls.
@@ -195,21 +204,11 @@ authoritative outside the managed Brain Protocol block.
 - Preserved project-specific content outside the managed protocol block
 - Files affected: `AGENTS.md`, `docs/context.md`, `docs/map.md`
 
-### 2026-08-09 — Wokwi HTTPS Timing and Diagnostics
-- Replaced physical-device-oriented HTTPS and TLS timeouts with bounded values
-  that accommodate Wokwi's slower CPU/network emulation while retaining CA
-  certificate validation.
-- Added credential-safe serial diagnostics that expose the underlying mbedTLS
-  error when Arduino HTTPClient collapses transport failures into the generic
-  `connection refused` message.
-- Corrected the README's Wokwi networking guidance and documented how to use
-  the serial diagnostics.
-- Files affected: `cyd-usage-monitor/src/main.cpp`, `README.md`, and
-  `CHANGELOG.md`.
-
 ## History Summary
 <!-- Compressed summaries of older changes go here -->
 
+- Wokwi networking diagnostics use bounded emulator-friendly TLS/NTP timeouts
+  and credential-safe mbedTLS errors, with corrected operator guidance.
 - Graphify was activated on 2026-08-09 as a deterministic, source-only graph
   over 12 tracked C/C++, Python, and PowerShell files, with repository-relative
   references and no dependency, generated-asset, secret, or LLM input.

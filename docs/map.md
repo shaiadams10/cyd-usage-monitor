@@ -7,6 +7,7 @@
 | File | Purpose | Last Updated |
 |------|---------|--------------|
 | `docs/map.md` | Codebase file manifest and architecture map | 2026-08-09|
+| `.github/workflows/ci.yml` | Server, Docker, firmware, and semantic WebAssembly module-export CI checks | 2026-08-09 |
 | `.gitignore` | Git ignore patterns | 2026-08-09 |
 | `AGENTS.md` | AI agent instructions and project context | 2026-08-09|
 | `CODE_OF_CONDUCT.md` | Documentation | 2026-08-09 |

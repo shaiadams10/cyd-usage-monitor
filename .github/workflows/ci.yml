@@ -62,27 +62,29 @@ jobs:
           .\simulator\build-wasm.ps1
           node --check server/static/lvgl/cyd_lvgl.js
           @'
+          global.window = globalThis;
+          global.location = { href: "file:///cyd_lvgl.js" };
+          global.document = { currentScript: { src: "file:///cyd_lvgl.js" } };
           const fs = require("fs");
-          const bytes = fs.readFileSync("server/static/lvgl/cyd_lvgl.wasm");
-          WebAssembly.compile(bytes).then(async module => {
-            const imports = {};
-            for (const item of WebAssembly.Module.imports(module)) {
-              imports[item.module] ??= {};
-              if (item.kind !== "function") {
-                throw new Error(`Unexpected WASM import kind: ${item.kind}`);
+          const createCydLvgl = require("./server/static/lvgl/cyd_lvgl.js");
+          const wasmBinary = fs.readFileSync("server/static/lvgl/cyd_lvgl.wasm");
+          createCydLvgl({ wasmBinary }).then(module => {
+            const requiredFunctions = [
+              "cyd_init",
+              "cyd_tick",
+              "cyd_pointer",
+              "cyd_publish_provider_mascots",
+              "cyd_set_codex",
+              "cyd_set_antigravity",
+              "cyd_set_error",
+              "cyd_set_openrouter",
+            ];
+            for (const name of requiredFunctions) {
+              if (typeof module[`_${name}`] !== "function") {
+                throw new Error(`Missing required module export: ${name}`);
               }
-              imports[item.module][item.name] = () => {};
             }
-            const instance = await WebAssembly.instantiate(module, imports);
-            for (const name of ["d", "g", "f", "h"]) {
-              if (typeof instance.exports[name] !== "function") {
-                throw new Error(`Missing required WASM export: ${name}`);
-              }
-            }
-            instance.exports.d();
-            instance.exports.g();
-            instance.exports.f();
-            instance.exports.h(16);
+            module.ccall("cyd_init", null, [], []);
             console.log("WASM ABI smoke test passed");
           }).catch(error => {
             console.error(error);
