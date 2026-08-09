@@ -1,4 +1,5 @@
 import base64
+import http.client
 import json
 import os
 import tempfile
@@ -32,16 +33,25 @@ class ServerApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.httpd = app.ThreadingHTTPServer(("127.0.0.1", 0), QuietHandler)
+        cls.httpd.surface = "dashboard"
+        cls.device_httpd = app.ThreadingHTTPServer(("127.0.0.1", 0), QuietHandler)
+        cls.device_httpd.surface = "device"
         cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.device_thread = threading.Thread(target=cls.device_httpd.serve_forever, daemon=True)
         cls.thread.start()
+        cls.device_thread.start()
         cls.base_url = f"http://127.0.0.1:{cls.httpd.server_port}"
+        cls.device_base_url = f"http://127.0.0.1:{cls.device_httpd.server_port}"
         cls.basic = "Basic " + base64.b64encode(b"admin:test-admin-password-long-enough").decode("ascii")
 
     @classmethod
     def tearDownClass(cls):
         cls.httpd.shutdown()
+        cls.device_httpd.shutdown()
         cls.httpd.server_close()
+        cls.device_httpd.server_close()
         cls.thread.join(timeout=5)
+        cls.device_thread.join(timeout=5)
         _TEMP.cleanup()
 
     def setUp(self):
@@ -54,9 +64,10 @@ class ServerApiTests(unittest.TestCase):
         app.write_json(app.RUNTIME_FILE, {"requests": {}})
         app.write_json(app.STATE_FILE, {"profiles": {}})
 
-    def request(self, path, *, method="GET", payload=None, basic=True, csrf=False, bearer=False, content_type="application/json"):
+    def request(self, path, *, method="GET", payload=None, basic=True, csrf=False, bearer=False, device=False, content_type="application/json"):
         data = None if payload is None else json.dumps(payload).encode("utf-8")
-        request = urllib.request.Request(self.base_url + path, data=data, method=method)
+        base_url = self.device_base_url if device else self.base_url
+        request = urllib.request.Request(base_url + path, data=data, method=method)
         if basic:
             request.add_header("Authorization", self.basic)
         if bearer:
@@ -78,16 +89,67 @@ class ServerApiTests(unittest.TestCase):
             response.close()
 
     def test_dashboard_and_admin_preview_use_basic_auth(self):
-        status, _, headers = self.request("/")
+        status, dashboard, headers = self.request("/")
         self.assertEqual(status, 200)
+        self.assertIn(b'data-tab="flash"', dashboard)
+        self.assertIn(b"pio run -e esp32-2432S028R", dashboard)
+        self.assertNotIn(b"esp32-2432S028R-wokwi", dashboard)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         status, body, _ = self.request("/api/admin/cyd-status")
         self.assertEqual(status, 200)
         self.assertEqual(body["status"], "error")
 
+    def test_flashing_guide_is_admin_protected_and_available(self):
+        self.assertEqual(self.request("/docs/flashing-guide", basic=False)[0], 401)
+        status, body, headers = self.request("/docs/flashing-guide")
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("text/html"))
+        self.assertIn(b"# Flashing a CYD Device", body)
+        self.assertIn(b"pio run -e esp32-2432S028R", body)
+        self.assertNotIn(b"esp32-2432S028R-wokwi", body)
+        self.assertNotIn(b"CYD_API_TOKEN=", body)
+
     def test_device_endpoint_remains_bearer_only(self):
-        self.assertEqual(self.request("/api/v1/cyd-status")[0], 401)
-        self.assertEqual(self.request("/api/v1/cyd-status", basic=False, bearer=True)[0], 200)
+        self.assertEqual(app.Handler.protocol_version, "HTTP/1.1")
+        self.assertEqual(self.request("/api/v1/cyd-status", device=True)[0], 401)
+        self.assertEqual(self.request("/api/v1/cyd-status", basic=False, bearer=True, device=True)[0], 200)
+
+    def test_public_and_device_surfaces_are_isolated(self):
+        self.assertEqual(self.request("/api/v1/cyd-status", basic=False, bearer=True)[0], 404)
+        self.assertEqual(self.request("/", device=True)[0], 404)
+        self.assertEqual(self.request("/api/v1/collector-status", device=True)[0], 404)
+
+    def test_next_account_returns_the_new_display_payload(self):
+        second = {
+            "id": "codex-9876543210", "provider": "codex", "label": "Second account",
+            "enabled": True, "created_at": app.utcnow(),
+        }
+        app.write_json(app.PROFILES_FILE, {
+            "profiles": [self.profile, second], "active_profile_id": self.profile["id"],
+        })
+        status, body, _ = self.request("/api/v1/next-account", basic=False, bearer=True, device=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["provider"], "error")
+        self.assertIn("Waiting for the CLI collector", body["primary_sub"])
+        self.assertEqual(app.profiles_config()["active_profile_id"], second["id"])
+
+    def test_device_requests_reuse_one_http11_connection(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.device_httpd.server_port, timeout=5)
+        headers = {"Authorization": "Bearer test-device-token-long-enough-1234"}
+        try:
+            connection.request("GET", "/api/v1/cyd-status", headers=headers)
+            first = connection.getresponse()
+            self.assertEqual(first.status, 200)
+            first.read()
+            socket = connection.sock
+
+            connection.request("GET", "/api/v1/cyd-status", headers=headers)
+            second = connection.getresponse()
+            self.assertEqual(second.status, 200)
+            second.read()
+            self.assertIs(connection.sock, socket)
+        finally:
+            connection.close()
 
     def test_admin_posts_require_csrf_header_and_json(self):
         path = "/api/admin/profiles"

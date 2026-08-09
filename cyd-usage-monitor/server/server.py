@@ -6,10 +6,12 @@ import base64
 import copy
 import datetime as dt
 import hmac
+import html
 import json
 import os
 import re
 import secrets
+import threading
 import urllib.parse
 import uuid
 import mimetypes
@@ -34,6 +36,9 @@ ADMIN_SECRET_FILE = DATA_DIR / ".monitor-admin-password"
 LOGIN_INPUT_DIR = DATA_DIR / ".login-inputs"
 DASHBOARD_FILE = Path(__file__).with_name("dashboard.html")
 STATIC_DIR = Path(__file__).with_name("static")
+PACKAGED_FLASHING_GUIDE = Path(__file__).with_name("flashing-guide.md")
+REPOSITORY_FLASHING_GUIDE = Path(__file__).parents[1] / "instructions" / "FLASHING_GUIDE.md"
+FLASHING_GUIDE_FILE = PACKAGED_FLASHING_GUIDE if PACKAGED_FLASHING_GUIDE.is_file() else REPOSITORY_FLASHING_GUIDE
 DEVICE_TOKEN = os.environ.get("CYD_API_TOKEN", "").strip()
 MAX_REQUEST_BYTES = 32 * 1024
 
@@ -219,6 +224,10 @@ def active_workflow() -> dict | None:
 class Handler(BaseHTTPRequestHandler):
     server_version = "CYD-CLI-Monitor/4"
     sys_version = ""
+    protocol_version = "HTTP/1.1"
+
+    def is_device_surface(self) -> bool:
+        return getattr(self.server, "surface", "dashboard") == "device"
 
     def log_message(self, format, *args):
         print("%s - %s" % (self.address_string(), format % args))
@@ -298,6 +307,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
+        if self.is_device_surface():
+            if path == "/api/v1/cyd-status":
+                if not self.device_authorized():
+                    return self.send_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                return self.send_json(cyd_payload())
+            if path == "/api/v1/next-account":
+                if not self.device_authorized():
+                    return self.send_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                selected: dict[str, str | None] = {"id": None}
+                def rotate(config: dict) -> None:
+                    enabled = [profile for profile in config.get("profiles", []) if profile.get("enabled", True)]
+                    if not enabled:
+                        return
+                    ids = [profile["id"] for profile in enabled]
+                    current = config.get("active_profile_id")
+                    config["active_profile_id"] = ids[(ids.index(current) + 1) % len(ids)] if current in ids else ids[0]
+                    selected["id"] = config["active_profile_id"]
+                update_json(PROFILES_FILE, {"profiles": [], "active_profile_id": None}, rotate)
+                if not selected["id"]:
+                    return self.send_json({"error": "no profiles"}, HTTPStatus.NOT_FOUND)
+                return self.send_json(cyd_payload())
+            return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         if path.startswith("/static/"):
             relative = Path(path.removeprefix("/static/"))
             target = (STATIC_DIR / relative).resolve()
@@ -315,26 +346,8 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if path == "/api/v1/cyd-status":
-            if not self.device_authorized():
-                return self.send_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
-            return self.send_json(cyd_payload())
-        if path == "/api/v1/next-account":
-            if not self.device_authorized():
-                return self.send_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
-            selected: dict[str, str | None] = {"id": None}
-            def rotate(config: dict) -> None:
-                enabled = [profile for profile in config.get("profiles", []) if profile.get("enabled", True)]
-                if not enabled:
-                    return
-                ids = [profile["id"] for profile in enabled]
-                current = config.get("active_profile_id")
-                config["active_profile_id"] = ids[(ids.index(current) + 1) % len(ids)] if current in ids else ids[0]
-                selected["id"] = config["active_profile_id"]
-            update_json(PROFILES_FILE, {"profiles": [], "active_profile_id": None}, rotate)
-            if not selected["id"]:
-                return self.send_json({"error": "no profiles"}, HTTPStatus.NOT_FOUND)
-            return self.send_json({"status": "ok", "active_profile_id": selected["id"]})
+        if path in {"/api/v1/cyd-status", "/api/v1/next-account"}:
+            return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         if path == "/api/v1/collector-status":
             if not self.require_admin():
                 return
@@ -353,9 +366,15 @@ class Handler(BaseHTTPRequestHandler):
             if not self.require_admin():
                 return
             return self.dashboard()
+        if path == "/docs/flashing-guide":
+            if not self.require_admin():
+                return
+            return self.flashing_guide()
         return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self):
+        if self.is_device_surface():
+            return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         if not self.require_admin():
             return
         if self.headers.get("X-CYD-CSRF") != "1":
@@ -499,12 +518,46 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def flashing_guide(self):
+        try:
+            source = FLASHING_GUIDE_FILE.read_text(encoding="utf-8")
+        except OSError:
+            return self.send_json({"error": "flashing guide is unavailable"}, HTTPStatus.NOT_FOUND)
+        body = (
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            "<title>Flash a CYD · CYD Monitor</title><style>"
+            "body{margin:0;background:#0d1013;color:#f1f5f2;font:15px/1.6 system-ui,sans-serif}"
+            "main{max-width:920px;margin:auto;padding:32px 22px 64px}a{color:#4ee0b4}"
+            "pre{white-space:pre-wrap;overflow-wrap:anywhere;font:14px/1.65 Consolas,monospace;"
+            "background:#151a1f;border:1px solid #2b343b;padding:22px}"
+            "</style></head><body><main><a href=\"/\">← Back to dashboard</a>"
+            f"<pre>{html.escape(source)}</pre></main></body></html>"
+        ).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.security_headers()
+        self.end_headers()
+        self.wfile.write(body)
+
 
 def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    server = ThreadingHTTPServer(("0.0.0.0", 8000), Handler)
-    print("CYD CLI monitor server listening on :8000")
-    server.serve_forever()
+    dashboard_server = ThreadingHTTPServer(("0.0.0.0", 8000), Handler)
+    dashboard_server.surface = "dashboard"
+    device_server = ThreadingHTTPServer(("0.0.0.0", 8001), Handler)
+    device_server.surface = "device"
+    dashboard_thread = threading.Thread(target=dashboard_server.serve_forever, daemon=True)
+    dashboard_thread.start()
+    print("CYD dashboard listening on :8000; private device API listening on :8001")
+    try:
+        device_server.serve_forever()
+    finally:
+        dashboard_server.shutdown()
+        dashboard_server.server_close()
+        device_server.server_close()
 
 
 if __name__ == "__main__":

@@ -14,10 +14,11 @@ Codex /status + Antigravity /usage
      collector (isolated CLI profiles)
                  |
        normalized telemetry snapshot
-           |                 |
-   authenticated CYD API   protected dashboard
+           |                         |
+ private-LAN CYD API          Access-protected dashboard
+ (Bearer token, HTTP)          (Cloudflare Tunnel, HTTPS)
            |
-     ESP32-2432S028R display
+ ESP32-2432S028R / Wokwi
 ```
 
 The collector reads only the CLIs' visible quota panels. It does not copy
@@ -40,15 +41,18 @@ does not call private provider HTTP APIs.
 - `CYD_API_TOKEN` is required. The firmware and server must use the same
   value and it must contain at least 24 characters; requests without it
   receive `401 Unauthorized`.
+- Only the browser dashboard is public through Cloudflare Tunnel and an
+  identity-based Access policy. The CYD API uses a separate server listener
+  published only on the monitor host's private LAN address.
 - Dashboard writes require JSON plus a browser-only verification header. The
   physical CYD endpoint remains Bearer-only, while the browser preview uses a
   separate Basic-authenticated endpoint.
 - Provider authorization input is consumed from a private one-time inbox. It
   is never included in dashboard status responses, and temporary login URLs,
   device codes, and transcripts are scrubbed when a workflow ends.
-- Run the service on a private network, or place it behind a TLS-terminating
-  reverse proxy with firewall rules. Do not expose port 8000 directly to the
-  public internet because Basic authentication requires HTTPS in transit.
+- Never forward the LAN device port through a router, reverse proxy, or
+  Tunnel. Firmware rejects non-RFC1918 endpoint addresses before attaching
+  its Bearer token.
 - Keep the Compose data directory and CLI profile directory private. They may
   contain dashboard state, CLI credentials, and account usage data.
 - Optional WAHA alert credentials remain only in `.env`; the dashboard never
@@ -72,6 +76,8 @@ Set all of the following in the private `.env` file:
 
 - `MONITOR_ADMIN_PASSWORD` — a unique password of at least 16 characters.
 - `CYD_API_TOKEN` — a random shared device token of at least 24 characters.
+- `CYD_LAN_BIND_ADDRESS` — the monitor host's private LAN IPv4 address.
+- `CYD_LAN_PORT` — the host port for the LAN-only device API (default 8001).
 - `AGY_HOST_PATH`, `CODEX_HOST_DIR`, and `NODE_BIN_HOST_DIR` — absolute paths
   to the host-installed CLI executable/installations.
 - Optional WAHA settings if WhatsApp alerts are required.
@@ -81,7 +87,47 @@ ignored `./data` and `./profiles` directories. Assign a non-root
 `CYD_MONITOR_UID` and `CYD_MONITOR_GID` if Docker must write files as a
 specific host user.
 
-Start the services:
+### 2. Configure the Cloudflare Tunnel
+
+The Compose stack includes a pinned, remotely managed `cloudflared` connector.
+The dashboard listener is reachable only from `cloudflared` on the private
+`monitor-ingress` Docker network. A second, route-isolated device listener is
+published only on `CYD_LAN_BIND_ADDRESS`; the collector retains host
+networking for its operator-configured local CLI and WAHA integrations.
+
+Run this Compose stack only on the operator-selected origin host. Record that
+host and deployment directory in the ignored `.env`; development workstations
+must not retain or run the Tunnel token.
+
+See [`instructions/DEPLOYMENT_RUNBOOK.md`](instructions/DEPLOYMENT_RUNBOOK.md)
+for the complete login, credential placement, deployment, verification,
+rollback, and public-release procedure.
+
+Create only `CLOUDFLARE_DASHBOARD_HOSTNAME`. Use a remotely managed Tunnel
+with the dashboard hostname routed to `http://cyd-monitor-app:8000`, followed
+by a final `http_status:404` catch-all. Do not create a public device route.
+
+Protect the dashboard hostname with a self-hosted Cloudflare Access
+application and an Allow policy containing only the operator's identity.
+The dashboard listener deliberately returns `404` for device API paths. The
+private listener deliberately returns `404` for dashboard and admin paths.
+
+For one-time API provisioning, create a narrowly scoped Cloudflare API token:
+
+- Account / **Cloudflare Tunnel / Edit** for the selected account.
+- Account / **Access: Apps and Policies / Edit** for the selected account.
+- Zone / **DNS / Edit** for only the intended DNS zone.
+- Zone / **Zone / Read** for only that zone, if the provisioning tool must
+  discover its zone ID instead of using `CLOUDFLARE_ZONE_ID`.
+
+Put this management token in the ignored `.env` only while provisioning. It
+is not passed to any container and can be revoked afterward. The separate
+`CLOUDFLARE_TUNNEL_TOKEN` is consumed only by `cloudflared` on the origin host.
+
+### 3. Start the server and Tunnel
+
+After the remote Tunnel, DNS records, ingress rules, and Access applications
+exist, set `CLOUDFLARE_TUNNEL_TOKEN` and start the services:
 
 ```sh
 docker compose up -d --build
@@ -90,34 +136,42 @@ docker compose ps
 
 The Compose services run read-only, drop Linux capabilities, enable
 `no-new-privileges`, and use bounded PID and temporary-filesystem resources.
-The app listens on port 8000. Visit the private HTTPS endpoint through your
-reverse proxy, sign in as `admin`, create an account profile, and complete the
-CLI login flow. The collector stores each CLI profile in its isolated private
-directory and polls usage every 90 seconds by default.
+Port 8000 is not published by Compose. Port 8001 is bound only to the private
+address configured in ignored `.env`. Visit the Access-protected dashboard
+hostname, pass the Cloudflare identity check, then sign in as `admin`, create
+an account profile, and complete the CLI login flow. The collector stores each
+CLI profile in its isolated private directory and polls usage every 90 seconds
+by default.
 
-### 2. Configure the CYD firmware
+### 4. Configure the CYD firmware
 
-Copy `include/secrets.h.example` to the ignored `include/secrets.h`, then set
-your monitor's private HTTPS URL, its validating PEM CA certificate, and the
-same `CYD_API_TOKEN` used by the server. HTTPS fails closed if the CA is empty.
-Plain HTTP exposes the reusable device token and is disabled unless
-`TELEMETRY_ALLOW_INSECURE_HTTP` is explicitly set to `1`; use that override
-only on an isolated, trusted LAN.
+Copy `include/secrets.h.example` to the ignored `include/secrets.h`. Set
+`TELEMETRY_SERVER_URL` to the monitor's private RFC1918 IPv4 address and LAN
+port, ending in `/api/v1/cyd-status`, and set `TELEMETRY_API_TOKEN` to the same
+value as `CYD_API_TOKEN`. Firmware refuses HTTPS, public IP addresses, and
+hostnames so it cannot accidentally send the reusable token over the public
+Internet. Keep the LAN trusted and do not configure router port forwarding.
 The ESP32 holds only the monitor endpoint and its device token—not provider
 credentials.
 
 Build and upload with PlatformIO:
 
 ```sh
-pio run
-pio run --target upload
+pio run -e esp32-2432S028R
+pio run -e esp32-2432S028R --target upload
 ```
+
+For port discovery, first-device setup, safe verification, troubleshooting,
+and credential-loss response, follow
+[`instructions/FLASHING_GUIDE.md`](instructions/FLASHING_GUIDE.md). The
+protected dashboard also includes a **Flash** tab with the same quick workflow
+and a link to the canonical guide.
 
 The build uses Espressif's standard `min_spiffs` partition table. This retains
 two OTA-capable application slots while giving the LVGL firmware substantially
 more room than the default layout; the monitor does not use SPIFFS.
 
-### 3. Optional local UI preview
+### 5. Optional local UI preview
 
 The dashboard includes an LVGL WebAssembly preview built from the shared CYD
 visual assets. Rebuild it after changing `simulator/lvgl_cyd_sim.c`:
@@ -130,8 +184,22 @@ The simulator build requires Emscripten 3.1.74. Set `EMSDK_ROOT` when emsdk is
 not installed under the default per-user `.tools/emsdk` directory.
 
 `diagram.json` and `wokwi.toml` support optional Wokwi firmware simulation.
-The simulator models the display UI; it does not emulate Wi-Fi, touch, or
-ESP32 peripherals.
+Wokwi's private IoT gateway can reach the monitor server on the local network.
+It uses the same fast LAN-only firmware target as the physical CYD.
+
+Build the binary referenced by `wokwi.toml`:
+
+```powershell
+pio run -e esp32-2432S028R
+```
+
+Restart Wokwi after every rebuild. The server and firmware reuse the local
+HTTP/1.1 connection across three-second status polls. The account-change endpoint
+returns the new telemetry in its response, avoiding a second request. Use the
+small arrow button in the display header (or `n`/space in the serial console)
+to switch accounts; touches elsewhere on the display do not trigger actions.
+The initial local fetch happens before the regular interaction loop. A `[NET]`
+diagnostic indicates a wrong LAN address, unreachable server, or closed port.
 
 ## Optional WAHA alerts
 
@@ -145,7 +213,7 @@ WAHA API key.
 
 ```sh
 python -m unittest discover -s server -v
-pio run
+pio run -e esp32-2432S028R
 ```
 
 For server changes, also start the stack with a private test configuration and

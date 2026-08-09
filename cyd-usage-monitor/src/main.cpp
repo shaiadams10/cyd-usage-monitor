@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include <SPI.h>
 #include <TFT_eSPI.h>
@@ -23,8 +22,11 @@
 #define LED_BLUE 17
 
 TFT_eSPI tft = TFT_eSPI();
-SPIClass touchSPI = SPIClass(VSPI);
+// TFT_eSPI uses VSPI by default. The touch controller has its own CYD pins,
+// so place it on HSPI to avoid registering the same ESP32 APB callback twice.
+SPIClass touchSPI = SPIClass(HSPI);
 XPT2046_Touchscreen touch(XPT2046_CS, XPT2046_IRQ);
+WiFiClient telemetryPlainClient;
 
 // LVGL buffer
 static lv_disp_draw_buf_t draw_buf;
@@ -36,15 +38,9 @@ unsigned long lastFetchTime = 0;
 // three seconds, without triggering another provider CLI invocation.
 const unsigned long FETCH_INTERVAL = 3000;
 const size_t MAX_TELEMETRY_BYTES = 16384;
+const unsigned long TELEMETRY_CONNECT_TIMEOUT_MS = 3000;
+const unsigned long TELEMETRY_READ_TIMEOUT_MS = 5000;
 static volatile bool nextAccountRequested = false;
-
-#ifndef TELEMETRY_CA_CERT
-#define TELEMETRY_CA_CERT ""
-#endif
-
-#ifndef TELEMETRY_ALLOW_INSECURE_HTTP
-#define TELEMETRY_ALLOW_INSECURE_HTTP 0
-#endif
 
 // Dashboard Screen & Widgets
 static lv_obj_t *scr_dashboard;
@@ -53,7 +49,8 @@ static lv_obj_t *scr_dashboard;
 static lv_obj_t *header_img;
 static lv_obj_t *lbl_ag_mascot;
 static lv_obj_t *lbl_account_name;
-static lv_obj_t *lbl_wifi_icon;
+static lv_obj_t *btn_next_account;
+static lv_obj_t *lbl_next_icon;
 
 // Card 1: Primary Quota (Weekly / Monthly Limit)
 static lv_obj_t *card_primary;
@@ -103,27 +100,40 @@ static lv_obj_t *lbl_ticker;
 
 String accountName = "ChatGPT User";
 String extraCredits = "None";
+String prefetchedTelemetryPayload;
 
 void fetchQuotaData();
 void showTelemetryError(const String &detail);
 
-bool beginTelemetryRequest(HTTPClient &http, WiFiClient &plainClient, WiFiClientSecure &secureClient, const String &url) {
-    if (url.startsWith("https://")) {
-        if (String(TELEMETRY_CA_CERT).length() == 0) {
-            showTelemetryError("HTTPS is configured, but TELEMETRY_CA_CERT is empty.");
-            return false;
-        }
-        secureClient.setCACert(TELEMETRY_CA_CERT);
-        secureClient.setHandshakeTimeout(5);
-        return http.begin(secureClient, url);
+bool isPrivateLanTelemetryUrl(const String &url) {
+    if (!url.startsWith("http://")) {
+        return false;
     }
-#if TELEMETRY_ALLOW_INSECURE_HTTP
-    if (url.startsWith("http://")) {
-        return http.begin(plainClient, url);
+    const int authorityStart = 7;
+    int authorityEnd = url.indexOf('/', authorityStart);
+    if (authorityEnd < 0) {
+        authorityEnd = url.length();
     }
-#endif
-    showTelemetryError("Use HTTPS with a trusted CA, or explicitly allow private-LAN HTTP.");
-    return false;
+    String host = url.substring(authorityStart, authorityEnd);
+    const int portSeparator = host.indexOf(':');
+    if (portSeparator >= 0) {
+        host = host.substring(0, portSeparator);
+    }
+    unsigned int a, b, c, d;
+    char trailing;
+    if (sscanf(host.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &trailing) != 4 ||
+        a > 255 || b > 255 || c > 255 || d > 255) {
+        return false;
+    }
+    return a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168);
+}
+
+bool beginTelemetryRequest(HTTPClient &http, WiFiClient &client, const String &url) {
+    if (!isPrivateLanTelemetryUrl(url)) {
+        showTelemetryError("Device URL must use HTTP with a private LAN IPv4 address.");
+        return false;
+    }
+    return http.begin(client, url);
 }
 
 void addTelemetryAuth(HTTPClient &http) {
@@ -140,24 +150,33 @@ void triggerNextAccount() {
 
     if (WiFi.status() == WL_CONNECTED) {
         HTTPClient http;
-        WiFiClient plainClient;
-        WiFiClientSecure secureClient;
         String nextUrl = String(TELEMETRY_SERVER_URL);
         nextUrl.replace("/api/v1/cyd-status", "/api/v1/next-account");
-        if (!beginTelemetryRequest(http, plainClient, secureClient, nextUrl)) {
+        if (!beginTelemetryRequest(http, telemetryPlainClient, nextUrl)) {
             digitalWrite(LED_BLUE, HIGH);
             return;
         }
-        http.setConnectTimeout(1500);
-        http.setTimeout(1500);
+        http.setReuse(true);
+        http.setConnectTimeout(TELEMETRY_CONNECT_TIMEOUT_MS);
+        http.setTimeout(TELEMETRY_READ_TIMEOUT_MS);
         addTelemetryAuth(http);
         int response = http.GET();
-        http.end();
         if (response >= 200 && response < 300) {
+            // The server returns the newly selected display state. Reuse that
+            // payload directly instead of issuing a second HTTP request.
+            prefetchedTelemetryPayload = http.getString();
+            http.end();
             fetchQuotaData();
         } else if (response == HTTP_CODE_UNAUTHORIZED) {
+            http.end();
             showTelemetryError("Device token was rejected by the monitor server.");
+        } else if (response < 0) {
+            Serial.printf("[NET] LAN request failed: HTTPClient=%d (%s)\n",
+                          response, HTTPClient::errorToString(response).c_str());
+            http.end();
+            showTelemetryError("Local monitor connection failed. Check LAN address and server.");
         } else {
+            http.end();
             showTelemetryError("Account switch failed with HTTP " + String(response) + ".");
         }
     }
@@ -180,8 +199,6 @@ void my_disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *c
 
 /* Touch Input Callback */
 void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
-    static bool wasPressed = false;
-
     if (millis() < 3000) {
         data->state = LV_INDEV_STATE_REL;
         return;
@@ -194,16 +211,17 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
             data->point.x = constrain(map(p.x, 200, 3700, 0, 319), 0, 319);
             data->point.y = constrain(map(p.y, 240, 3800, 0, 239), 0, 239);
 
-            if (!wasPressed) {
-                wasPressed = true;
-                nextAccountRequested = true;
-            }
             return;
         }
     }
 
     data->state = LV_INDEV_STATE_REL;
-    wasPressed = false;
+}
+
+void nextAccountButtonEvent(lv_event_t *event) {
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        nextAccountRequested = true;
+    }
 }
 
 void showTelemetryError(const String &detail) {
@@ -219,7 +237,7 @@ void showTelemetryError(const String &detail) {
     lv_obj_clear_flag(card_error, LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text(lbl_account_name, "Usage unavailable");
     lv_label_set_text(lbl_error_detail, detail.c_str());
-    lv_obj_set_style_text_color(lbl_wifi_icon, lv_color_hex(0xEF4444), LV_PART_MAIN);
+    lv_obj_set_style_text_color(lbl_next_icon, lv_color_hex(0xEF4444), LV_PART_MAIN);
 }
 
 void buildDashboardUI() {
@@ -242,14 +260,23 @@ void buildDashboardUI() {
     lv_label_set_text(lbl_account_name, "Loading Account...");
     lv_obj_set_style_text_color(lbl_account_name, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_account_name, &lv_font_montserrat_16, LV_PART_MAIN);
-    lv_obj_set_size(lbl_account_name, 250, 24);
+    lv_obj_set_size(lbl_account_name, 246, 24);
     lv_label_set_long_mode(lbl_account_name, LV_LABEL_LONG_DOT);
     lv_obj_set_pos(lbl_account_name, 36, 4);
 
-    lbl_wifi_icon = lv_label_create(scr_dashboard);
-    lv_label_set_text(lbl_wifi_icon, LV_SYMBOL_WIFI);
-    lv_obj_set_style_text_color(lbl_wifi_icon, lv_color_hex(0x10B981), LV_PART_MAIN);
-    lv_obj_set_pos(lbl_wifi_icon, 296, 5);
+    btn_next_account = lv_btn_create(scr_dashboard);
+    lv_obj_set_size(btn_next_account, 28, 26);
+    lv_obj_set_pos(btn_next_account, 290, 1);
+    lv_obj_set_style_radius(btn_next_account, 6, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn_next_account, lv_color_hex(0x17212A), LV_PART_MAIN);
+    lv_obj_set_style_border_color(btn_next_account, lv_color_hex(0x334155), LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn_next_account, 1, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(btn_next_account, 0, LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_next_account, nextAccountButtonEvent, LV_EVENT_CLICKED, NULL);
+    lbl_next_icon = lv_label_create(btn_next_account);
+    lv_label_set_text(lbl_next_icon, LV_SYMBOL_NEXT);
+    lv_obj_set_style_text_color(lbl_next_icon, lv_color_hex(0x10B981), LV_PART_MAIN);
+    lv_obj_center(lbl_next_icon);
 
     // --- ChatGPT Card 1: Primary Quota ---
     card_primary = lv_obj_create(scr_dashboard);
@@ -537,29 +564,35 @@ void fetchQuotaData() {
         return;
     }
 
-    lv_obj_set_style_text_color(lbl_wifi_icon, lv_color_hex(0x10B981), LV_PART_MAIN);
+    lv_obj_set_style_text_color(lbl_next_icon, lv_color_hex(0x10B981), LV_PART_MAIN);
 
     HTTPClient http;
-    WiFiClient plainClient;
-    WiFiClientSecure secureClient;
-    if (!beginTelemetryRequest(http, plainClient, secureClient, TELEMETRY_SERVER_URL)) {
-        return;
+    String payload;
+    int httpCode = HTTP_CODE_OK;
+    if (prefetchedTelemetryPayload.length() > 0) {
+        payload = prefetchedTelemetryPayload;
+        prefetchedTelemetryPayload = "";
+    } else {
+        if (!beginTelemetryRequest(http, telemetryPlainClient, TELEMETRY_SERVER_URL)) {
+            return;
+        }
+        http.setReuse(true);
+        http.setConnectTimeout(TELEMETRY_CONNECT_TIMEOUT_MS);
+        http.setTimeout(TELEMETRY_READ_TIMEOUT_MS);
+        addTelemetryAuth(http);
+        httpCode = http.GET();
     }
-    http.setReuse(false);
-    http.setConnectTimeout(3000);
-    http.setTimeout(3000);
-    addTelemetryAuth(http);
-
-    int httpCode = http.GET();
 
     if (httpCode == HTTP_CODE_OK) {
-        int payloadSize = http.getSize();
+        int payloadSize = payload.length() > 0 ? static_cast<int>(payload.length()) : http.getSize();
         if (payloadSize > static_cast<int>(MAX_TELEMETRY_BYTES)) {
             http.end();
             showTelemetryError("Monitor response exceeded the safe size limit.");
             return;
         }
-        String payload = http.getString();
+        if (payload.length() == 0) {
+            payload = http.getString();
+        }
         if (payload.length() > MAX_TELEMETRY_BYTES) {
             http.end();
             showTelemetryError("Monitor response exceeded the safe size limit.");
@@ -737,7 +770,9 @@ void fetchQuotaData() {
     } else if (httpCode > 0) {
         showTelemetryError("Monitor request failed with HTTP " + String(httpCode) + ".");
     } else {
-        showTelemetryError("Monitor connection failed: " + http.errorToString(httpCode) + ".");
+        Serial.printf("[NET] LAN request failed: HTTPClient=%d (%s)\n",
+                      httpCode, HTTPClient::errorToString(httpCode).c_str());
+        showTelemetryError("Local monitor connection failed. Check LAN address and server.");
     }
     http.end();
 }
@@ -795,7 +830,15 @@ void setup() {
         attempts++;
     }
     digitalWrite(LED_BLUE, HIGH);
-    lastFetchTime = millis() - FETCH_INTERVAL;
+
+    // Establish and validate the reusable secure session before the normal
+    // interaction loop begins. Once the dashboard becomes interactive,
+    // touch and serial actions use the already-open connection.
+    lv_timer_handler();
+    delay(5);
+    fetchQuotaData();
+    lv_timer_handler();
+    lastFetchTime = millis();
 }
 
 void loop() {

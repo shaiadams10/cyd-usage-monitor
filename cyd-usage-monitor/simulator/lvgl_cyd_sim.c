@@ -9,7 +9,7 @@
 
 static lv_color_t buffer[SCREEN_W * 24];
 static lv_disp_draw_buf_t draw_buffer;
-static lv_obj_t *mascot, *ag_mascot, *header, *plan, *primary_card, *details_card, *error_card, *error_title, *error_detail, *primary_value, *primary_tag, *primary_sub, *primary_warn, *primary_bar, *credits, *server_status;
+static lv_obj_t *mascot, *ag_mascot, *header, *next_button, *next_icon, *plan, *primary_card, *details_card, *error_card, *error_title, *error_detail, *primary_value, *primary_tag, *primary_sub, *primary_warn, *primary_bar, *credits, *server_status;
 static lv_obj_t *grid, *gemini_heading, *claude_heading, *g5, *gw, *c5, *cw;
 
 EM_JS(void, canvas_blit, (int x, int y, int width, int height, const uint16_t *pixels), {
@@ -149,9 +149,22 @@ EMSCRIPTEN_KEEPALIVE void cyd_init(void) {
   lv_label_set_text(header, "Waiting for collector");
   lv_obj_set_style_text_color(header, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
   lv_obj_set_style_text_font(header, &lv_font_montserrat_16, LV_PART_MAIN);
-  lv_obj_set_size(header, 230, 20);
+  lv_obj_set_size(header, 246, 20);
   lv_label_set_long_mode(header, LV_LABEL_LONG_DOT);
   lv_obj_set_pos(header, 36, 4);
+
+  next_button = lv_btn_create(screen);
+  lv_obj_set_size(next_button, 28, 26);
+  lv_obj_set_pos(next_button, 290, 1);
+  lv_obj_set_style_radius(next_button, 6, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(next_button, lv_color_hex(0x17212A), LV_PART_MAIN);
+  lv_obj_set_style_border_color(next_button, lv_color_hex(0x334155), LV_PART_MAIN);
+  lv_obj_set_style_border_width(next_button, 1, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(next_button, 0, LV_PART_MAIN);
+  next_icon = lv_label_create(next_button);
+  lv_label_set_text(next_icon, LV_SYMBOL_NEXT);
+  lv_obj_set_style_text_color(next_icon, lv_color_hex(0x10B981), LV_PART_MAIN);
+  lv_obj_center(next_icon);
   plan = lv_label_create(screen);
   lv_label_set_text(plan, LV_SYMBOL_WIFI);
   lv_obj_set_style_text_color(plan, lv_color_hex(0x10B981), LV_PART_MAIN);
