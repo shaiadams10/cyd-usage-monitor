@@ -38,7 +38,7 @@ try {
     '-I' $PSScriptRoot '-I' (Join-Path $lvgl 'src') '-DLV_CONF_INCLUDE_SIMPLE' `
     "-ffile-prefix-map=$projectRoot=." `
     '-s' 'WASM=1' '-s' 'MODULARIZE=1' '-s' 'EXPORT_NAME=createCydLvgl' '-s' 'ENVIRONMENT=web' `
-    '-s' 'EXPORTED_FUNCTIONS=["_cyd_init","_cyd_tick","_cyd_set_codex","_cyd_set_antigravity","_cyd_set_error"]' `
+    '-s' 'EXPORTED_FUNCTIONS=["_cyd_init","_cyd_tick","_cyd_pointer","_cyd_publish_provider_mascots","_cyd_set_codex","_cyd_set_antigravity","_cyd_set_error","_cyd_set_openrouter"]' `
     '-s' 'EXPORTED_RUNTIME_METHODS=["ccall"]' '-s' 'ALLOW_MEMORY_GROWTH=1' '-O3' `
     '-o' (Join-Path $output 'cyd_lvgl.js')
 } finally {

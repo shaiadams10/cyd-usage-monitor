@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include <SPI.h>
 #include <TFT_eSPI.h>
@@ -23,8 +22,11 @@
 #define LED_BLUE 17
 
 TFT_eSPI tft = TFT_eSPI();
-SPIClass touchSPI = SPIClass(VSPI);
+// TFT_eSPI uses VSPI by default. The touch controller has its own CYD pins,
+// so place it on HSPI to avoid registering the same ESP32 APB callback twice.
+SPIClass touchSPI = SPIClass(HSPI);
 XPT2046_Touchscreen touch(XPT2046_CS, XPT2046_IRQ);
+WiFiClient telemetryPlainClient;
 
 // LVGL buffer
 static lv_disp_draw_buf_t draw_buf;
@@ -36,24 +38,75 @@ unsigned long lastFetchTime = 0;
 // three seconds, without triggering another provider CLI invocation.
 const unsigned long FETCH_INTERVAL = 3000;
 const size_t MAX_TELEMETRY_BYTES = 16384;
+const unsigned long TELEMETRY_CONNECT_TIMEOUT_MS = 3000;
+const unsigned long TELEMETRY_READ_TIMEOUT_MS = 5000;
 static volatile bool nextAccountRequested = false;
+static volatile bool openUsageRequested = false;
+static volatile bool openRouterRequested = false;
+static volatile bool homeRequested = false;
+static bool usageFetchPending = false;
+static bool touchInputReady = false;
+static unsigned long touchReleasedSince = 0;
+static unsigned long wifiBeginTime = 0;
+static unsigned long lastWifiUiUpdate = 0;
+static wl_status_t previousWifiStatus = WL_NO_SHIELD;
 
-#ifndef TELEMETRY_CA_CERT
-#define TELEMETRY_CA_CERT ""
-#endif
+enum class AppScreen : uint8_t {
+    MainMenu,
+    UsageMonitor,
+    OpenRouter,
+};
 
-#ifndef TELEMETRY_ALLOW_INSECURE_HTTP
-#define TELEMETRY_ALLOW_INSECURE_HTTP 0
-#endif
+enum class AppId : uint8_t {
+    UsageMonitor,
+    OpenRouter,
+};
+
+struct AppDescriptor {
+    AppId id;
+    const char *title;
+    const char *subtitle;
+    uint32_t accent;
+};
+
+static AppScreen activeScreen = AppScreen::MainMenu;
+static const AppDescriptor launcherApps[] = {
+    {AppId::UsageMonitor, "Usage Monitor", "AI quota dashboard", 0xC4B5FD},
+    {AppId::OpenRouter, "OpenRouter", "Credits & spend", 0xA7F3D0},
+};
+
+// A compact 56x56 RGB565 canvas (6,272 bytes) provides a custom app icon
+// without paying the roughly 150 KB cost of a full-screen canvas.
+static lv_color_t launcherIconBuffer[56 * 56];
+static lv_point_t openRouterRoutePoints[] = {{4, 36}, {15, 15}, {30, 31}, {44, 10}};
+
+// Launcher Screen & Widgets
+static lv_obj_t *scr_launcher;
+static lv_obj_t *launcher_wifi_pill;
+static lv_obj_t *launcher_wifi_dot;
+static lv_obj_t *launcher_wifi_label;
 
 // Dashboard Screen & Widgets
 static lv_obj_t *scr_dashboard;
+static lv_obj_t *scr_openrouter;
+static lv_obj_t *or_balance_arc;
+static lv_obj_t *or_balance_value;
+static lv_obj_t *or_account_label;
+static lv_obj_t *or_today_value;
+static lv_obj_t *or_week_value;
+static lv_obj_t *or_month_value;
+static lv_obj_t *or_chart;
+static lv_chart_series_t *or_chart_series;
+static lv_obj_t *or_top_model;
+static lv_obj_t *or_state_label;
 
 // Header Widgets
 static lv_obj_t *header_img;
 static lv_obj_t *lbl_ag_mascot;
 static lv_obj_t *lbl_account_name;
-static lv_obj_t *lbl_wifi_icon;
+static lv_obj_t *btn_home;
+static lv_obj_t *btn_next_account;
+static lv_obj_t *lbl_next_icon;
 
 // Card 1: Primary Quota (Weekly / Monthly Limit)
 static lv_obj_t *card_primary;
@@ -103,27 +156,55 @@ static lv_obj_t *lbl_ticker;
 
 String accountName = "ChatGPT User";
 String extraCredits = "None";
+String prefetchedTelemetryPayload;
 
 void fetchQuotaData();
+void fetchOpenRouterData();
 void showTelemetryError(const String &detail);
+void showLauncherScreen();
+void showUsageMonitorScreen();
+void showOpenRouterScreen();
 
-bool beginTelemetryRequest(HTTPClient &http, WiFiClient &plainClient, WiFiClientSecure &secureClient, const String &url) {
-    if (url.startsWith("https://")) {
-        if (String(TELEMETRY_CA_CERT).length() == 0) {
-            showTelemetryError("HTTPS is configured, but TELEMETRY_CA_CERT is empty.");
-            return false;
-        }
-        secureClient.setCACert(TELEMETRY_CA_CERT);
-        secureClient.setHandshakeTimeout(5);
-        return http.begin(secureClient, url);
+void printSimulatorKeybinds() {
+    Serial.println();
+    Serial.println("[KEYS] Wokwi touch shortcuts");
+    Serial.println("[KEYS] U  Open Usage Monitor");
+    Serial.println("[KEYS] O  Open OpenRouter");
+    Serial.println("[KEYS] H  Return Home");
+    Serial.println("[KEYS] N  Next account");
+    Serial.println("[KEYS] ?  Show this help");
+    Serial.println();
+}
+
+bool isPrivateLanTelemetryUrl(const String &url) {
+    if (!url.startsWith("http://")) {
+        return false;
     }
-#if TELEMETRY_ALLOW_INSECURE_HTTP
-    if (url.startsWith("http://")) {
-        return http.begin(plainClient, url);
+    const int authorityStart = 7;
+    int authorityEnd = url.indexOf('/', authorityStart);
+    if (authorityEnd < 0) {
+        authorityEnd = url.length();
     }
-#endif
-    showTelemetryError("Use HTTPS with a trusted CA, or explicitly allow private-LAN HTTP.");
-    return false;
+    String host = url.substring(authorityStart, authorityEnd);
+    const int portSeparator = host.indexOf(':');
+    if (portSeparator >= 0) {
+        host = host.substring(0, portSeparator);
+    }
+    unsigned int a, b, c, d;
+    char trailing;
+    if (sscanf(host.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &trailing) != 4 ||
+        a > 255 || b > 255 || c > 255 || d > 255) {
+        return false;
+    }
+    return a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168);
+}
+
+bool beginTelemetryRequest(HTTPClient &http, WiFiClient &client, const String &url) {
+    if (!isPrivateLanTelemetryUrl(url)) {
+        showTelemetryError("Device URL must use HTTP with a private LAN IPv4 address.");
+        return false;
+    }
+    return http.begin(client, url);
 }
 
 void addTelemetryAuth(HTTPClient &http) {
@@ -140,24 +221,33 @@ void triggerNextAccount() {
 
     if (WiFi.status() == WL_CONNECTED) {
         HTTPClient http;
-        WiFiClient plainClient;
-        WiFiClientSecure secureClient;
         String nextUrl = String(TELEMETRY_SERVER_URL);
         nextUrl.replace("/api/v1/cyd-status", "/api/v1/next-account");
-        if (!beginTelemetryRequest(http, plainClient, secureClient, nextUrl)) {
+        if (!beginTelemetryRequest(http, telemetryPlainClient, nextUrl)) {
             digitalWrite(LED_BLUE, HIGH);
             return;
         }
-        http.setConnectTimeout(1500);
-        http.setTimeout(1500);
+        http.setReuse(true);
+        http.setConnectTimeout(TELEMETRY_CONNECT_TIMEOUT_MS);
+        http.setTimeout(TELEMETRY_READ_TIMEOUT_MS);
         addTelemetryAuth(http);
         int response = http.GET();
-        http.end();
         if (response >= 200 && response < 300) {
+            // The server returns the newly selected display state. Reuse that
+            // payload directly instead of issuing a second HTTP request.
+            prefetchedTelemetryPayload = http.getString();
+            http.end();
             fetchQuotaData();
         } else if (response == HTTP_CODE_UNAUTHORIZED) {
+            http.end();
             showTelemetryError("Device token was rejected by the monitor server.");
+        } else if (response < 0) {
+            Serial.printf("[NET] LAN request failed: HTTPClient=%d (%s)\n",
+                          response, HTTPClient::errorToString(response).c_str());
+            http.end();
+            showTelemetryError("Local monitor connection failed. Check LAN address and server.");
         } else {
+            http.end();
             showTelemetryError("Account switch failed with HTTP " + String(response) + ".");
         }
     }
@@ -180,30 +270,269 @@ void my_disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *c
 
 /* Touch Input Callback */
 void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
-    static bool wasPressed = false;
+    bool pressed = false;
+    TS_Point point;
+    if (touch.touched()) {
+        point = touch.getPoint();
+        pressed = point.z > 200;
+    }
 
-    if (millis() < 3000) {
+    // Startup samples can look pressed on the XPT2046. Arm input only after
+    // a stable release, which suppresses phantom launches without imposing a
+    // fixed multi-second lockout on a legitimately ready touchscreen.
+    if (!touchInputReady) {
+        if (pressed) {
+            touchReleasedSince = 0;
+        } else if (touchReleasedSince == 0) {
+            touchReleasedSince = millis();
+        } else if (millis() - touchReleasedSince >= 100) {
+            touchInputReady = true;
+        }
         data->state = LV_INDEV_STATE_REL;
         return;
     }
 
-    if (touch.touched()) {
-        TS_Point p = touch.getPoint();
-        if (p.z > 200) {
-            data->state = LV_INDEV_STATE_PR;
-            data->point.x = constrain(map(p.x, 200, 3700, 0, 319), 0, 319);
-            data->point.y = constrain(map(p.y, 240, 3800, 0, 239), 0, 239);
-
-            if (!wasPressed) {
-                wasPressed = true;
-                nextAccountRequested = true;
-            }
-            return;
-        }
+    if (pressed) {
+        data->state = LV_INDEV_STATE_PR;
+        data->point.x = constrain(map(point.x, 200, 3700, 0, 319), 0, 319);
+        data->point.y = constrain(map(point.y, 240, 3800, 0, 239), 0, 239);
+        return;
     }
 
     data->state = LV_INDEV_STATE_REL;
-    wasPressed = false;
+}
+
+void launcherTileEvent(lv_event_t *event) {
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    const AppDescriptor *app = static_cast<const AppDescriptor *>(lv_event_get_user_data(event));
+    if (app != nullptr && app->id == AppId::UsageMonitor) {
+        openUsageRequested = true;
+    } else if (app != nullptr && app->id == AppId::OpenRouter) {
+        openRouterRequested = true;
+    }
+}
+
+void homeButtonEvent(lv_event_t *event) {
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        homeRequested = true;
+    }
+}
+
+void nextAccountButtonEvent(lv_event_t *event) {
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        nextAccountRequested = true;
+    }
+}
+
+void setLauncherWifiState(const char *text, uint32_t color) {
+    if (launcher_wifi_label == nullptr) {
+        return;
+    }
+    lv_label_set_text(launcher_wifi_label, text);
+    lv_obj_set_style_bg_color(launcher_wifi_dot, lv_color_hex(color), LV_PART_MAIN);
+    lv_obj_set_style_border_color(launcher_wifi_pill, lv_color_hex(color), LV_PART_MAIN);
+}
+
+void drawLauncherIcon(lv_obj_t *canvas, AppId id) {
+    lv_canvas_set_buffer(canvas, launcherIconBuffer, 56, 56, LV_IMG_CF_TRUE_COLOR_CHROMA_KEYED);
+    lv_canvas_fill_bg(canvas, LV_COLOR_CHROMA_KEY, LV_OPA_COVER);
+
+    lv_draw_arc_dsc_t arc;
+    lv_draw_arc_dsc_init(&arc);
+    arc.color = lv_color_hex(0xC4B5FD);
+    arc.width = 5;
+    arc.rounded = true;
+    lv_canvas_draw_arc(canvas, 28, 27, 20, 40, 320, &arc);
+
+    lv_draw_arc_dsc_t accentArc;
+    lv_draw_arc_dsc_init(&accentArc);
+    accentArc.color = lv_color_hex(0xA7F3D0);
+    accentArc.width = 5;
+    accentArc.rounded = true;
+    lv_canvas_draw_arc(canvas, 28, 27, 20, 40, 165, &accentArc);
+
+    const uint32_t barColors[] = {0xFBCFE8, 0xBAE6FD, 0xFDE68A};
+    const lv_coord_t barHeights[] = {8, 14, 20};
+    for (int i = 0; i < 3; ++i) {
+        lv_draw_rect_dsc_t bar;
+        lv_draw_rect_dsc_init(&bar);
+        bar.bg_color = lv_color_hex(barColors[i]);
+        bar.bg_opa = LV_OPA_COVER;
+        bar.radius = 2;
+        lv_canvas_draw_rect(canvas, 17 + i * 9, 45 - barHeights[i], 6, barHeights[i], &bar);
+    }
+}
+
+lv_obj_t *createLauncherTile(lv_obj_t *parent, const AppDescriptor *app) {
+    lv_obj_t *tile = lv_btn_create(parent);
+    lv_obj_set_size(tile, 142, 146);
+    lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(tile, lv_color_hex(0x282432), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_color(tile, lv_color_hex(0x202A31), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_dir(tile, LV_GRAD_DIR_VER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(tile, lv_color_hex(app->accent), LV_PART_MAIN);
+    lv_obj_set_style_border_width(tile, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(tile, 20, LV_PART_MAIN);
+    lv_obj_set_style_shadow_color(tile, lv_color_hex(0xA7F3D0), LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(tile, 18, LV_PART_MAIN);
+    lv_obj_set_style_shadow_opa(tile, LV_OPA_20, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(tile, 0, LV_PART_MAIN);
+    lv_obj_set_style_transform_zoom(tile, 242, LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(tile, lv_color_hex(0x332D42), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(tile, launcherTileEvent, LV_EVENT_CLICKED, const_cast<AppDescriptor *>(app));
+
+    if (app->id == AppId::UsageMonitor) {
+        lv_obj_t *canvas = lv_canvas_create(tile);
+        drawLauncherIcon(canvas, app->id);
+        lv_obj_align(canvas, LV_ALIGN_TOP_MID, 0, 10);
+    } else {
+        lv_obj_t *icon = lv_obj_create(tile);
+        lv_obj_set_size(icon, 56, 56);
+        lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 10);
+        lv_obj_clear_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(icon, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_border_width(icon, 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(icon, 4, LV_PART_MAIN);
+        lv_obj_t *route = lv_line_create(icon);
+        lv_line_set_points(route, openRouterRoutePoints, 4);
+        lv_obj_set_style_line_color(route, lv_color_hex(0xA7F3D0), LV_PART_MAIN);
+        lv_obj_set_style_line_width(route, 5, LV_PART_MAIN);
+        lv_obj_set_style_line_rounded(route, true, LV_PART_MAIN);
+        for (const lv_point_t &point : openRouterRoutePoints) {
+            lv_obj_t *node = lv_obj_create(icon);
+            lv_obj_set_size(node, 9, 9);
+            lv_obj_set_pos(node, point.x - 4, point.y - 4);
+            lv_obj_set_style_radius(node, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+            lv_obj_set_style_bg_color(node, lv_color_hex(0xC4B5FD), LV_PART_MAIN);
+            lv_obj_set_style_border_width(node, 0, LV_PART_MAIN);
+        }
+    }
+
+    lv_obj_t *title = lv_label_create(tile);
+    lv_label_set_text(title, app->title);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xF8FAFC), LV_PART_MAIN);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 74);
+
+    lv_obj_t *subtitle = lv_label_create(tile);
+    lv_label_set_text(subtitle, app->subtitle);
+    lv_obj_set_style_text_color(subtitle, lv_color_hex(0xC7D2FE), LV_PART_MAIN);
+    lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 99);
+
+    lv_obj_t *openLabel = lv_label_create(tile);
+    lv_label_set_text(openLabel, "Open  " LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_color(openLabel, lv_color_hex(0xA7F3D0), LV_PART_MAIN);
+    lv_obj_set_style_text_font(openLabel, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_align(openLabel, LV_ALIGN_BOTTOM_MID, 0, -8);
+
+    lv_obj_fade_in(tile, 220, 60);
+    return tile;
+}
+
+void buildLauncherUI() {
+    scr_launcher = lv_obj_create(NULL);
+    lv_obj_clear_flag(scr_launcher, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(scr_launcher, lv_color_hex(0x111217), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_color(scr_launcher, lv_color_hex(0x191622), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_dir(scr_launcher, LV_GRAD_DIR_VER, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(scr_launcher, 0, LV_PART_MAIN);
+
+    lv_obj_t *lavenderGlow = lv_obj_create(scr_launcher);
+    lv_obj_set_size(lavenderGlow, 92, 92);
+    lv_obj_set_pos(lavenderGlow, 266, -44);
+    lv_obj_set_style_radius(lavenderGlow, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(lavenderGlow, lv_color_hex(0xC4B5FD), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(lavenderGlow, LV_OPA_10, LV_PART_MAIN);
+    lv_obj_set_style_border_width(lavenderGlow, 0, LV_PART_MAIN);
+
+    lv_obj_t *mintGlow = lv_obj_create(scr_launcher);
+    lv_obj_set_size(mintGlow, 76, 76);
+    lv_obj_set_pos(mintGlow, -36, 196);
+    lv_obj_set_style_radius(mintGlow, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(mintGlow, lv_color_hex(0xA7F3D0), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(mintGlow, LV_OPA_10, LV_PART_MAIN);
+    lv_obj_set_style_border_width(mintGlow, 0, LV_PART_MAIN);
+
+    lv_obj_t *title = lv_label_create(scr_launcher);
+    lv_label_set_text(title, "CYD Apps");
+    lv_obj_set_style_text_color(title, lv_color_hex(0xF8FAFC), LV_PART_MAIN);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_set_pos(title, 16, 10);
+
+    lv_obj_t *subtitle = lv_label_create(scr_launcher);
+    lv_label_set_text(subtitle, "Choose an app");
+    lv_obj_set_style_text_color(subtitle, lv_color_hex(0xC7D2FE), LV_PART_MAIN);
+    lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_pos(subtitle, 18, 40);
+
+    launcher_wifi_pill = lv_obj_create(scr_launcher);
+    lv_obj_set_size(launcher_wifi_pill, 91, 27);
+    lv_obj_set_pos(launcher_wifi_pill, 216, 13);
+    lv_obj_clear_flag(launcher_wifi_pill, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(launcher_wifi_pill, lv_color_hex(0x202028), LV_PART_MAIN);
+    lv_obj_set_style_border_color(launcher_wifi_pill, lv_color_hex(0xFDE68A), LV_PART_MAIN);
+    lv_obj_set_style_border_width(launcher_wifi_pill, 1, LV_PART_MAIN);
+    lv_obj_set_style_radius(launcher_wifi_pill, 14, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(launcher_wifi_pill, 0, LV_PART_MAIN);
+
+    launcher_wifi_dot = lv_obj_create(launcher_wifi_pill);
+    lv_obj_set_size(launcher_wifi_dot, 8, 8);
+    lv_obj_set_pos(launcher_wifi_dot, 10, 8);
+    lv_obj_set_style_radius(launcher_wifi_dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(launcher_wifi_dot, lv_color_hex(0xFDE68A), LV_PART_MAIN);
+    lv_obj_set_style_border_width(launcher_wifi_dot, 0, LV_PART_MAIN);
+
+    launcher_wifi_label = lv_label_create(launcher_wifi_pill);
+    lv_label_set_text(launcher_wifi_label, "Connecting");
+    lv_obj_set_style_text_color(launcher_wifi_label, lv_color_hex(0xF8FAFC), LV_PART_MAIN);
+    lv_obj_set_style_text_font(launcher_wifi_label, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_pos(launcher_wifi_label, 24, 6);
+
+    lv_obj_t *grid = lv_obj_create(scr_launcher);
+    lv_obj_set_size(grid, 304, 170);
+    lv_obj_set_pos(grid, 8, 62);
+    lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(grid, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(grid, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(grid, 6, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(grid, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(grid, 8, LV_PART_MAIN);
+    lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    for (const AppDescriptor &app : launcherApps) {
+        createLauncherTile(grid, &app);
+    }
+}
+
+void showLauncherScreen() {
+    activeScreen = AppScreen::MainMenu;
+    usageFetchPending = false;
+    nextAccountRequested = false;
+    lv_scr_load_anim(scr_launcher, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 180, 0, false);
+}
+
+void showUsageMonitorScreen() {
+    activeScreen = AppScreen::UsageMonitor;
+    lv_scr_load_anim(scr_dashboard, LV_SCR_LOAD_ANIM_MOVE_LEFT, 180, 0, false);
+    if (WiFi.status() == WL_CONNECTED) {
+        usageFetchPending = true;
+    } else {
+        showTelemetryError("Wi-Fi is connecting. Usage will refresh automatically.");
+    }
+}
+
+void showOpenRouterScreen() {
+    activeScreen = AppScreen::OpenRouter;
+    lv_scr_load_anim(scr_openrouter, LV_SCR_LOAD_ANIM_MOVE_LEFT, 180, 0, false);
+    if (WiFi.status() == WL_CONNECTED) {
+        usageFetchPending = true;
+    } else {
+        lv_label_set_text(or_state_label, "Wi-Fi connecting · refresh is automatic");
+    }
 }
 
 void showTelemetryError(const String &detail) {
@@ -219,7 +548,7 @@ void showTelemetryError(const String &detail) {
     lv_obj_clear_flag(card_error, LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text(lbl_account_name, "Usage unavailable");
     lv_label_set_text(lbl_error_detail, detail.c_str());
-    lv_obj_set_style_text_color(lbl_wifi_icon, lv_color_hex(0xEF4444), LV_PART_MAIN);
+    lv_obj_set_style_text_color(lbl_next_icon, lv_color_hex(0xEF4444), LV_PART_MAIN);
 }
 
 void buildDashboardUI() {
@@ -242,14 +571,38 @@ void buildDashboardUI() {
     lv_label_set_text(lbl_account_name, "Loading Account...");
     lv_obj_set_style_text_color(lbl_account_name, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_account_name, &lv_font_montserrat_16, LV_PART_MAIN);
-    lv_obj_set_size(lbl_account_name, 250, 24);
+    lv_obj_set_size(lbl_account_name, 214, 24);
     lv_label_set_long_mode(lbl_account_name, LV_LABEL_LONG_DOT);
     lv_obj_set_pos(lbl_account_name, 36, 4);
 
-    lbl_wifi_icon = lv_label_create(scr_dashboard);
-    lv_label_set_text(lbl_wifi_icon, LV_SYMBOL_WIFI);
-    lv_obj_set_style_text_color(lbl_wifi_icon, lv_color_hex(0x10B981), LV_PART_MAIN);
-    lv_obj_set_pos(lbl_wifi_icon, 296, 5);
+    btn_home = lv_btn_create(scr_dashboard);
+    lv_obj_set_size(btn_home, 28, 26);
+    lv_obj_set_pos(btn_home, 258, 1);
+    lv_obj_set_style_radius(btn_home, 6, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn_home, lv_color_hex(0x2B2635), LV_PART_MAIN);
+    lv_obj_set_style_border_color(btn_home, lv_color_hex(0xC4B5FD), LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn_home, 1, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(btn_home, 0, LV_PART_MAIN);
+    lv_obj_set_style_transform_zoom(btn_home, 238, LV_STATE_PRESSED);
+    lv_obj_add_event_cb(btn_home, homeButtonEvent, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *homeIcon = lv_label_create(btn_home);
+    lv_label_set_text(homeIcon, LV_SYMBOL_HOME);
+    lv_obj_set_style_text_color(homeIcon, lv_color_hex(0xC4B5FD), LV_PART_MAIN);
+    lv_obj_center(homeIcon);
+
+    btn_next_account = lv_btn_create(scr_dashboard);
+    lv_obj_set_size(btn_next_account, 28, 26);
+    lv_obj_set_pos(btn_next_account, 290, 1);
+    lv_obj_set_style_radius(btn_next_account, 6, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn_next_account, lv_color_hex(0x17212A), LV_PART_MAIN);
+    lv_obj_set_style_border_color(btn_next_account, lv_color_hex(0x334155), LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn_next_account, 1, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(btn_next_account, 0, LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_next_account, nextAccountButtonEvent, LV_EVENT_CLICKED, NULL);
+    lbl_next_icon = lv_label_create(btn_next_account);
+    lv_label_set_text(lbl_next_icon, LV_SYMBOL_NEXT);
+    lv_obj_set_style_text_color(lbl_next_icon, lv_color_hex(0x10B981), LV_PART_MAIN);
+    lv_obj_center(lbl_next_icon);
 
     // --- ChatGPT Card 1: Primary Quota ---
     card_primary = lv_obj_create(scr_dashboard);
@@ -531,35 +884,178 @@ void buildDashboardUI() {
     lv_obj_align(lbl_ticker, LV_ALIGN_BOTTOM_MID, 0, -3);
 }
 
+lv_obj_t *createOpenRouterSpendCard(lv_obj_t *parent, const char *title, lv_coord_t x, lv_obj_t **value) {
+    lv_obj_t *card = lv_obj_create(parent);
+    lv_obj_set_size(card, 64, 72);
+    lv_obj_set_pos(card, x, 37);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x151D1C), LV_PART_MAIN);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x345048), LV_PART_MAIN);
+    lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
+    lv_obj_set_style_radius(card, 9, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, 6, LV_PART_MAIN);
+    lv_obj_t *caption = lv_label_create(card);
+    lv_label_set_text(caption, title);
+    lv_obj_set_style_text_color(caption, lv_color_hex(0x94A3B8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(caption, &lv_font_montserrat_12, LV_PART_MAIN);
+    *value = lv_label_create(card);
+    lv_label_set_text(*value, "$0.00");
+    lv_obj_set_style_text_color(*value, lv_color_hex(0xA7F3D0), LV_PART_MAIN);
+    lv_obj_set_style_text_font(*value, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(*value, LV_ALIGN_BOTTOM_LEFT, 0, -4);
+    return card;
+}
+
+void buildOpenRouterUI() {
+    scr_openrouter = lv_obj_create(NULL);
+    lv_obj_clear_flag(scr_openrouter, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(scr_openrouter, lv_color_hex(0x0B1110), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_color(scr_openrouter, lv_color_hex(0x171326), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_dir(scr_openrouter, LV_GRAD_DIR_VER, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(scr_openrouter, 0, LV_PART_MAIN);
+
+    or_account_label = lv_label_create(scr_openrouter);
+    lv_label_set_text(or_account_label, "OpenRouter");
+    lv_obj_set_size(or_account_label, 236, 24);
+    lv_label_set_long_mode(or_account_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(or_account_label, lv_color_hex(0xF8FAFC), LV_PART_MAIN);
+    lv_obj_set_style_text_font(or_account_label, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_set_pos(or_account_label, 12, 7);
+
+    lv_obj_t *home = lv_btn_create(scr_openrouter);
+    lv_obj_set_size(home, 28, 26);
+    lv_obj_set_pos(home, 286, 2);
+    lv_obj_set_style_radius(home, 6, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(home, lv_color_hex(0x20302C), LV_PART_MAIN);
+    lv_obj_set_style_border_color(home, lv_color_hex(0xA7F3D0), LV_PART_MAIN);
+    lv_obj_set_style_border_width(home, 1, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(home, 0, LV_PART_MAIN);
+    lv_obj_add_event_cb(home, homeButtonEvent, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *homeIcon = lv_label_create(home);
+    lv_label_set_text(homeIcon, LV_SYMBOL_HOME);
+    lv_obj_set_style_text_color(homeIcon, lv_color_hex(0xA7F3D0), LV_PART_MAIN);
+    lv_obj_center(homeIcon);
+
+    or_balance_arc = lv_arc_create(scr_openrouter);
+    lv_obj_set_size(or_balance_arc, 104, 104);
+    lv_obj_set_pos(or_balance_arc, 4, 34);
+    lv_arc_set_range(or_balance_arc, 0, 100);
+    lv_arc_set_bg_angles(or_balance_arc, 135, 45);
+    lv_arc_set_value(or_balance_arc, 0);
+    lv_obj_remove_style(or_balance_arc, NULL, LV_PART_KNOB);
+    lv_obj_clear_flag(or_balance_arc, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_width(or_balance_arc, 9, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(or_balance_arc, lv_color_hex(0x263330), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(or_balance_arc, 9, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(or_balance_arc, lv_color_hex(0xA7F3D0), LV_PART_INDICATOR);
+    or_balance_value = lv_label_create(or_balance_arc);
+    lv_label_set_text(or_balance_value, "$0.00");
+    lv_obj_set_style_text_color(or_balance_value, lv_color_hex(0xF8FAFC), LV_PART_MAIN);
+    lv_obj_set_style_text_font(or_balance_value, &lv_font_montserrat_20, LV_PART_MAIN);
+    lv_obj_align(or_balance_value, LV_ALIGN_CENTER, 0, -5);
+    lv_obj_t *remaining = lv_label_create(or_balance_arc);
+    lv_label_set_text(remaining, "remaining");
+    lv_obj_set_style_text_color(remaining, lv_color_hex(0x94A3B8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(remaining, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_align(remaining, LV_ALIGN_CENTER, 0, 17);
+
+    createOpenRouterSpendCard(scr_openrouter, "Today", 114, &or_today_value);
+    createOpenRouterSpendCard(scr_openrouter, "Week", 181, &or_week_value);
+    createOpenRouterSpendCard(scr_openrouter, "Month", 248, &or_month_value);
+
+    lv_obj_t *chartCard = lv_obj_create(scr_openrouter);
+    lv_obj_set_size(chartCard, 190, 78);
+    lv_obj_set_pos(chartCard, 4, 145);
+    lv_obj_clear_flag(chartCard, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(chartCard, lv_color_hex(0x121817), LV_PART_MAIN);
+    lv_obj_set_style_border_color(chartCard, lv_color_hex(0x2E403B), LV_PART_MAIN);
+    lv_obj_set_style_border_width(chartCard, 1, LV_PART_MAIN);
+    lv_obj_set_style_radius(chartCard, 9, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(chartCard, 5, LV_PART_MAIN);
+    lv_obj_t *chartTitle = lv_label_create(chartCard);
+    lv_label_set_text(chartTitle, "Last 7 completed days");
+    lv_obj_set_style_text_color(chartTitle, lv_color_hex(0x94A3B8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(chartTitle, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_pos(chartTitle, 2, -1);
+    or_chart = lv_chart_create(chartCard);
+    lv_obj_set_size(or_chart, 176, 48);
+    lv_obj_set_pos(or_chart, 1, 19);
+    lv_chart_set_type(or_chart, LV_CHART_TYPE_BAR);
+    lv_chart_set_point_count(or_chart, 7);
+    lv_chart_set_range(or_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+    lv_obj_set_style_bg_opa(or_chart, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(or_chart, 0, LV_PART_MAIN);
+    lv_obj_set_style_line_opa(or_chart, LV_OPA_20, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(or_chart, lv_color_hex(0xA7F3D0), LV_PART_ITEMS);
+    lv_obj_set_style_radius(or_chart, 3, LV_PART_ITEMS);
+    or_chart_series = lv_chart_add_series(or_chart, lv_color_hex(0xA7F3D0), LV_CHART_AXIS_PRIMARY_Y);
+    for (uint16_t i = 0; i < 7; ++i) lv_chart_set_value_by_id(or_chart, or_chart_series, i, 0);
+
+    lv_obj_t *modelCard = lv_obj_create(scr_openrouter);
+    lv_obj_set_size(modelCard, 117, 78);
+    lv_obj_set_pos(modelCard, 199, 145);
+    lv_obj_clear_flag(modelCard, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(modelCard, lv_color_hex(0x181526), LV_PART_MAIN);
+    lv_obj_set_style_border_color(modelCard, lv_color_hex(0x594D73), LV_PART_MAIN);
+    lv_obj_set_style_border_width(modelCard, 1, LV_PART_MAIN);
+    lv_obj_set_style_radius(modelCard, 9, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(modelCard, 7, LV_PART_MAIN);
+    lv_obj_t *modelTitle = lv_label_create(modelCard);
+    lv_label_set_text(modelTitle, "TOP MODEL - 7D");
+    lv_obj_set_style_text_color(modelTitle, lv_color_hex(0xC4B5FD), LV_PART_MAIN);
+    lv_obj_set_style_text_font(modelTitle, &lv_font_montserrat_12, LV_PART_MAIN);
+    or_top_model = lv_label_create(modelCard);
+    lv_label_set_text(or_top_model, "No completed usage");
+    lv_obj_set_size(or_top_model, 99, 43);
+    lv_label_set_long_mode(or_top_model, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(or_top_model, lv_color_hex(0xF8FAFC), LV_PART_MAIN);
+    lv_obj_set_style_text_font(or_top_model, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_pos(or_top_model, 0, 22);
+
+    or_state_label = lv_label_create(scr_openrouter);
+    lv_label_set_text(or_state_label, "Waiting for cached telemetry");
+    lv_obj_set_size(or_state_label, 300, 14);
+    lv_label_set_long_mode(or_state_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(or_state_label, lv_color_hex(0x94A3B8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(or_state_label, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_pos(or_state_label, 10, 224);
+}
+
 void fetchQuotaData() {
     if (WiFi.status() != WL_CONNECTED) {
         showTelemetryError("Wi-Fi is disconnected. The device will retry automatically.");
         return;
     }
 
-    lv_obj_set_style_text_color(lbl_wifi_icon, lv_color_hex(0x10B981), LV_PART_MAIN);
+    lv_obj_set_style_text_color(lbl_next_icon, lv_color_hex(0x10B981), LV_PART_MAIN);
 
     HTTPClient http;
-    WiFiClient plainClient;
-    WiFiClientSecure secureClient;
-    if (!beginTelemetryRequest(http, plainClient, secureClient, TELEMETRY_SERVER_URL)) {
-        return;
+    String payload;
+    int httpCode = HTTP_CODE_OK;
+    if (prefetchedTelemetryPayload.length() > 0) {
+        payload = prefetchedTelemetryPayload;
+        prefetchedTelemetryPayload = "";
+    } else {
+        if (!beginTelemetryRequest(http, telemetryPlainClient, TELEMETRY_SERVER_URL)) {
+            return;
+        }
+        http.setReuse(true);
+        http.setConnectTimeout(TELEMETRY_CONNECT_TIMEOUT_MS);
+        http.setTimeout(TELEMETRY_READ_TIMEOUT_MS);
+        addTelemetryAuth(http);
+        httpCode = http.GET();
     }
-    http.setReuse(false);
-    http.setConnectTimeout(3000);
-    http.setTimeout(3000);
-    addTelemetryAuth(http);
-
-    int httpCode = http.GET();
 
     if (httpCode == HTTP_CODE_OK) {
-        int payloadSize = http.getSize();
+        int payloadSize = payload.length() > 0 ? static_cast<int>(payload.length()) : http.getSize();
         if (payloadSize > static_cast<int>(MAX_TELEMETRY_BYTES)) {
             http.end();
             showTelemetryError("Monitor response exceeded the safe size limit.");
             return;
         }
-        String payload = http.getString();
+        if (payload.length() == 0) {
+            payload = http.getString();
+        }
         if (payload.length() > MAX_TELEMETRY_BYTES) {
             http.end();
             showTelemetryError("Monitor response exceeded the safe size limit.");
@@ -737,9 +1233,120 @@ void fetchQuotaData() {
     } else if (httpCode > 0) {
         showTelemetryError("Monitor request failed with HTTP " + String(httpCode) + ".");
     } else {
-        showTelemetryError("Monitor connection failed: " + http.errorToString(httpCode) + ".");
+        Serial.printf("[NET] LAN request failed: HTTPClient=%d (%s)\n",
+                      httpCode, HTTPClient::errorToString(httpCode).c_str());
+        showTelemetryError("Local monitor connection failed. Check LAN address and server.");
     }
     http.end();
+}
+
+void showOpenRouterError(const String &detail) {
+    lv_label_set_text(or_balance_value, "--");
+    lv_arc_set_value(or_balance_arc, 0);
+    lv_label_set_text(or_today_value, "--");
+    lv_label_set_text(or_week_value, "--");
+    lv_label_set_text(or_month_value, "--");
+    lv_label_set_text(or_top_model, detail.c_str());
+    lv_label_set_text(or_state_label, "Telemetry unavailable");
+    lv_obj_set_style_text_color(or_state_label, lv_color_hex(0xFBCFE8), LV_PART_MAIN);
+    for (uint16_t i = 0; i < 7; ++i) lv_chart_set_value_by_id(or_chart, or_chart_series, i, 0);
+    lv_chart_refresh(or_chart);
+}
+
+void fetchOpenRouterData() {
+    if (WiFi.status() != WL_CONNECTED) {
+        showOpenRouterError("Wi-Fi is disconnected");
+        return;
+    }
+    String url = String(TELEMETRY_SERVER_URL);
+    url.replace("/api/v1/cyd-status", "/api/v1/openrouter-status");
+    HTTPClient http;
+    if (!beginTelemetryRequest(http, telemetryPlainClient, url)) return;
+    http.setReuse(true);
+    http.setConnectTimeout(TELEMETRY_CONNECT_TIMEOUT_MS);
+    http.setTimeout(TELEMETRY_READ_TIMEOUT_MS);
+    addTelemetryAuth(http);
+    const int code = http.GET();
+    if (code != HTTP_CODE_OK) {
+        if (code == HTTP_CODE_UNAUTHORIZED) showOpenRouterError("Device token rejected");
+        else showOpenRouterError(code > 0 ? "Monitor returned HTTP " + String(code) : "Local monitor connection failed");
+        http.end();
+        return;
+    }
+    if (http.getSize() > static_cast<int>(MAX_TELEMETRY_BYTES)) {
+        http.end();
+        showOpenRouterError("Response exceeded safe size");
+        return;
+    }
+    String payload = http.getString();
+    http.end();
+    if (payload.length() > MAX_TELEMETRY_BYTES) {
+        showOpenRouterError("Response exceeded safe size");
+        return;
+    }
+    JsonDocument doc;
+    if (deserializeJson(doc, payload)) {
+        showOpenRouterError("Monitor returned invalid JSON");
+        return;
+    }
+    String status = doc["status"] | "error";
+    String label = doc["account_label"] | "OpenRouter";
+    lv_label_set_text(or_account_label, label.c_str());
+    if (status != "ok") {
+        String detail = status == "unconfigured" ? "Configure OpenRouter in dashboard" : String(doc["error"] | "Waiting for collector");
+        showOpenRouterError(detail);
+        return;
+    }
+    const float balance = doc["remaining_credits"] | 0.0f;
+    const int percent = constrain(static_cast<int>(roundf(doc["remaining_pct"] | 0.0f)), 0, 100);
+    const String balanceText = "$" + String(balance, 2);
+    const String today = "$" + String(static_cast<float>(doc["usage_today"] | 0.0f), 2);
+    const String week = "$" + String(static_cast<float>(doc["usage_week"] | 0.0f), 2);
+    const String month = "$" + String(static_cast<float>(doc["usage_month"] | 0.0f), 2);
+    lv_label_set_text(or_balance_value, balanceText.c_str());
+    lv_arc_set_value(or_balance_arc, percent);
+    lv_label_set_text(or_today_value, today.c_str());
+    lv_label_set_text(or_week_value, week.c_str());
+    lv_label_set_text(or_month_value, month.c_str());
+    String model = doc["top_model"]["name"] | "No completed usage";
+    lv_label_set_text(or_top_model, model.c_str());
+    JsonArray daily = doc["daily_usage"].as<JsonArray>();
+    float maximum = 0.0f;
+    for (JsonObject point : daily) maximum = max(maximum, static_cast<float>(point["usage"] | 0.0f));
+    for (uint16_t i = 0; i < 7; ++i) {
+        float value = i < daily.size() ? static_cast<float>(daily[i]["usage"] | 0.0f) : 0.0f;
+        int normalized = maximum > 0.0f ? static_cast<int>(roundf(value * 100.0f / maximum)) : 0;
+        lv_chart_set_value_by_id(or_chart, or_chart_series, i, normalized);
+    }
+    lv_chart_refresh(or_chart);
+    lv_label_set_text(or_state_label, "Cached OpenRouter API - refreshes every 90s");
+    lv_obj_set_style_text_color(or_state_label, lv_color_hex(0x94A3B8), LV_PART_MAIN);
+}
+
+void serviceWifiState() {
+    const wl_status_t status = WiFi.status();
+    const bool statusChanged = status != previousWifiStatus;
+    const bool becameConnected = status == WL_CONNECTED && previousWifiStatus != WL_CONNECTED;
+    const unsigned long now = millis();
+
+    if (becameConnected && (activeScreen == AppScreen::UsageMonitor || activeScreen == AppScreen::OpenRouter)) {
+        usageFetchPending = true;
+    }
+
+    if (statusChanged || now - lastWifiUiUpdate >= 500) {
+        lastWifiUiUpdate = now;
+        if (status == WL_CONNECTED) {
+            setLauncherWifiState("Online", 0xA7F3D0);
+            digitalWrite(LED_BLUE, HIGH);
+        } else if (now - wifiBeginTime < 15000) {
+            setLauncherWifiState("Connecting", 0xFDE68A);
+            digitalWrite(LED_BLUE, ((now / 500) % 2) ? HIGH : LOW);
+        } else {
+            setLauncherWifiState("Offline", 0xFBCFE8);
+            digitalWrite(LED_BLUE, HIGH);
+        }
+    }
+    previousWifiStatus = status;
 }
 
 void setup() {
@@ -780,22 +1387,23 @@ void setup() {
     indev_drv.read_cb = my_touchpad_read;
     lv_indev_drv_register(&indev_drv);
 
-    // Build Dashboard UI
+    // Build both persistent screens, then make the launcher the deterministic
+    // boot destination. App screens are never deleted during transitions.
+    buildLauncherUI();
     buildDashboardUI();
-    lv_scr_load(scr_dashboard);
+    buildOpenRouterUI();
+    lv_scr_load(scr_launcher);
+    lv_timer_handler();
 
-    // Wi-Fi Connection
+    // Start Wi-Fi without blocking the launcher. Connection state, recovery,
+    // and the first app fetch are serviced from loop().
     WiFi.persistent(false);
     WiFi.setAutoReconnect(true);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 15) {
-        delay(300);
-        digitalWrite(LED_BLUE, !digitalRead(LED_BLUE));
-        attempts++;
-    }
-    digitalWrite(LED_BLUE, HIGH);
-    lastFetchTime = millis() - FETCH_INTERVAL;
+    wifiBeginTime = millis();
+    previousWifiStatus = WiFi.status();
+    serviceWifiState();
+    printSimulatorKeybinds();
 }
 
 void loop() {
@@ -804,18 +1412,69 @@ void loop() {
 
     if (Serial.available()) {
         char c = Serial.read();
-        if (c == 'n' || c == 'N' || c == ' ') {
-            triggerNextAccount();
+        if (c == 'u' || c == 'U') {
+            if (activeScreen == AppScreen::MainMenu) {
+                Serial.println("[KEY] U -> Usage Monitor");
+                openUsageRequested = true;
+            }
+        } else if (c == 'o' || c == 'O') {
+            if (activeScreen == AppScreen::MainMenu) {
+                Serial.println("[KEY] O -> OpenRouter");
+                openRouterRequested = true;
+            }
+        } else if (c == 'h' || c == 'H') {
+            if (activeScreen != AppScreen::MainMenu) {
+                Serial.println("[KEY] H -> Home");
+                homeRequested = true;
+            }
+        } else if (c == 'n' || c == 'N' || c == ' ') {
+            if (activeScreen == AppScreen::UsageMonitor) {
+                Serial.println("[KEY] N -> Next account");
+                nextAccountRequested = true;
+            } else {
+                Serial.println("[KEY] Open Usage Monitor before switching accounts.");
+            }
+        } else if (c == '?') {
+            printSimulatorKeybinds();
         }
     }
 
-    if (nextAccountRequested) {
+    if (homeRequested) {
+        homeRequested = false;
+        if (activeScreen != AppScreen::MainMenu) {
+            showLauncherScreen();
+        }
+    }
+
+    if (openUsageRequested) {
+        openUsageRequested = false;
+        if (activeScreen == AppScreen::MainMenu) {
+            showUsageMonitorScreen();
+        }
+    }
+
+    if (openRouterRequested) {
+        openRouterRequested = false;
+        if (activeScreen == AppScreen::MainMenu) {
+            showOpenRouterScreen();
+        }
+    }
+
+    serviceWifiState();
+
+    if (nextAccountRequested && activeScreen == AppScreen::UsageMonitor) {
         nextAccountRequested = false;
         triggerNextAccount();
     }
 
-    if (millis() - lastFetchTime >= FETCH_INTERVAL) {
+    if (usageFetchPending && activeScreen != AppScreen::MainMenu) {
+        usageFetchPending = false;
+        if (activeScreen == AppScreen::UsageMonitor) fetchQuotaData();
+        else fetchOpenRouterData();
         lastFetchTime = millis();
-        fetchQuotaData();
+    } else if (activeScreen != AppScreen::MainMenu && millis() - lastFetchTime >= FETCH_INTERVAL) {
+        lastFetchTime = millis();
+        if (activeScreen == AppScreen::UsageMonitor) fetchQuotaData();
+        else fetchOpenRouterData();
     }
 }

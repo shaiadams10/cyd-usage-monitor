@@ -2,6 +2,77 @@
 
 ## Unreleased
 
+- Fixed the WebAssembly CI smoke test to validate the stable semantic module
+  exports exposed by the generated Emscripten wrapper instead of brittle,
+  optimization-dependent raw WASM export letters.
+- Fixed Usage Monitor pointer handling in the browser LVGL preview by keeping
+  the full-screen Antigravity content layer behind its Home and Next controls,
+  and connected Next to the dashboard's active-profile selection.
+- Tightened the Accounts layout: all four isolated-profile actions remain on
+  one row, the redundant connected/quota text was removed, and the OpenRouter
+  removal action now sits as a compact header control.
+- Added an independent OpenRouter launcher app with an LVGL balance arc,
+  today/week/month spend cards, a seven-day bar chart, and top-model summary on
+  both the physical CYD and interactive WebAssembly preview. The host collector
+  now aggregates documented OpenRouter credits, key usage, and completed-day
+  activity using a dashboard-managed Management API key kept in private
+  runtime storage; new route-isolated APIs expose only normalized telemetry.
+- Added protected OpenRouter setup, replacement, removal, overview telemetry,
+  collector aggregation tests, device/API security tests, and the `O` Wokwi
+  shortcut. OpenRouter remains independent from Codex/Antigravity profile
+  selection and performs no account or key mutations.
+- Added semantic Wokwi serial shortcuts that simulate the launcher and Usage
+  Monitor touch targets: `U` opens Usage Monitor, `H` returns Home, `N` switches
+  accounts, and `?` prints help. Renamed the dashboard Flash tab to
+  **Utilities** and added the same keybind cheat sheet above the flashing guide.
+  The live LVGL preview now stays centered in the right rail at normal desktop
+  widths, renders slightly larger for inspection, and uses simulator-only
+  Antigravity grid gutters so its right and bottom card borders are not clipped.
+- Added a pastel LVGL app launcher as the deterministic CYD boot screen, with
+  a compact Canvas-drawn Usage Monitor icon, reusable app descriptors, animated
+  tile/screen transitions, background Wi-Fi connection, app-scoped polling,
+  release-latched touch startup, and a Home control. The WebAssembly preview is
+  now pointer-interactive and mirrors launcher navigation.
+- Restored fast LAN-only CYD and Wokwi telemetry: the server now has isolated
+  dashboard and device listeners, Compose binds the Bearer-protected device API
+  only to a configured private address, firmware rejects non-RFC1918 endpoints,
+  and only the browser dashboard remains available through Cloudflare Access.
+- Removed device-side TLS certificates, NTP, Cloudflare Service Auth headers,
+  and the separate Wokwi TLS build; local polling and account switches now use
+  the same short-timeout HTTP/1.1 path on physical and simulated displays.
+- Replaced the rotating Wokwi leaf-certificate pin with normal leaf,
+  hostname, and time validation against the narrower long-lived GTS WE1
+  issuing CA; physical firmware retains public-root validation.
+- Added HTTP/1.1 connection reuse across CYD polls and account changes, and
+  made `next-account` return the new display payload so a switch needs only
+  one request and no repeated handshake.
+- Replaced whole-screen account switching with a dedicated header arrow
+  button, preventing ordinary touches and startup samples from issuing
+  unintended actions while retaining the `n`/space simulator shortcuts.
+- Fixed Cloudflare HTTPS validation by replacing the unrelated GlobalSign ECC
+  root with the Google Trust Services Root R4 trust anchor used by the live
+  edge chain, while keeping certificate verification fail-closed; added a
+  credential-free helper for checking a hostname against that root.
+- Moved the independently wired XPT2046 touch controller to HSPI while the
+  display remains on VSPI, eliminating the duplicate ESP32 APB callback warning.
+- Added an admin-protected dashboard **Flash** tab, a canonical CYD provisioning
+  guide, a protected Markdown documentation route, container packaging, and
+  regression coverage for guide authentication and availability.
+- Increased the ESP32 HTTPS, TLS-handshake, and NTP timeouts for Wokwi's slower
+  CPU/network emulation and added credential-safe serial diagnostics for
+  lower-level TLS failures without weakening certificate validation.
+- Added a hardened Cloudflare Tunnel deployment: the application now stays on
+  a private Compose network with no published host port, a pinned
+  `cloudflared` connector uses a separate runtime tunnel token, and documented
+  ingress separates the identity-protected dashboard from the route-limited
+  device API.
+- Added optional Cloudflare Access service-token headers to ESP32 requests and
+  bounded NTP synchronization before HTTPS certificate validation, retaining
+  the independent CYD Bearer token and fail-closed TLS behavior.
+- Added a public-safe deployment runbook covering the two-stage dashboard
+  login, private credential locations, remote-only Tunnel boundary,
+  verification matrix, rollback procedure, and pre-push secret checks.
+
 - Hardened dashboard and device authentication: enforced bounded secret
   lengths, kept the CYD API Bearer-only, added a separate Basic-authenticated
   admin preview endpoint, required JSON plus a custom CSRF header for

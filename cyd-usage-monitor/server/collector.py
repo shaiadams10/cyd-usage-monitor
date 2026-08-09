@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Host-side CLI collector for the CYD usage monitor.
+"""Host-side provider collector for the CYD usage monitor.
 
 Run this on the same host that owns the authenticated `codex` and `agy`
-profiles.  It never reads browser auth caches or calls provider HTTP APIs.
-It writes only normalized snapshots to the shared monitor data directory.
+profiles. It also reads OpenRouter's documented management API using a
+dashboard-managed key. It writes only normalized snapshots to shared storage.
 """
 from __future__ import annotations
 
@@ -46,11 +46,20 @@ PROFILES_FILE = DATA_DIR / "cli-profiles.json"
 CONTROL_FILE = DATA_DIR / "collector-control.json"
 RUNTIME_FILE = DATA_DIR / "collector-runtime.json"
 STATE_FILE = DATA_DIR / "telemetry.json"
+OPENROUTER_SECRET_FILE = DATA_DIR / "openrouter-secret.json"
+OPENROUTER_STATE_FILE = DATA_DIR / "openrouter-telemetry.json"
 ALERTS_FILE = DATA_DIR / "alert-status.json"
 SETTINGS_FILE = DATA_DIR / "monitor-settings.json"
 LOGIN_INPUT_DIR = DATA_DIR / ".login-inputs"
 PROFILE_ROOT = Path(os.environ.get("CYD_MONITOR_PROFILE_ROOT", "/profiles"))
 COLLECTION_LOCK = threading.Lock()
+OPENROUTER_API_ROOT = "https://openrouter.ai/api/v1"
+OPENROUTER_MAX_BYTES = 256 * 1024
+OPENROUTER_TIMEOUT_SECONDS = 15
+
+
+class OpenRouterError(RuntimeError):
+    """A credential-safe OpenRouter collection failure."""
 
 
 def bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -72,6 +81,116 @@ def utcnow() -> str:
 
 def utc_after(seconds: float) -> str:
     return (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
+
+
+def _money(value, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise OpenRouterError(f"OpenRouter response omitted numeric {field}")
+    return round(max(0.0, float(value)), 6)
+
+
+def openrouter_json(path: str, key: str) -> dict:
+    request = urlrequest.Request(
+        OPENROUTER_API_ROOT + path,
+        headers={"Authorization": "Bearer " + key, "Accept": "application/json"},
+    )
+    try:
+        with urlrequest.urlopen(request, timeout=OPENROUTER_TIMEOUT_SECONDS) as response:
+            declared = response.headers.get("Content-Length")
+            if declared and int(declared) > OPENROUTER_MAX_BYTES:
+                raise OpenRouterError("OpenRouter response exceeded the safe size limit")
+            raw = response.read(OPENROUTER_MAX_BYTES + 1)
+    except urlerror.HTTPError as error:
+        messages = {
+            401: "OpenRouter rejected the management key",
+            403: "OpenRouter management permissions are required",
+            429: "OpenRouter rate limit reached; collection will retry",
+        }
+        raise OpenRouterError(messages.get(error.code, f"OpenRouter returned HTTP {error.code}")) from None
+    except (urlerror.URLError, TimeoutError, OSError, ValueError):
+        raise OpenRouterError("OpenRouter could not be reached") from None
+    if len(raw) > OPENROUTER_MAX_BYTES:
+        raise OpenRouterError("OpenRouter response exceeded the safe size limit")
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise OpenRouterError("OpenRouter returned invalid JSON") from None
+    if not isinstance(payload, dict):
+        raise OpenRouterError("OpenRouter returned an unexpected response")
+    return payload
+
+
+def normalize_openrouter(credits_payload: dict, keys: list[dict], activity_payload: dict, label: str, now: dt.datetime | None = None) -> dict:
+    now = now or dt.datetime.now(dt.timezone.utc)
+    credits = credits_payload.get("data")
+    activity = activity_payload.get("data")
+    if not isinstance(credits, dict) or not isinstance(activity, list):
+        raise OpenRouterError("OpenRouter response omitted required data")
+    total_credits = _money(credits.get("total_credits"), "total credits")
+    total_usage = _money(credits.get("total_usage"), "total usage")
+    remaining = round(max(0.0, total_credits - total_usage), 6)
+    remaining_pct = round(min(100.0, remaining * 100.0 / total_credits), 1) if total_credits else 0.0
+
+    aggregates = {"usage_today": 0.0, "usage_week": 0.0, "usage_month": 0.0}
+    key_fields = {"usage_today": "usage_daily", "usage_week": "usage_weekly", "usage_month": "usage_monthly"}
+    for item in keys:
+        if not isinstance(item, dict):
+            raise OpenRouterError("OpenRouter returned invalid API key data")
+        for target, source in key_fields.items():
+            aggregates[target] += _money(item.get(source, 0), source)
+
+    completed = [(now.date() - dt.timedelta(days=offset)).isoformat() for offset in range(7, 0, -1)]
+    by_date = {day: 0.0 for day in completed}
+    by_model: dict[str, float] = {}
+    for item in activity:
+        if not isinstance(item, dict):
+            raise OpenRouterError("OpenRouter returned invalid activity data")
+        date = item.get("date")
+        if date not in by_date:
+            continue
+        usage = _money(item.get("usage", 0), "activity usage")
+        by_date[date] += usage
+        model = str(item.get("model") or "Unknown model")[:80]
+        by_model[model] = by_model.get(model, 0.0) + usage
+    top_name, top_usage = max(by_model.items(), key=lambda pair: pair[1], default=("No completed usage", 0.0))
+    return {
+        "provider": "openrouter", "status": "ok", "account_label": label or "OpenRouter",
+        "total_credits": total_credits, "total_usage": total_usage,
+        "remaining_credits": remaining, "remaining_pct": remaining_pct,
+        **{name: round(value, 6) for name, value in aggregates.items()},
+        "daily_usage": [{"date": day, "usage": round(by_date[day], 6)} for day in completed],
+        "top_model": {"name": top_name, "usage": round(top_usage, 6)},
+        "collected_at": now.isoformat().replace("+00:00", "Z"), "source": "OpenRouter API",
+    }
+
+
+def collect_openrouter() -> dict | None:
+    config = read_json(OPENROUTER_SECRET_FILE, {})
+    key = config.get("key") if isinstance(config, dict) else None
+    if not isinstance(key, str) or not key:
+        return None
+    try:
+        credits = openrouter_json("/credits", key)
+        keys: list[dict] = []
+        offset = 0
+        while True:
+            page = openrouter_json(f"/keys?include_disabled=true&offset={offset}", key).get("data")
+            if not isinstance(page, list):
+                raise OpenRouterError("OpenRouter response omitted API key data")
+            keys.extend(page)
+            if len(page) < 100:
+                break
+            offset += len(page)
+            if offset >= 10000:
+                raise OpenRouterError("OpenRouter API key list exceeded the safe limit")
+        snapshot = normalize_openrouter(credits, keys, openrouter_json("/activity", key), str(config.get("label", "OpenRouter")))
+    except OpenRouterError as error:
+        snapshot = {
+            "provider": "openrouter", "status": "error", "account_label": str(config.get("label", "OpenRouter"))[:80],
+            "error": str(error), "collected_at": utcnow(), "source": "OpenRouter API",
+        }
+    write_json(OPENROUTER_STATE_FILE, snapshot)
+    return snapshot
 
 
 def strip_terminal(text: str) -> str:
@@ -481,6 +600,8 @@ def collect_all(force_ids: set[str] | None = None) -> None:
             except Exception as error:
                 snapshot = error_snapshot(profile, error)
             persist_snapshot(profile, snapshot)
+        if force_ids is None:
+            collect_openrouter()
 
 
 def _panel_parses(parser: Callable[[str], dict], raw: str) -> bool:
@@ -742,6 +863,19 @@ def process_requests(sessions: dict[str, LoginSession]) -> None:
             except Exception as error:
                 scrub_runtime_record(record, status="error", phase="removal_failed", output=f"Profile credential deletion failed: {error}")
             records[request_id] = record
+            changed = True
+        elif kind == "collect_openrouter":
+            records[request_id] = {
+                "kind": kind, "status": "running", "phase": "collecting",
+                "updated_at": utcnow(), "output": "Collecting normalized OpenRouter usage.",
+            }
+            write_json(RUNTIME_FILE, runtime)
+            snapshot = collect_openrouter()
+            if snapshot and snapshot.get("status") == "ok":
+                scrub_runtime_record(records[request_id], status="completed", phase="ready", output="OpenRouter collection completed.")
+            else:
+                message = (snapshot or {}).get("error", "OpenRouter is not configured")
+                scrub_runtime_record(records[request_id], status="error", phase="collection_failed", output=message)
             changed = True
         elif kind == "test_alert":
             delivered, message = send_test_alert()

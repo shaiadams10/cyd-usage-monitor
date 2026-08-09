@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+import datetime as dt
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +15,67 @@ except ImportError:
 
 
 class CollectorParserTests(unittest.TestCase):
+    def test_normalizes_openrouter_account_usage_and_completed_days(self):
+        now = dt.datetime(2026, 8, 9, 12, tzinfo=dt.timezone.utc)
+        snapshot = collector.normalize_openrouter(
+            {"data": {"total_credits": 100.5, "total_usage": 25.75}},
+            [
+                {"usage_daily": 1.25, "usage_weekly": 4, "usage_monthly": 12},
+                {"usage_daily": 0.75, "usage_weekly": 2, "usage_monthly": 3},
+            ],
+            {"data": [
+                {"date": "2026-08-08", "model": "openai/gpt-5", "usage": 1.5},
+                {"date": "2026-08-08", "model": "anthropic/claude", "usage": 0.5},
+                {"date": "2026-08-03", "model": "openai/gpt-5", "usage": 2.0},
+                {"date": "2026-08-09", "model": "ignored/current-day", "usage": 99},
+            ]},
+            "Personal", now,
+        )
+        self.assertEqual(snapshot["remaining_credits"], 74.75)
+        self.assertEqual(snapshot["usage_today"], 2)
+        self.assertEqual(snapshot["usage_week"], 6)
+        self.assertEqual(snapshot["usage_month"], 15)
+        self.assertEqual(len(snapshot["daily_usage"]), 7)
+        self.assertEqual(snapshot["daily_usage"][0], {"date": "2026-08-02", "usage": 0.0})
+        self.assertEqual(snapshot["top_model"], {"name": "openai/gpt-5", "usage": 3.5})
+
+    def test_normalizes_openrouter_zero_and_overdrawn_balances(self):
+        now = dt.datetime(2026, 8, 9, tzinfo=dt.timezone.utc)
+        zero = collector.normalize_openrouter(
+            {"data": {"total_credits": 0, "total_usage": 0}}, [], {"data": []}, "Zero", now,
+        )
+        overdrawn = collector.normalize_openrouter(
+            {"data": {"total_credits": 10, "total_usage": 12}}, [], {"data": []}, "Over", now,
+        )
+        self.assertEqual(zero["remaining_pct"], 0)
+        self.assertEqual(overdrawn["remaining_credits"], 0)
+        self.assertEqual(overdrawn["top_model"]["name"], "No completed usage")
+
+    def test_openrouter_rejects_malformed_and_oversized_data(self):
+        with self.assertRaises(collector.OpenRouterError):
+            collector.normalize_openrouter({"data": {}}, [], {"data": []}, "Bad")
+
+    def test_openrouter_collection_paginates_and_sanitizes_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secret_file = Path(directory) / "secret.json"
+            state_file = Path(directory) / "state.json"
+            collector.write_json(secret_file, {"key": "never-return-this", "label": "Router"})
+            first_page = [{"usage_daily": 0, "usage_weekly": 0, "usage_monthly": 0}] * 100
+            responses = [
+                {"data": {"total_credits": 10, "total_usage": 2}},
+                {"data": first_page}, {"data": []}, {"data": []},
+            ]
+            with patch.object(collector, "OPENROUTER_SECRET_FILE", secret_file), patch.object(collector, "OPENROUTER_STATE_FILE", state_file), patch.object(collector, "openrouter_json", side_effect=responses) as request:
+                snapshot = collector.collect_openrouter()
+            self.assertEqual(snapshot["status"], "ok")
+            self.assertEqual(request.call_args_list[2].args[0], "/keys?include_disabled=true&offset=100")
+            self.assertNotIn("never-return-this", state_file.read_text(encoding="utf-8"))
+
+            with patch.object(collector, "OPENROUTER_SECRET_FILE", secret_file), patch.object(collector, "OPENROUTER_STATE_FILE", state_file), patch.object(collector, "openrouter_json", side_effect=collector.OpenRouterError("OpenRouter rejected the management key")):
+                failed = collector.collect_openrouter()
+            self.assertEqual(failed["status"], "error")
+            self.assertNotIn("never-return-this", json.dumps(failed))
+
     def test_parses_codex_status(self):
         snapshot = parse_codex_status("""
 Account:              demo-account (Free)

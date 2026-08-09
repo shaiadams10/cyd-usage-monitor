@@ -7,7 +7,11 @@ services:
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
     pids_limit: 128
-    network_mode: host
+    networks: [monitor-ingress]
+    ports:
+      # Publish only the device listener, and only on the operator-configured
+      # private LAN address. The dashboard listener remains Tunnel-only.
+      - "${CYD_LAN_BIND_ADDRESS:-127.0.0.1}:${CYD_LAN_PORT:-8001}:8001"
     restart: always
     stop_grace_period: 15s
     environment:
@@ -26,6 +30,22 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.7.2
+    init: true
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    restart: always
+    depends_on:
+      cyd-monitor-app:
+        condition: service_healthy
+    command: ["tunnel", "--no-autoupdate", "--loglevel", "info", "run"]
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN in .env}
+    networks: [monitor-ingress]
 
   cyd-monitor-collector:
     build: .
@@ -59,3 +79,7 @@ services:
       - ${NODE_BIN_HOST_DIR:?Set NODE_BIN_HOST_DIR in .env}:/opt/cyd-cli/node-bin:ro
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=64m
+
+networks:
+  monitor-ingress:
+    driver: bridge

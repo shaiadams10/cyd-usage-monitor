@@ -7,7 +7,7 @@
 #define LV_COLOR_16_SWAP 0
 
 #define LV_MEM_CUSTOM 0
-#define LV_MEM_SIZE (32U * 1024U)
+#define LV_MEM_SIZE (48U * 1024U)
 
 #define LV_TICK_CUSTOM 1
 #if LV_TICK_CUSTOM
@@ -29,12 +29,17 @@
 #define LV_USE_ARC 1
 #define LV_USE_BAR 1
 #define LV_USE_BTN 1
+#define LV_USE_CANVAS 1
+#define LV_USE_CHART 1
 #define LV_USE_LABEL 1
 #define LV_USE_LINE 1
 #define LV_USE_SLIDER 1
 #define LV_USE_SPAN 1
 #define LV_USE_TABVIEW 1
 #define LV_USE_ANIMIMG 1
+
+#define LV_USE_FLEX 1
+#define LV_USE_GRID 1
 
 #define LV_USE_THEME_DEFAULT 1
 #if LV_USE_THEME_DEFAULT
