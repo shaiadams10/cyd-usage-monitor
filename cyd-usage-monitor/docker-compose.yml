@@ -63,6 +63,7 @@ services:
       PYTHONDONTWRITEBYTECODE: "1"
       CYD_MONITOR_DATA_DIR: /app/data
       CYD_MONITOR_POLL_SECONDS: ${CYD_MONITOR_POLL_SECONDS:-90}
+      CYD_MONITOR_TIMEZONE: ${CYD_MONITOR_TIMEZONE:-UTC}
       CYD_MONITOR_PROFILE_ROOT: /profiles
       AGY_BIN: /opt/cyd-cli/agy
       CODEX_BIN: /opt/cyd-codex/node_modules/.bin/codex

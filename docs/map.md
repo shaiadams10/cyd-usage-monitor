@@ -14,12 +14,12 @@
 | `CONTRIBUTING.md` | Documentation | 2026-08-09 |
 | `cyd-usage-monitor/.dockerignore` | Project file | 2026-08-09 |
 | `cyd-usage-monitor/.env` | Environment variables (local) | 2026-08-09 |
-| `cyd-usage-monitor/.env.example` | Value-free server, private-LAN device listener, dashboard Tunnel, and alert configuration template | 2026-08-09 |
+| `cyd-usage-monitor/.env.example` | Value-free server, private-LAN listener, dashboard Tunnel, WAHA, and alert-timezone configuration template | 2026-08-09 |
 | `cyd-usage-monitor/.gitignore` | Git ignore patterns | 2026-08-09 |
 | `cyd-usage-monitor/AGENTS.md` | Project contract, documented OpenRouter read-API exception, and deployment boundary | 2026-08-09 |
 | `cyd-usage-monitor/CHANGELOG.md` | Unreleased and historical project changes | 2026-08-09 |
 | `cyd-usage-monitor/diagram.json` | JSON configuration | 2026-08-09 |
-| `cyd-usage-monitor/docker-compose.yml` | Hardened app/collector/Tunnel orchestration with a private-address-only device port | 2026-08-09 |
+| `cyd-usage-monitor/docker-compose.yml` | Hardened app/collector/Tunnel orchestration with private device binding and configurable alert timezone | 2026-08-09 |
 | `cyd-usage-monitor/Dockerfile` | Python 3.14 server image definition including the protected flashing guide artifact | 2026-08-09 |
 | `cyd-usage-monitor/include/lv_conf.h` | Physical LVGL 8.4 Canvas, Arc, Chart, layout, memory, font, and theme configuration | 2026-08-09 |
 | `cyd-usage-monitor/include/mascot_img.h` | Project file | 2026-08-09 |
@@ -30,14 +30,14 @@
 | `cyd-usage-monitor/instructions/TOKEN_GUIDE.md` | CLI provider, OpenRouter, Cloudflare, Tunnel, and device credential guide | 2026-08-09 |
 | `cyd-usage-monitor/platformio.ini` | Shared physical-CYD/Wokwi firmware target with pinned dependencies | 2026-08-09 |
 | `cyd-usage-monitor/README.md` | Project architecture, security, deployment, hardware, and development guide | 2026-08-09 |
-| `cyd-usage-monitor/server/collector.py` | CLI collector plus OpenRouter credits, key-usage, activity aggregation, pagination, and normalized persistence | 2026-08-09 |
-| `cyd-usage-monitor/server/dashboard.html` | Protected OpenRouter setup/status, compact account actions, overview, alerts, interactive two-app LVGL preview, and Utilities UI | 2026-08-09 |
-| `cyd-usage-monitor/server/server.py` | Route-isolated listeners with private OpenRouter configuration and normalized device/admin APIs | 2026-08-09 |
+| `cyd-usage-monitor/server/collector.py` | CLI/OpenRouter collector with normalized persistence, bounded incident history, redacted host evidence, and formatted WhatsApp alerts | 2026-08-09 |
+| `cyd-usage-monitor/server/dashboard.html` | Protected account/OpenRouter controls, incident diagnostics, alerts, interactive two-app LVGL preview, and Utilities UI | 2026-08-09 |
+| `cyd-usage-monitor/server/server.py` | Route-isolated listeners with private OpenRouter configuration and protected structured incident status | 2026-08-09 |
 | `cyd-usage-monitor/server/static/lvgl/cyd_lvgl.js` | Generated Emscripten loader for the interactive two-app LVGL preview | 2026-08-09 |
 | `cyd-usage-monitor/server/static/lvgl/cyd_lvgl.wasm` | Generated WebAssembly binary for launcher, Usage Monitor, OpenRouter, chart, and navigation rendering | 2026-08-09 |
 | `cyd-usage-monitor/server/storage.py` | Python module | 2026-08-09 |
-| `cyd-usage-monitor/server/test_collector.py` | Python module | 2026-08-09 |
-| `cyd-usage-monitor/server/test_server.py` | Server security, API, account-action layout, protected-documentation, and interactive LVGL control contract tests | 2026-08-09 |
+| `cyd-usage-monitor/server/test_collector.py` | Collector parser, privacy, incident lifecycle, evidence-redaction, and WhatsApp-format regression tests | 2026-08-09 |
+| `cyd-usage-monitor/server/test_server.py` | Server security, structured incident API, dashboard, protected-documentation, and interactive LVGL contract tests | 2026-08-09 |
 | `cyd-usage-monitor/server/test_storage.py` | Python module | 2026-08-09 |
 | `cyd-usage-monitor/server/__init__.py` | Python module | 2026-08-09 |
 | `cyd-usage-monitor/simulator/build-wasm.ps1` | Reproducible Emscripten 3.1.74 build exporting pointer input and Usage/OpenRouter render functions | 2026-08-09 |
@@ -79,7 +79,7 @@ Status: ✅ Active — deterministic source-only knowledge graph generated.
 - Data: [`graphify-out/graph.json`](../graphify-out/graph.json)
 - Scope: 12 tracked C/C++, Python, and PowerShell source files; generated
   assets, documentation, local secrets, and untracked files are excluded.
-- Result: 234 nodes, 502 edges, and 9 communities.
+- Result: 248 nodes, 536 edges, and 10 communities.
 - Model usage: none; extraction used Graphify's deterministic AST pipeline.
 
 Last generated: 2026-08-09

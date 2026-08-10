@@ -245,7 +245,23 @@ The collector can send one WhatsApp alert when a profile first fails and one
 recovery message after the next successful collection. Set `WAHA_URL`,
 `WAHA_API_KEY`, `WAHA_SESSION`, and `WAHA_ALERT_CHAT_ID` in the private `.env`
 file. The dashboard stores only the group routing ID; it never exposes the
-WAHA API key.
+WAHA API key. Set `CYD_MONITOR_TIMEZONE` to an IANA timezone such as
+`America/New_York` if alert timestamps should use local time; it defaults to
+UTC.
+
+Failure alerts use WhatsApp formatting and include the detection time, the
+observed parser/CLI symptom, privacy-safe capture counts, a diagnostic ID, the
+poll interval, and the exact automatic action that will occur. Recovery alerts
+report the interruption duration and distinguish a later successful poll from
+an actual reconnect or credential change.
+
+The protected dashboard's **Alerts** view retains the latest 50 structured
+incidents, including repeated failed-poll counts and recovery details. For
+deeper debugging, the collector keeps at most 50 redacted terminal captures as
+mode-`0600` JSON files under the private runtime data directory's
+`.collector-debug/` folder. These host-only captures are not returned by an API
+or sent to WhatsApp; use the alert's diagnostic ID to locate the matching file.
+URLs, email addresses, and long opaque values are redacted before storage.
 
 ## Development checks
 

@@ -63,7 +63,7 @@ class ServerApiTests(unittest.TestCase):
         app.write_json(app.CONTROL_FILE, {"requests": []})
         app.write_json(app.RUNTIME_FILE, {"requests": {}})
         app.write_json(app.STATE_FILE, {"profiles": {}})
-        for target in (app.OPENROUTER_SECRET_FILE, app.OPENROUTER_STATE_FILE):
+        for target in (app.OPENROUTER_SECRET_FILE, app.OPENROUTER_STATE_FILE, app.INCIDENTS_FILE):
             try:
                 target.unlink()
             except FileNotFoundError:
@@ -115,11 +115,25 @@ class ServerApiTests(unittest.TestCase):
         self.assertIn(b"pointerdown", dashboard)
         self.assertIn(b"window.cydPreviewNextAccount", dashboard)
         self.assertIn(b'class="button remove compact hidden"', dashboard)
+        self.assertIn(b"Incident history", dashboard)
+        self.assertIn(b"host evidence", dashboard)
         self.assertNotIn(b"account-meta", dashboard)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         status, body, _ = self.request("/api/admin/cyd-status")
         self.assertEqual(status, 200)
         self.assertEqual(body["status"], "error")
+
+    def test_collector_status_returns_structured_incidents_without_transcripts(self):
+        app.write_json(app.INCIDENTS_FILE, {"incidents": [{
+            "id": "safe-id", "profile_id": self.profile["id"], "provider": "codex",
+            "account": "Demo account", "status": "recovered", "started_at": "2026-08-10T00:53:00Z",
+            "recovered_at": "2026-08-10T00:54:30Z", "failed_polls": 1,
+            "explanation": "The status panel was incomplete.", "diagnostics": {"nonempty_lines": 12, "evidence_id": "abc123"},
+        }]})
+        status, body, _ = self.request("/api/v1/collector-status")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["incidents"]["incidents"][0]["diagnostics"]["evidence_id"], "abc123")
+        self.assertNotIn("transcript", json.dumps(body).lower())
 
     def test_wasm_usage_controls_stay_above_antigravity_content(self):
         source = (Path(__file__).resolve().parents[1] / "simulator" / "lvgl_cyd_sim.c").read_text(encoding="utf-8")

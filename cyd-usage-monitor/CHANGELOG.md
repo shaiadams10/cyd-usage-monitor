@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added durable, bounded collector incident history with privacy-safe terminal
+  evidence, host-only redacted diagnostic captures, repeated-poll counts,
+  recovery durations, and a protected Alerts dashboard timeline. Redesigned
+  WhatsApp alerts with clear emoji/formatting, observed failure evidence,
+  diagnostic IDs, configurable local timestamps, retry behavior, and explicit
+  recovery explanations that do not imply credentials were repaired when a
+  later poll simply succeeded.
 - Updated the pinned production server image from
   `python:3.11.15-slim-bookworm` to `python:3.14.0-slim-bookworm` and verified
   the current server test suite and container startup on Python 3.14.

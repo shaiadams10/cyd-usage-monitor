@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Callable
 from urllib import error as urlerror
 from urllib import request as urlrequest
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     from .storage import data_lock, read_json, read_json_unlocked, update_json, write_json, write_json_unlocked
@@ -49,8 +50,10 @@ STATE_FILE = DATA_DIR / "telemetry.json"
 OPENROUTER_SECRET_FILE = DATA_DIR / "openrouter-secret.json"
 OPENROUTER_STATE_FILE = DATA_DIR / "openrouter-telemetry.json"
 ALERTS_FILE = DATA_DIR / "alert-status.json"
+INCIDENTS_FILE = DATA_DIR / "collector-incidents.json"
 SETTINGS_FILE = DATA_DIR / "monitor-settings.json"
 LOGIN_INPUT_DIR = DATA_DIR / ".login-inputs"
+DEBUG_EVIDENCE_DIR = DATA_DIR / ".collector-debug"
 PROFILE_ROOT = Path(os.environ.get("CYD_MONITOR_PROFILE_ROOT", "/profiles"))
 COLLECTION_LOCK = threading.Lock()
 OPENROUTER_API_ROOT = "https://openrouter.ai/api/v1"
@@ -73,6 +76,12 @@ def bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
 
 
 POLL_SECONDS = bounded_int_env("CYD_MONITOR_POLL_SECONDS", 90, 60, 86400)
+INCIDENT_HISTORY_LIMIT = 50
+ALERT_TIMEZONE_NAME = os.environ.get("CYD_MONITOR_TIMEZONE", "UTC").strip() or "UTC"
+try:
+    ALERT_TIMEZONE = ZoneInfo(ALERT_TIMEZONE_NAME)
+except ZoneInfoNotFoundError as error:
+    raise RuntimeError(f"Unknown CYD_MONITOR_TIMEZONE: {ALERT_TIMEZONE_NAME}") from error
 
 
 def utcnow() -> str:
@@ -346,6 +355,58 @@ class CollectionError(RuntimeError):
         self.transcript = transcript
 
 
+def collection_diagnostics(error: Exception) -> dict:
+    """Return useful, credential-safe facts about a failed CLI capture."""
+    transcript = clean_terminal_transcript(error.transcript) if isinstance(error, CollectionError) else ""
+    lines = [line.strip() for line in transcript.splitlines() if line.strip()]
+    provider_error = next((
+        line for line in reversed(lines)
+        if re.search(r"\b(error|failed|timeout|timed out|network|offline|sign.?in|unauthenticated)\b", line, re.I)
+    ), "")
+    # A provider error line is useful, but URLs, email addresses, and long
+    # opaque values are never copied into telemetry, alerts, or the browser.
+    provider_error = re.sub(r"https?://\S+", "[url redacted]", provider_error)
+    provider_error = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[account redacted]", provider_error)
+    provider_error = re.sub(r"\b[A-Za-z0-9_-]{24,}\b", "[value redacted]", provider_error)
+    return {
+        "capture_chars": len(transcript),
+        "nonempty_lines": len(lines),
+        "account_field_seen": bool(re.search(r"^\s*Account:\s*\S", transcript, re.MULTILINE | re.I)),
+        "gemini_group_seen": bool(re.search(r"GEMINI MODELS", transcript, re.I)),
+        "claude_group_seen": bool(re.search(r"CLAUDE AND GPT MODELS", transcript, re.I)),
+        "authentication_prompt_seen": bool(re.search(r"sign.?in|log.?in|authenticate|authorization", transcript, re.I)),
+        "provider_error_hint": provider_error[:240],
+    }
+
+
+def archive_failure_evidence(profile: dict, error: Exception, diagnostics: dict) -> str:
+    """Save a bounded host-only transcript with likely sensitive values redacted."""
+    if not isinstance(error, CollectionError):
+        return ""
+    evidence_id = uuid.uuid4().hex[:12]
+    transcript = clean_terminal_transcript(error.transcript)
+    transcript = re.sub(r"https?://\S+", "[url redacted]", transcript)
+    transcript = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[account redacted]", transcript)
+    transcript = re.sub(r"\b[A-Za-z0-9_-]{24,}\b", "[value redacted]", transcript)
+    DEBUG_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(DEBUG_EVIDENCE_DIR, 0o700)
+    except OSError:
+        pass
+    write_json(DEBUG_EVIDENCE_DIR / f"{evidence_id}.json", {
+        "evidence_id": evidence_id, "captured_at": utcnow(), "profile_id": profile["id"],
+        "provider": profile["provider"], "error": str(error), "diagnostics": diagnostics,
+        "redacted_transcript": transcript,
+    })
+    evidence_files = sorted(DEBUG_EVIDENCE_DIR.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for expired in evidence_files[INCIDENT_HISTORY_LIMIT:]:
+        try:
+            expired.unlink()
+        except OSError:
+            pass
+    return evidence_id
+
+
 def profile_environment(profile: dict) -> dict[str, str]:
     profile_id = profile["id"]
     root = PROFILE_ROOT / profile_id
@@ -463,7 +524,16 @@ def collect_profile(profile: dict, include_transcript: bool = False, progress: C
 
 
 def error_snapshot(profile: dict, error: Exception) -> dict:
-    return {"profile_id": profile["id"], "label": profile.get("label", ""), "provider": profile["provider"], "status": "error", "error": str(error), "collected_at": utcnow(), "source": "CLI collector"}
+    diagnostics = collection_diagnostics(error)
+    try:
+        diagnostics["evidence_id"] = archive_failure_evidence(profile, error, diagnostics)
+    except (OSError, ValueError, TypeError) as storage_error:
+        diagnostics["evidence_storage"] = f"unavailable ({type(storage_error).__name__})"
+    return {
+        "profile_id": profile["id"], "label": profile.get("label", ""), "provider": profile["provider"],
+        "status": "error", "error": str(error), "diagnostics": diagnostics,
+        "collected_at": utcnow(), "source": "CLI collector",
+    }
 
 
 def waha_settings() -> dict:
@@ -489,6 +559,92 @@ def alert_title(profile: dict, snapshot: dict) -> str:
     if re.search(r"not signed in|sign.?in|auth", error, re.I):
         return "CLI authentication needs attention"
     return "CLI quota collection failed"
+
+
+def failure_explanation(profile: dict, snapshot: dict) -> str:
+    """Explain the observed failure without claiming an unknowable root cause."""
+    error = str(snapshot.get("error") or "Unknown collector error")
+    facts = snapshot.get("diagnostics") if isinstance(snapshot.get("diagnostics"), dict) else {}
+    if profile.get("provider") == "antigravity" and "account field" in error.lower():
+        if facts.get("gemini_group_seen") or facts.get("claude_group_seen"):
+            return "Antigravity returned a partial /usage screen: quota content appeared, but the Account row was missing."
+        if facts.get("authentication_prompt_seen"):
+            return "Antigravity showed an authentication prompt instead of a complete /usage screen."
+        if not facts.get("capture_chars"):
+            return "Antigravity produced no readable terminal output during the /usage capture."
+        return "Antigravity's /usage screen never rendered its required Account row during this capture."
+    if facts.get("provider_error_hint"):
+        return facts["provider_error_hint"]
+    return error
+
+
+def whatsapp_value(value: object) -> str:
+    """Prevent dynamic labels from accidentally changing WhatsApp formatting."""
+    return re.sub(r"[*_~`]", "", str(value)).strip()
+
+
+def display_time(value: str | None) -> str:
+    try:
+        parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.astimezone(ALERT_TIMEZONE).strftime("%b %d, %Y at %I:%M:%S %p %Z")
+    except (TypeError, ValueError):
+        return "Unknown time"
+
+
+def elapsed_text(start: str | None, end: str | None) -> str:
+    try:
+        first = dt.datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+        last = dt.datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+        seconds = max(0, round((last - first).total_seconds()))
+    except (TypeError, ValueError):
+        return "unknown duration"
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+def record_incident(profile: dict, previous: dict | None, snapshot: dict) -> None:
+    """Keep a bounded structured history; raw CLI transcripts never enter it."""
+    was_error = bool(previous and previous.get("status") == "error")
+    is_error = snapshot.get("status") == "error"
+
+    def update(history: dict) -> None:
+        incidents = history.setdefault("incidents", [])
+        if is_error and not was_error:
+            incidents.append({
+                "id": str(uuid.uuid4()), "profile_id": profile["id"], "provider": profile["provider"],
+                "account": snapshot.get("account_name") or profile.get("label") or f"{profile['provider'].title()} account",
+                "status": "open", "started_at": snapshot.get("collected_at"), "last_failure_at": snapshot.get("collected_at"),
+                "failed_polls": 1, "error": snapshot.get("error", "Unknown collector error"),
+                "explanation": failure_explanation(profile, snapshot), "diagnostics": snapshot.get("diagnostics", {}),
+            })
+        elif is_error and was_error:
+            active = next((item for item in reversed(incidents) if item.get("profile_id") == profile["id"] and item.get("status") == "open"), None)
+            if active:
+                active["last_failure_at"] = snapshot.get("collected_at")
+                active["failed_polls"] = int(active.get("failed_polls", 1)) + 1
+                active["error"] = snapshot.get("error", active.get("error"))
+                active["explanation"] = failure_explanation(profile, snapshot)
+                active["diagnostics"] = snapshot.get("diagnostics", {})
+        elif not is_error and was_error:
+            active = next((item for item in reversed(incidents) if item.get("profile_id") == profile["id"] and item.get("status") == "open"), None)
+            if active:
+                active["status"] = "recovered"
+                active["recovered_at"] = snapshot.get("collected_at")
+                active["duration_seconds"] = max(0, round((
+                    dt.datetime.fromisoformat(snapshot["collected_at"].replace("Z", "+00:00"))
+                    - dt.datetime.fromisoformat(active["started_at"].replace("Z", "+00:00"))
+                ).total_seconds()))
+                active["resolution"] = "A later scheduled poll read a complete CLI quota panel; no credentials or profile settings were changed."
+        history["incidents"] = incidents[-INCIDENT_HISTORY_LIMIT:]
+        history["updated_at"] = utcnow()
+
+    if is_error or was_error:
+        update_json(INCIDENTS_FILE, {"incidents": []}, update)
 
 
 def deliver_waha_message(event: str, message: str) -> tuple[bool, str]:
@@ -536,7 +692,10 @@ def deliver_waha_message(event: str, message: str) -> tuple[bool, str]:
 def send_test_alert() -> tuple[bool, str]:
     return deliver_waha_message(
         "test",
-        "CYD usage monitor test alert\nThis confirms the WAHA routing configured in the monitor dashboard.",
+        "🧪 *CYD Usage Monitor · Test*\n\n"
+        "✅ *WhatsApp delivery is working*\n"
+        "This confirms that WAHA, the selected session, and the monitor's group routing are connected.\n\n"
+        f"🕒 *Sent:* {display_time(utcnow())}",
     )
 
 
@@ -553,19 +712,32 @@ def notify_transition(profile: dict, previous: dict | None, snapshot: dict) -> N
     name = snapshot.get("account_name") or profile.get("label") or profile["provider"].title() + " account"
     if is_error:
         event = "failure"
+        facts = snapshot.get("diagnostics") if isinstance(snapshot.get("diagnostics"), dict) else {}
+        evidence = f"{facts.get('nonempty_lines', 0)} non-empty terminal lines / {facts.get('capture_chars', 0)} characters captured"
+        if facts.get("evidence_id"):
+            evidence += f" (diagnostic ID {whatsapp_value(facts['evidence_id'])})"
         message = (
-            "CYD usage monitor alert\n"
-            f"{alert_title(profile, snapshot)}\n"
-            f"Account: {name}\nProvider: {profile['provider']}\n"
-            f"Reason: {snapshot.get('error', 'unknown collector error')}\n"
-            "Open the protected monitor dashboard to reconnect or inspect the CLI transcript."
+            "🚨 *CYD Usage Monitor · Alert*\n\n"
+            f"❌ *{alert_title(profile, snapshot)}*\n"
+            f"👤 *Account:* {whatsapp_value(name)}\n"
+            f"🧩 *Provider:* {whatsapp_value(profile['provider'].title())}\n"
+            f"🕒 *Detected:* {display_time(snapshot.get('collected_at'))}\n\n"
+            f"❗ *Collector reason:* {whatsapp_value(snapshot.get('error', 'Unknown collector error'))}\n"
+            f"*What happened*\n{whatsapp_value(failure_explanation(profile, snapshot))}\n\n"
+            f"🔎 *Capture evidence:* {evidence}\n"
+            f"🔁 *Automatic action:* retry in the next collection cycle (configured every {POLL_SECONDS} seconds). No credentials were changed.\n\n"
+            "🛠️ If it keeps failing, open the protected dashboard → Alerts to inspect the incident history."
         )
     else:
         event = "recovery"
         message = (
-            "CYD usage monitor recovered\n"
-            f"Account: {name}\nProvider: {profile['provider']}\n"
-            "The authenticated CLI quota panel is readable again."
+            "✅ *CYD Usage Monitor · Recovered*\n\n"
+            "🎉 *CLI quota collection is healthy again*\n"
+            f"👤 *Account:* {whatsapp_value(name)}\n"
+            f"🧩 *Provider:* {whatsapp_value(profile['provider'].title())}\n"
+            f"🕒 *Recovered:* {display_time(snapshot.get('collected_at'))}\n"
+            f"⏱️ *Interruption:* {elapsed_text(previous.get('collected_at') if previous else None, snapshot.get('collected_at'))}\n\n"
+            "🔧 *Resolution*\nA later scheduled poll returned a complete quota panel. The monitor recovered automatically; no reconnect or credential change was performed."
         )
     deliver_waha_message(event, message)
 
@@ -582,6 +754,15 @@ def persist_snapshot(profile: dict, snapshot: dict) -> bool:
         state["profiles"][profile_id] = snapshot
         state["updated_at"] = utcnow()
         write_json_unlocked(STATE_FILE, state)
+    try:
+        record_incident(profile, previous, snapshot)
+    except (OSError, ValueError, TypeError, KeyError) as incident_error:
+        # Diagnostic persistence must never suppress the actual failure or
+        # recovery alert. This credential-free line remains useful in Docker.
+        print(json.dumps({
+            "event": "incident_history_write_failed", "provider": profile.get("provider"),
+            "error_type": type(incident_error).__name__, "at": utcnow(),
+        }), flush=True)
     notify_transition(profile, previous, snapshot)
     return True
 

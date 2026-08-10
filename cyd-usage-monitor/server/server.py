@@ -33,6 +33,7 @@ STATE_FILE = DATA_DIR / "telemetry.json"
 OPENROUTER_SECRET_FILE = DATA_DIR / "openrouter-secret.json"
 OPENROUTER_STATE_FILE = DATA_DIR / "openrouter-telemetry.json"
 ALERTS_FILE = DATA_DIR / "alert-status.json"
+INCIDENTS_FILE = DATA_DIR / "collector-incidents.json"
 SETTINGS_FILE = DATA_DIR / "monitor-settings.json"
 ADMIN_SECRET_FILE = DATA_DIR / ".monitor-admin-password"
 LOGIN_INPUT_DIR = DATA_DIR / ".login-inputs"
@@ -382,6 +383,7 @@ class Handler(BaseHTTPRequestHandler):
                 "requests": public_control(),
                 "runtime": public_runtime(), "workflow": active_workflow(),
                 "alerts": read_json(ALERTS_FILE, {"configured": False, "last_event": None}),
+                "incidents": read_json(INCIDENTS_FILE, {"incidents": []}),
                 "alert_settings": alert_settings(),
                 "openrouter": openrouter_public_status(),
             })

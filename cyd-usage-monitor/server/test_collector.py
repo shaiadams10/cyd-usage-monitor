@@ -171,6 +171,47 @@ If you are not redirected, paste the authorization code below:
         self.assertEqual(first["last_event"], "failure")
         self.assertEqual(second["last_event"], "failure")
 
+    def test_incident_history_and_whatsapp_explain_transient_recovery(self):
+        profile = {"id": "antigravity-test", "provider": "antigravity", "label": "Antigravity account"}
+        error = collector.CollectionError(
+            "Antigravity /usage did not contain an account field",
+            "user@example.com\nhttps://example.invalid/private\nGEMINI MODELS\nWeekly Limit Remaining\nCLAUDE AND GPT MODELS\n",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            incidents = Path(directory) / "collector-incidents.json"
+            debug_dir = Path(directory) / ".collector-debug"
+            with patch.object(collector, "INCIDENTS_FILE", incidents), patch.object(collector, "DEBUG_EVIDENCE_DIR", debug_dir):
+                failed = collector.error_snapshot(profile, error)
+                collector.record_incident(profile, None, failed)
+                with patch.object(collector, "deliver_waha_message", return_value=(True, "ok")) as delivery:
+                    notify_transition(profile, None, failed)
+                failure_message = delivery.call_args.args[1]
+                self.assertIn("🚨 *CYD Usage Monitor · Alert*", failure_message)
+                self.assertIn("partial /usage screen", failure_message)
+                self.assertIn("No credentials were changed", failure_message)
+                self.assertIn("diagnostic ID", failure_message)
+
+                evidence = next(debug_dir.glob("*.json")).read_text(encoding="utf-8")
+                self.assertNotIn("user@example.com", evidence)
+                self.assertNotIn("https://example.invalid/private", evidence)
+                self.assertIn("[account redacted]", evidence)
+
+                recovered = {
+                    "profile_id": profile["id"], "provider": "antigravity", "status": "ok",
+                    "account_name": "Recovered account", "collected_at": collector.utcnow(),
+                }
+                collector.record_incident(profile, failed, recovered)
+                with patch.object(collector, "deliver_waha_message", return_value=(True, "ok")) as delivery:
+                    notify_transition(profile, failed, recovered)
+                recovery_message = delivery.call_args.args[1]
+                self.assertIn("✅ *CYD Usage Monitor · Recovered*", recovery_message)
+                self.assertIn("no reconnect or credential change", recovery_message)
+
+            history = json.loads(incidents.read_text(encoding="utf-8"))["incidents"]
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["status"], "recovered")
+            self.assertIn("later scheduled poll", history[0]["resolution"])
+
     def test_saved_dashboard_group_id_overrides_env_group_id(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"WAHA_ALERT_CHAT_ID": "from-env@g.us"}):
             previous_file = collector.SETTINGS_FILE

@@ -21,6 +21,23 @@ authoritative outside the managed Brain Protocol block.
 ## Recent Changes
 <!-- Newest first. Max 10 entries. Oldest auto-compress to History Summary. -->
 
+### 2026-08-09 — Collector Incident Diagnostics and WhatsApp Alerts
+- Diagnosed the 20:53 Antigravity alert as one transient incomplete `/usage`
+  capture followed by a normal successful scheduled poll; no reconnect,
+  credential update, profile rewrite, or container restart repaired it.
+- Added bounded structured incident history, redacted host-only evidence files,
+  diagnostic IDs, capture facts, repeated failure counts, recovery durations,
+  and a protected dashboard incident timeline.
+- Redesigned test/failure/recovery WhatsApp messages with formatting, emojis,
+  configurable local timestamps, evidence, automatic retry behavior, and an
+  explicit statement of what did—or did not—change during recovery.
+- Refreshed the dependency-free 12-file Graphify source graph to 248 nodes,
+  536 edges, and 10 communities.
+- Files affected: `docs/{context.md,map.md}` and
+  `cyd-usage-monitor/{.env.example,CHANGELOG.md,README.md,docker-compose.yml,server/collector.py,`
+  `server/dashboard.html,server/server.py,server/test_collector.py,`
+  `server/test_server.py}`.
+
 ### 2026-08-09 — Python 3.14 Production Container
 - Updated the pinned production image from Python 3.11.15 to Python 3.14.0 on
   Debian Bookworm while retaining the complete current application.
@@ -185,29 +202,6 @@ authoritative outside the managed Brain Protocol block.
   `server/dashboard.html,server/test_server.py,src/main.cpp,wokwi.toml}`; ignored
   `include/secrets.h` holds the refreshed deployment-specific public pin.
 
-### 2026-08-09 — Cloudflare TLS Fix and CYD Flashing Guide
-- Diagnosed Wokwi's X509 failure against the live Cloudflare edge chain and
-  replaced the unrelated GlobalSign ECC root with the official Google Trust
-  Services Root R4 trust anchor used by that chain.
-- Added a credential-free OpenSSL verification helper, rebuilt the firmware,
-  and confirmed the live device hostname validates against the included root.
-- Assigned the independently wired touch controller to HSPI while retaining
-  the TFT on VSPI, removing the duplicate APB callback registration at boot.
-- Added a responsive dashboard Flash tab, a canonical provisioning guide, an
-  admin-protected browser-readable documentation route, Docker packaging, and
-  server regression coverage.
-- Deployed the dashboard update to the configured remote monitor origin with a
-  timestamped rollback copy, then verified container health, the Flash tab,
-  the guide, and the externally protected device API.
-- Refreshed the managed Brain Protocol block and regenerated the curated
-  Graphify source graph after restoring its intended dependency-free scope.
-- Files affected: `AGENTS.md`, `docs/context.md`, `docs/map.md`, and
-  `cyd-usage-monitor/{Dockerfile,README.md,CHANGELOG.md,include/gts_root_r4.h,`
-  `include/secrets.h.example,instructions/FLASHING_GUIDE.md,`
-  `instructions/TOKEN_GUIDE.md,scripts/verify-tls-chain.ps1,server/dashboard.html,`
-  `server/server.py,server/test_server.py}`; ignored `include/secrets.h` was
-  updated with the public trust anchor while retaining private values.
-
 ## History Summary
 <!-- Compressed summaries of older changes go here -->
 
@@ -215,6 +209,9 @@ authoritative outside the managed Brain Protocol block.
   project-specific instructions outside the managed block.
 - Wokwi networking diagnostics use bounded emulator-friendly TLS/NTP timeouts
   and credential-safe mbedTLS errors, with corrected operator guidance.
+- Earlier CYD networking work corrected the Cloudflare trust chain, separated
+  touch/TFT SPI buses, added the protected flashing guide, and verified the
+  deployed dashboard/device boundary before telemetry later moved to LAN-only.
 - Graphify was activated on 2026-08-09 as a deterministic, source-only graph
   over 12 tracked C/C++, Python, and PowerShell files, with repository-relative
   references and no dependency, generated-asset, secret, or LLM input.
