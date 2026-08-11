@@ -21,6 +21,27 @@ authoritative outside the managed Brain Protocol block.
 ## Recent Changes
 <!-- Newest first. Max 10 entries. Oldest auto-compress to History Summary. -->
 
+### 2026-08-11 — Debounced Transient CLI Failure Alerts
+- Correlated six Antigravity alert/recovery pairs with isolated incomplete CLI
+  captures: temporary authentication prompts and upstream
+  `RESOURCE_EXHAUSTED` eligibility responses. Most recovered on the next poll;
+  one timestamp pair indicates two failed polls before recovery.
+- Changed WhatsApp outage detection to require three consecutive failed CLI
+  collections by default, configurable from 1–10, while preserving every
+  failed capture and recovery in protected incident history.
+- Fixed recovery duration reporting to measure from the first failed capture
+  rather than the most recent failed poll, and added the confirmation count to
+  failure messages.
+- Added regression coverage for silent transient recovery, confirmed outage
+  transitions, durable deduplication state, incident counts, and full duration.
+- Deployed the change to the operator-configured live host with a timestamped
+  source rollback; verified the exact collector hash, threshold, container and
+  Tunnel health, private device authentication/route isolation, preserved CLI
+  profiles and telemetry, and clean collector startup logs.
+- Files affected: `docs/{context.md,map.md}` and
+  `cyd-usage-monitor/{.env.example,CHANGELOG.md,README.md,docker-compose.yml,`
+  `server/collector.py,server/test_collector.py}`.
+
 ### 2026-08-09 — Collector Incident Diagnostics and WhatsApp Alerts
 - Diagnosed the 20:53 Antigravity alert as one transient incomplete `/usage`
   capture followed by a normal successful scheduled poll; no reconnect,
@@ -181,32 +202,14 @@ authoritative outside the managed Brain Protocol block.
   `include/secrets.h` now selects the WE1 CA for Wokwi without changing private
   credentials.
 
-### 2026-08-09 — Wokwi TLS Handshake Compatibility
-- Identified mbedTLS `-0x0050` / decimal `-80` as a peer reset during the TLS
-  handshake, after the earlier trust-anchor failure had already been fixed.
-- Confirmed the live Cloudflare endpoint offers its ECDSA certificate path but
-  not an RSA certificate to the tested TLS 1.2 client.
-- Added a dedicated Wokwi PlatformIO target that completes encrypted TLS and
-  verifies the exact live SHA-256 leaf fingerprint plus hostname before any
-  Bearer or Cloudflare Access headers are attached. The physical target keeps
-  full CA-chain and certificate-time validation.
-- Added a safe pin-refresh helper, pointed `wokwi.toml` at the isolated target,
-  suppressed startup touch transients, and updated the dashboard Flash tab and
-  canonical provisioning documentation.
-- Refreshed the curated dependency-free Graphify graph after the firmware
-  change; it now covers 12 source files with 179 nodes, 389 edges, and 10
-  communities.
-- Files affected: `docs/context.md`, `docs/map.md`, and
-  `cyd-usage-monitor/{CHANGELOG.md,README.md,include/secrets.h.example,`
-  `instructions/FLASHING_GUIDE.md,platformio.ini,scripts/update-wokwi-tls-pin.ps1,`
-  `server/dashboard.html,server/test_server.py,src/main.cpp,wokwi.toml}`; ignored
-  `include/secrets.h` holds the refreshed deployment-specific public pin.
-
 ## History Summary
 <!-- Compressed summaries of older changes go here -->
 
 - Project Brain Protocol was upgraded to v1.1.0 while preserving all
   project-specific instructions outside the managed block.
+- Earlier Wokwi TLS work isolated an emulator-compatible verified certificate
+  path and documented handshake diagnostics before device telemetry later
+  returned to the private-LAN-only architecture.
 - Wokwi networking diagnostics use bounded emulator-friendly TLS/NTP timeouts
   and credential-safe mbedTLS errors, with corrected operator guidance.
 - Earlier CYD networking work corrected the Cloudflare trust chain, separated

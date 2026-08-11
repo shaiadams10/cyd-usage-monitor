@@ -241,15 +241,21 @@ unreachable server, or closed port.
 
 ## Optional WAHA alerts
 
-The collector can send one WhatsApp alert when a profile first fails and one
-recovery message after the next successful collection. Set `WAHA_URL`,
+The collector can send one WhatsApp alert when a profile has failed for three
+consecutive collection cycles and one recovery message after the next
+successful collection. Fewer than three incomplete CLI captures remain in the
+protected incident history but recover silently, avoiding false failure and
+recovery pairs for transient provider screens. Set
+`CYD_MONITOR_ALERT_FAILURE_THRESHOLD` to change the confirmation count (1–10),
+and set `WAHA_URL`,
 `WAHA_API_KEY`, `WAHA_SESSION`, and `WAHA_ALERT_CHAT_ID` in the private `.env`
 file. The dashboard stores only the group routing ID; it never exposes the
 WAHA API key. Set `CYD_MONITOR_TIMEZONE` to an IANA timezone such as
 `America/New_York` if alert timestamps should use local time; it defaults to
 UTC.
 
-Failure alerts use WhatsApp formatting and include the detection time, the
+Failure alerts use WhatsApp formatting and include the first detection time,
+the number of consecutive failed collections,
 observed parser/CLI symptom, privacy-safe capture counts, a diagnostic ID, the
 poll interval, and the exact automatic action that will occur. Recovery alerts
 report the interruption duration and distinguish a later successful poll from

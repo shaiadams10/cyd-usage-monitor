@@ -171,6 +171,73 @@ If you are not redirected, paste the authorization code below:
         self.assertEqual(first["last_event"], "failure")
         self.assertEqual(second["last_event"], "failure")
 
+    def test_unconfirmed_failure_recovers_without_whatsapp_noise(self):
+        profile = {"id": "antigravity-test", "provider": "antigravity", "label": "Antigravity account"}
+        failed = {"status": "error", "alert_confirmed": False, "consecutive_failures": 1}
+        recovered = {"status": "ok", "account_name": "Recovered account", "collected_at": collector.utcnow()}
+        with patch.object(collector, "deliver_waha_message", return_value=(True, "ok")) as delivery:
+            collector.notify_transition(profile, None, failed)
+            collector.notify_transition(profile, failed, recovered)
+            delivery.assert_not_called()
+
+    def test_whatsapp_waits_for_configured_consecutive_failures(self):
+        profile = {"id": "antigravity-test", "provider": "antigravity", "label": "Antigravity account"}
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            paths = {
+                "DATA_DIR": data_dir,
+                "PROFILES_FILE": data_dir / "cli-profiles.json",
+                "STATE_FILE": data_dir / "telemetry.json",
+                "INCIDENTS_FILE": data_dir / "collector-incidents.json",
+            }
+            with patch.multiple(collector, **paths), patch.object(collector, "ALERT_FAILURE_THRESHOLD", 3):
+                collector.write_json(collector.PROFILES_FILE, {"profiles": [profile]})
+                first_failure = {
+                    "profile_id": profile["id"], "provider": "antigravity", "status": "error",
+                    "error": "temporary incomplete panel", "collected_at": "2026-08-11T15:00:00Z",
+                    "diagnostics": {"nonempty_lines": 7, "capture_chars": 146},
+                }
+                with patch.object(collector, "deliver_waha_message", return_value=(True, "ok")) as delivery:
+                    collector.persist_snapshot(profile, first_failure)
+                    delivery.assert_not_called()
+                self.assertEqual(first_failure["consecutive_failures"], 1)
+                self.assertFalse(first_failure["alert_confirmed"])
+
+                second_failure = {
+                    "profile_id": profile["id"], "provider": "antigravity", "status": "error",
+                    "error": "temporary incomplete panel", "collected_at": "2026-08-11T15:01:30Z",
+                    "diagnostics": {"nonempty_lines": 8, "capture_chars": 180},
+                }
+                with patch.object(collector, "deliver_waha_message", return_value=(True, "ok")) as delivery:
+                    collector.persist_snapshot(profile, second_failure)
+                    delivery.assert_not_called()
+                self.assertFalse(second_failure["alert_confirmed"])
+
+                third_failure = {
+                    "profile_id": profile["id"], "provider": "antigravity", "status": "error",
+                    "error": "temporary incomplete panel", "collected_at": "2026-08-11T15:03:00Z",
+                    "diagnostics": {"nonempty_lines": 8, "capture_chars": 180},
+                }
+                with patch.object(collector, "deliver_waha_message", return_value=(True, "ok")) as delivery:
+                    collector.persist_snapshot(profile, third_failure)
+                    self.assertEqual(delivery.call_args.args[0], "failure")
+                    self.assertIn("3 consecutive failed collections", delivery.call_args.args[1])
+                self.assertTrue(third_failure["alert_confirmed"])
+                self.assertEqual(third_failure["failure_started_at"], first_failure["collected_at"])
+
+                recovered = {
+                    "profile_id": profile["id"], "provider": "antigravity", "status": "ok",
+                    "account_name": "Recovered account", "collected_at": "2026-08-11T15:04:30Z",
+                }
+                with patch.object(collector, "deliver_waha_message", return_value=(True, "ok")) as delivery:
+                    collector.persist_snapshot(profile, recovered)
+                    self.assertEqual(delivery.call_args.args[0], "recovery")
+                    self.assertIn("4m 30s", delivery.call_args.args[1])
+
+            history = json.loads((data_dir / "collector-incidents.json").read_text(encoding="utf-8"))["incidents"]
+            self.assertEqual(history[0]["failed_polls"], 3)
+            self.assertEqual(history[0]["status"], "recovered")
+
     def test_incident_history_and_whatsapp_explain_transient_recovery(self):
         profile = {"id": "antigravity-test", "provider": "antigravity", "label": "Antigravity account"}
         error = collector.CollectionError(

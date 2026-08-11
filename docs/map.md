@@ -6,7 +6,7 @@
 
 | File | Purpose | Last Updated |
 |------|---------|--------------|
-| `docs/map.md` | Codebase file manifest and architecture map | 2026-08-09|
+| `docs/map.md` | Codebase file manifest and architecture map | 2026-08-11|
 | `.github/workflows/ci.yml` | Server, Docker, firmware, and semantic WebAssembly module-export CI checks | 2026-08-09 |
 | `.gitignore` | Git ignore patterns | 2026-08-09 |
 | `AGENTS.md` | AI agent instructions and project context | 2026-08-09|
@@ -14,12 +14,12 @@
 | `CONTRIBUTING.md` | Documentation | 2026-08-09 |
 | `cyd-usage-monitor/.dockerignore` | Project file | 2026-08-09 |
 | `cyd-usage-monitor/.env` | Environment variables (local) | 2026-08-09 |
-| `cyd-usage-monitor/.env.example` | Value-free server, private-LAN listener, dashboard Tunnel, WAHA, and alert-timezone configuration template | 2026-08-09 |
+| `cyd-usage-monitor/.env.example` | Value-free server, private-LAN listener, dashboard Tunnel, WAHA, timezone, and consecutive-failure alert configuration template | 2026-08-11 |
 | `cyd-usage-monitor/.gitignore` | Git ignore patterns | 2026-08-09 |
 | `cyd-usage-monitor/AGENTS.md` | Project contract, documented OpenRouter read-API exception, and deployment boundary | 2026-08-09 |
-| `cyd-usage-monitor/CHANGELOG.md` | Unreleased and historical project changes | 2026-08-09 |
+| `cyd-usage-monitor/CHANGELOG.md` | Unreleased and historical project changes | 2026-08-11 |
 | `cyd-usage-monitor/diagram.json` | JSON configuration | 2026-08-09 |
-| `cyd-usage-monitor/docker-compose.yml` | Hardened app/collector/Tunnel orchestration with private device binding and configurable alert timezone | 2026-08-09 |
+| `cyd-usage-monitor/docker-compose.yml` | Hardened app/collector/Tunnel orchestration with private device binding and configurable alert confirmation | 2026-08-11 |
 | `cyd-usage-monitor/Dockerfile` | Python 3.14 server image definition including the protected flashing guide artifact | 2026-08-09 |
 | `cyd-usage-monitor/include/lv_conf.h` | Physical LVGL 8.4 Canvas, Arc, Chart, layout, memory, font, and theme configuration | 2026-08-09 |
 | `cyd-usage-monitor/include/mascot_img.h` | Project file | 2026-08-09 |
@@ -29,14 +29,14 @@
 | `cyd-usage-monitor/instructions/FLASHING_GUIDE.md` | Canonical secure CYD preparation, flashing, verification, and recovery guide | 2026-08-09 |
 | `cyd-usage-monitor/instructions/TOKEN_GUIDE.md` | CLI provider, OpenRouter, Cloudflare, Tunnel, and device credential guide | 2026-08-09 |
 | `cyd-usage-monitor/platformio.ini` | Shared physical-CYD/Wokwi firmware target with pinned dependencies | 2026-08-09 |
-| `cyd-usage-monitor/README.md` | Project architecture, security, deployment, hardware, and development guide | 2026-08-09 |
-| `cyd-usage-monitor/server/collector.py` | CLI/OpenRouter collector with normalized persistence, bounded incident history, redacted host evidence, and formatted WhatsApp alerts | 2026-08-09 |
+| `cyd-usage-monitor/README.md` | Project architecture, security, deployment, hardware, and development guide | 2026-08-11 |
+| `cyd-usage-monitor/server/collector.py` | CLI/OpenRouter collector with normalized persistence, bounded incident history, redacted evidence, and debounced WhatsApp outage/recovery alerts | 2026-08-11 |
 | `cyd-usage-monitor/server/dashboard.html` | Protected account/OpenRouter controls, incident diagnostics, alerts, interactive two-app LVGL preview, and Utilities UI | 2026-08-09 |
 | `cyd-usage-monitor/server/server.py` | Route-isolated listeners with private OpenRouter configuration and protected structured incident status | 2026-08-09 |
 | `cyd-usage-monitor/server/static/lvgl/cyd_lvgl.js` | Generated Emscripten loader for the interactive two-app LVGL preview | 2026-08-09 |
 | `cyd-usage-monitor/server/static/lvgl/cyd_lvgl.wasm` | Generated WebAssembly binary for launcher, Usage Monitor, OpenRouter, chart, and navigation rendering | 2026-08-09 |
 | `cyd-usage-monitor/server/storage.py` | Python module | 2026-08-09 |
-| `cyd-usage-monitor/server/test_collector.py` | Collector parser, privacy, incident lifecycle, evidence-redaction, and WhatsApp-format regression tests | 2026-08-09 |
+| `cyd-usage-monitor/server/test_collector.py` | Collector parser, privacy, incident lifecycle, alert debounce/deduplication, evidence-redaction, and WhatsApp-format regression tests | 2026-08-11 |
 | `cyd-usage-monitor/server/test_server.py` | Server security, structured incident API, dashboard, protected-documentation, and interactive LVGL contract tests | 2026-08-09 |
 | `cyd-usage-monitor/server/test_storage.py` | Python module | 2026-08-09 |
 | `cyd-usage-monitor/server/__init__.py` | Python module | 2026-08-09 |
@@ -46,7 +46,7 @@
 | `cyd-usage-monitor/src/main.cpp` | ESP32 two-app launcher, Usage Monitor and OpenRouter UIs, shortcuts, scoped RFC1918 polling, and touch runtime | 2026-08-09 |
 | `cyd-usage-monitor/src/mascot_img.h` | Project file | 2026-08-09 |
 | `cyd-usage-monitor/wokwi.toml` | Wokwi simulator mapping to the shared LAN-only firmware target | 2026-08-09 |
-| `docs/context.md` | Living project state, recent changes, and short-lived follow-ups | 2026-08-09|
+| `docs/context.md` | Living project state, recent changes, and short-lived follow-ups | 2026-08-11|
 | `LICENSE` | Project file | 2026-08-09 |
 | `NOTICE.md` | Documentation | 2026-08-09 |
 | `README.md` | Project documentation | 2026-08-09 |

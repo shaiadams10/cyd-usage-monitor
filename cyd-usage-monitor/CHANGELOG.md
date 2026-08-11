@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Debounced CLI outage notifications until three consecutive collection cycles
+  fail (configurable from 1–10), while retaining first-failure diagnostics in
+  incident history. One-cycle Antigravity authentication/eligibility glitches
+  now recover silently instead of producing misleading alert/recovery pairs.
 - Added durable, bounded collector incident history with privacy-safe terminal
   evidence, host-only redacted diagnostic captures, repeated-poll counts,
   recovery durations, and a protected Alerts dashboard timeline. Redesigned

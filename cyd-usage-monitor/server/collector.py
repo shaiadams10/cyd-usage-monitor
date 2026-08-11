@@ -76,6 +76,7 @@ def bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
 
 
 POLL_SECONDS = bounded_int_env("CYD_MONITOR_POLL_SECONDS", 90, 60, 86400)
+ALERT_FAILURE_THRESHOLD = bounded_int_env("CYD_MONITOR_ALERT_FAILURE_THRESHOLD", 3, 1, 10)
 INCIDENT_HISTORY_LIMIT = 50
 ALERT_TIMEZONE_NAME = os.environ.get("CYD_MONITOR_TIMEZONE", "UTC").strip() or "UTC"
 try:
@@ -700,17 +701,21 @@ def send_test_alert() -> tuple[bool, str]:
 
 
 def notify_transition(profile: dict, previous: dict | None, snapshot: dict) -> None:
-    """Send at most one failure and one recovery notice per outage.
+    """Send at most one confirmed failure and one recovery notice per outage.
 
     The snapshot itself is the durable deduplication state: restarting the
     collector cannot turn one persistent provider outage into a message flood.
+    Incomplete one-off CLI captures remain visible in incident history without
+    generating a failure/recovery WhatsApp pair.
     """
-    was_error = bool(previous and previous.get("status") == "error")
-    is_error = snapshot.get("status") == "error"
-    if is_error == was_error:
+    was_alerting = bool(
+        previous and previous.get("status") == "error" and previous.get("alert_confirmed", True)
+    )
+    is_alerting = bool(snapshot.get("status") == "error" and snapshot.get("alert_confirmed", True))
+    if is_alerting == was_alerting:
         return
     name = snapshot.get("account_name") or profile.get("label") or profile["provider"].title() + " account"
-    if is_error:
+    if is_alerting:
         event = "failure"
         facts = snapshot.get("diagnostics") if isinstance(snapshot.get("diagnostics"), dict) else {}
         evidence = f"{facts.get('nonempty_lines', 0)} non-empty terminal lines / {facts.get('capture_chars', 0)} characters captured"
@@ -721,7 +726,8 @@ def notify_transition(profile: dict, previous: dict | None, snapshot: dict) -> N
             f"❌ *{alert_title(profile, snapshot)}*\n"
             f"👤 *Account:* {whatsapp_value(name)}\n"
             f"🧩 *Provider:* {whatsapp_value(profile['provider'].title())}\n"
-            f"🕒 *Detected:* {display_time(snapshot.get('collected_at'))}\n\n"
+            f"🕒 *First detected:* {display_time(snapshot.get('failure_started_at') or snapshot.get('collected_at'))}\n"
+            f"🧮 *Confirmed:* {snapshot.get('consecutive_failures', ALERT_FAILURE_THRESHOLD)} consecutive failed collections\n\n"
             f"❗ *Collector reason:* {whatsapp_value(snapshot.get('error', 'Unknown collector error'))}\n"
             f"*What happened*\n{whatsapp_value(failure_explanation(profile, snapshot))}\n\n"
             f"🔎 *Capture evidence:* {evidence}\n"
@@ -736,7 +742,7 @@ def notify_transition(profile: dict, previous: dict | None, snapshot: dict) -> N
             f"👤 *Account:* {whatsapp_value(name)}\n"
             f"🧩 *Provider:* {whatsapp_value(profile['provider'].title())}\n"
             f"🕒 *Recovered:* {display_time(snapshot.get('collected_at'))}\n"
-            f"⏱️ *Interruption:* {elapsed_text(previous.get('collected_at') if previous else None, snapshot.get('collected_at'))}\n\n"
+            f"⏱️ *Interruption:* {elapsed_text((previous.get('failure_started_at') or previous.get('collected_at')) if previous else None, snapshot.get('collected_at'))}\n\n"
             "🔧 *Resolution*\nA later scheduled poll returned a complete quota panel. The monitor recovered automatically; no reconnect or credential change was performed."
         )
     deliver_waha_message(event, message)
@@ -751,6 +757,16 @@ def persist_snapshot(profile: dict, snapshot: dict) -> bool:
             return False
         state = read_json_unlocked(STATE_FILE, {"profiles": {}})
         previous = state.setdefault("profiles", {}).get(profile_id)
+        if snapshot.get("status") == "error":
+            previous_is_error = bool(previous and previous.get("status") == "error")
+            previous_confirmed = bool(previous_is_error and previous.get("alert_confirmed", True))
+            previous_failures = int(previous.get("consecutive_failures", ALERT_FAILURE_THRESHOLD if previous_confirmed else 0)) if previous_is_error else 0
+            snapshot["consecutive_failures"] = previous_failures + 1
+            snapshot["failure_started_at"] = (
+                previous.get("failure_started_at") or previous.get("collected_at")
+                if previous_is_error else snapshot.get("collected_at")
+            )
+            snapshot["alert_confirmed"] = previous_confirmed or snapshot["consecutive_failures"] >= ALERT_FAILURE_THRESHOLD
         state["profiles"][profile_id] = snapshot
         state["updated_at"] = utcnow()
         write_json_unlocked(STATE_FILE, state)
