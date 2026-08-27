@@ -31,6 +31,7 @@ CONTROL_FILE = DATA_DIR / "collector-control.json"
 RUNTIME_FILE = DATA_DIR / "collector-runtime.json"
 STATE_FILE = DATA_DIR / "telemetry.json"
 OPENROUTER_SECRET_FILE = DATA_DIR / "openrouter-secret.json"
+EMAIL_SECRET_FILE = DATA_DIR / "email-secret.json"
 OPENROUTER_STATE_FILE = DATA_DIR / "openrouter-telemetry.json"
 ALERTS_FILE = DATA_DIR / "alert-status.json"
 INCIDENTS_FILE = DATA_DIR / "collector-incidents.json"
@@ -44,6 +45,7 @@ REPOSITORY_FLASHING_GUIDE = Path(__file__).parents[1] / "instructions" / "FLASHI
 FLASHING_GUIDE_FILE = PACKAGED_FLASHING_GUIDE if PACKAGED_FLASHING_GUIDE.is_file() else REPOSITORY_FLASHING_GUIDE
 DEVICE_TOKEN = os.environ.get("CYD_API_TOKEN", "").strip()
 MAX_REQUEST_BYTES = 32 * 1024
+DISPLAY_APPS = {"launcher", "usage", "openrouter"}
 
 
 def bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -98,6 +100,76 @@ def alert_settings() -> dict:
     return {"chat_id": str(saved.get("waha_alert_chat_id", "")).strip()}
 
 
+def display_settings() -> dict:
+    saved = read_json(SETTINGS_FILE, {})
+    return {"rotation": 180 if saved.get("display_rotation") == 180 else 0}
+
+
+def set_display_control(
+    settings: dict, app: str, *, profile_id: str | None = None,
+    source: str = "dashboard", observed_rotation: int | None = None,
+) -> None:
+    """Persist the desired route and the latest known physical display state."""
+    rotation = 180 if settings.get("display_rotation") == 180 else 0
+    if app == "usage" and not profile_id:
+        profile_id = profiles_config().get("active_profile_id")
+    command = {"id": uuid.uuid4().hex, "app": app, "created_at": utcnow()}
+    if isinstance(profile_id, str) and profile_id:
+        command["profile_id"] = profile_id[:80]
+    settings["display_command"] = command
+    settings["display_state"] = {
+        "app": app,
+        "profile_id": command.get("profile_id", ""),
+        "rotation": observed_rotation if observed_rotation in {0, 180} else rotation,
+        "source": source,
+        "updated_at": utcnow(),
+    }
+
+
+def display_state() -> dict:
+    settings = read_json(SETTINGS_FILE, {})
+    state = settings.get("display_state")
+    command = settings.get("display_command")
+    if not isinstance(state, dict):
+        state = {}
+    app = state.get("app")
+    if app not in DISPLAY_APPS and isinstance(command, dict):
+        app = command.get("app")
+    if app not in DISPLAY_APPS:
+        app = "launcher"
+    profile_id = state.get("profile_id")
+    if app == "usage" and not profile_id:
+        profile_id = profiles_config().get("active_profile_id")
+    return {
+        "app": app,
+        "profile_id": str(profile_id or "")[:80],
+        "rotation": 180 if state.get("rotation", settings.get("display_rotation")) == 180 else 0,
+        "source": str(state.get("source", "saved"))[:24],
+        "updated_at": str(state.get("updated_at", ""))[:40],
+    }
+
+
+def email_public_config() -> dict:
+    """Expose setup state without returning SMTP credentials or usernames."""
+    saved = read_json(EMAIL_SECRET_FILE, {})
+    env_configured = bool(os.environ.get("CYD_MONITOR_SMTP_HOST", "").strip())
+    if env_configured:
+        recipients = [item.strip() for item in os.environ.get("CYD_MONITOR_ALERT_EMAIL_TO", "").split(",") if item.strip()]
+        return {
+            "configured": True, "managed_by": "environment", "provider": "environment",
+            "sender": os.environ.get("CYD_MONITOR_SMTP_FROM", "").strip(), "recipients": recipients[:5],
+        }
+    return {
+        "configured": EMAIL_SECRET_FILE.is_file() and bool(saved.get("host") and saved.get("password")),
+        "managed_by": "dashboard" if EMAIL_SECRET_FILE.is_file() else "dashboard",
+        "provider": str(saved.get("provider", "gmail"))[:24],
+        "sender": str(saved.get("sender", ""))[:254],
+        "recipients": [str(item)[:254] for item in saved.get("recipients", [])[:5]],
+        "host": str(saved.get("host", ""))[:253], "port": saved.get("port", 587),
+        "security": str(saved.get("security", "starttls"))[:12],
+    }
+
+
 def profile_by_id(profile_id: str | None):
     for profile in profiles_config().get("profiles", []):
         if profile.get("id") == profile_id:
@@ -113,9 +185,9 @@ def is_stale(snapshot: dict) -> bool:
         return True
 
 
-def unavailable(provider: str, message: str) -> dict:
+def unavailable(provider: str, message: str, account_name: str = "Telemetry unavailable") -> dict:
     return {
-        "provider": "error", "status": "error", "account_name": "Telemetry unavailable",
+        "provider": "error", "status": "error", "account_name": account_name[:160] or "Telemetry unavailable",
         "plan_type": provider.title(), "primary_val": "Unavailable", "primary_pct": 100,
         "primary_tag": "Collector Error", "primary_sub": message[:96], "extra_credits": "None",
         "status_ticker": "* " + message[:100], "collected_at": None,
@@ -150,11 +222,20 @@ def cyd_payload() -> dict:
         return unavailable("collector", "No CLI profile is configured")
     snapshot = read_json(STATE_FILE, {"profiles": {}}).get("profiles", {}).get(profile_id)
     if not snapshot:
-        return unavailable(profile.get("provider", "collector"), "Waiting for the CLI collector")
+        return unavailable(
+            profile.get("provider", "collector"), "Waiting for the CLI collector",
+            profile.get("last_account_name") or profile.get("label") or "Telemetry unavailable",
+        )
     if snapshot.get("status") != "ok":
-        return unavailable(profile.get("provider", "collector"), snapshot.get("error", "CLI collection failed"))
+        return unavailable(
+            profile.get("provider", "collector"), snapshot.get("error", "CLI collection failed"),
+            snapshot.get("account_name") or profile.get("last_account_name") or profile.get("label") or "Telemetry unavailable",
+        )
     if is_stale(snapshot):
-        return unavailable(profile.get("provider", "collector"), "Last CLI result is stale")
+        return unavailable(
+            profile.get("provider", "collector"), "Last CLI result is stale",
+            snapshot.get("account_name") or profile.get("last_account_name") or profile.get("label") or "Telemetry unavailable",
+        )
 
     if snapshot.get("provider") == "antigravity":
         metrics = snapshot["metrics"]
@@ -177,15 +258,32 @@ def cyd_payload() -> dict:
             "source": snapshot.get("source", "agy CLI"),
         }
 
-    primary = snapshot["metrics"].get("primary") or snapshot["metrics"]["monthly"]
+    metrics = snapshot["metrics"]
+    primary = metrics.get("five_hour") or metrics.get("primary") or metrics.get("weekly") or metrics["monthly"]
+    weekly = metrics.get("weekly") or metrics.get("monthly") or primary
     remaining = primary["remaining_pct"]
     return {
         "provider": "codex", "status": "ok", "account_name": snapshot["account_name"],
         "plan_type": snapshot.get("plan_type", "ChatGPT"), "primary_val": f"{remaining}% left",
-        "primary_pct": 100 - remaining, "primary_tag": snapshot.get("limit_label", "Monthly Limit"),
+        "primary_pct": 100 - remaining, "primary_tag": "5-Hour Limit" if metrics.get("five_hour") else snapshot.get("limit_label", "Usage Limit"),
         "primary_sub": "Resets " + primary["reset"], "extra_credits": snapshot.get("credits", "None"),
+        "codex_5h_pct": primary["remaining_pct"], "codex_5h_sub": "Resets " + primary["reset"],
+        "codex_weekly_pct": weekly["remaining_pct"], "codex_weekly_sub": "Resets " + weekly["reset"],
         "status_ticker": "* Codex CLI · " + snapshot["collected_at"], "collected_at": snapshot["collected_at"],
         "source": snapshot.get("source", "codex CLI"),
+    }
+
+
+def display_command() -> dict:
+    settings = read_json(SETTINGS_FILE, {})
+    command = settings.get("display_command")
+    rotation = 180 if settings.get("display_rotation") == 180 else 0
+    if not isinstance(command, dict):
+        return {"id": "", "app": "", "rotation": rotation}
+    app = command.get("app") if command.get("app") in DISPLAY_APPS else ""
+    return {
+        "id": str(command.get("id", ""))[:64], "app": app, "rotation": rotation,
+        "profile_id": str(command.get("profile_id", ""))[:80],
     }
 
 
@@ -339,6 +437,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.device_authorized():
                     return self.send_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
                 return self.send_json(openrouter_public_status())
+            if path == "/api/v1/display-command":
+                if not self.device_authorized():
+                    return self.send_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                return self.send_json(display_command())
             if path == "/api/v1/next-account":
                 if not self.device_authorized():
                     return self.send_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
@@ -354,6 +456,9 @@ class Handler(BaseHTTPRequestHandler):
                 update_json(PROFILES_FILE, {"profiles": [], "active_profile_id": None}, rotate)
                 if not selected["id"]:
                     return self.send_json({"error": "no profiles"}, HTTPStatus.NOT_FOUND)
+                update_json(SETTINGS_FILE, {}, lambda settings: set_display_control(
+                    settings, "usage", profile_id=selected["id"], source="device",
+                ))
                 return self.send_json(cyd_payload())
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         if path.startswith("/static/"):
@@ -373,7 +478,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if path in {"/api/v1/cyd-status", "/api/v1/next-account", "/api/v1/openrouter-status"}:
+        if path in {"/api/v1/cyd-status", "/api/v1/next-account", "/api/v1/openrouter-status", "/api/v1/display-command"}:
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         if path == "/api/v1/collector-status":
             if not self.require_admin():
@@ -385,6 +490,9 @@ class Handler(BaseHTTPRequestHandler):
                 "alerts": read_json(ALERTS_FILE, {"configured": False, "last_event": None}),
                 "incidents": read_json(INCIDENTS_FILE, {"incidents": []}),
                 "alert_settings": alert_settings(),
+                "display_settings": display_settings(),
+                "display_state": display_state(),
+                "email_config": email_public_config(),
                 "openrouter": openrouter_public_status(),
             })
         if path == "/api/admin/cyd-status":
@@ -407,7 +515,29 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.is_device_surface():
-            return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            path = urllib.parse.urlparse(self.path).path
+            if path != "/api/v1/display-state":
+                return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            if not self.device_authorized():
+                return self.send_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+            try:
+                body = self.read_body()
+            except TypeError:
+                return self.send_json({"error": "application/json is required"}, HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+            except OverflowError:
+                return self.send_json({"error": "request body is too large"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+                return self.send_json({"error": "invalid request"}, HTTPStatus.BAD_REQUEST)
+            app = body.get("app")
+            rotation = body.get("rotation")
+            if app not in DISPLAY_APPS:
+                return self.send_json({"error": "app must be launcher, usage, or openrouter"}, HTTPStatus.BAD_REQUEST)
+            if isinstance(rotation, bool) or rotation not in {0, 180}:
+                return self.send_json({"error": "rotation must be 0 or 180"}, HTTPStatus.BAD_REQUEST)
+            update_json(SETTINGS_FILE, {}, lambda settings: set_display_control(
+                settings, app, source="device", observed_rotation=rotation,
+            ))
+            return self.send_json({"status": "ok", "display_state": display_state()})
         if not self.require_admin():
             return
         if self.headers.get("X-CYD-CSRF") != "1":
@@ -475,7 +605,36 @@ class Handler(BaseHTTPRequestHandler):
             update_json(PROFILES_FILE, {"profiles": [], "active_profile_id": None}, select_profile)
             if not found["value"]:
                 return self.send_json({"error": "unknown profile"}, HTTPStatus.NOT_FOUND)
+            update_json(SETTINGS_FILE, {}, lambda settings: set_display_control(
+                settings, "usage", profile_id=profile_id,
+            ))
             return self.send_json({"status": "ok"})
+        if path == "/api/admin/display-app":
+            app = body.get("app")
+            if app not in DISPLAY_APPS:
+                return self.send_json({"error": "app must be launcher, usage, or openrouter"}, HTTPStatus.BAD_REQUEST)
+            if app == "openrouter" and not OPENROUTER_SECRET_FILE.is_file():
+                return self.send_json({"error": "OpenRouter is not configured"}, HTTPStatus.CONFLICT)
+            update_json(SETTINGS_FILE, {}, lambda settings: set_display_control(settings, app))
+            return self.send_json({"status": "ok", "app": app})
+        if path == "/api/admin/display-orientation":
+            rotation = body.get("rotation")
+            if isinstance(rotation, bool) or rotation not in {0, 180}:
+                return self.send_json({"error": "rotation must be 0 or 180"}, HTTPStatus.BAD_REQUEST)
+            def set_orientation(settings: dict) -> None:
+                command = settings.get("display_command")
+                if not isinstance(command, dict):
+                    command = {}
+                state = settings.get("display_state")
+                if not isinstance(state, dict):
+                    state = {}
+                settings["display_rotation"] = rotation
+                app = command.get("app")
+                if app not in DISPLAY_APPS:
+                    app = state.get("app") if state.get("app") in DISPLAY_APPS else "launcher"
+                set_display_control(settings, app, profile_id=command.get("profile_id"))
+            update_json(SETTINGS_FILE, {}, set_orientation)
+            return self.send_json({"status": "ok", "rotation": rotation})
         if path == "/api/admin/alerts":
             chat_value = body.get("chat_id", "")
             if not isinstance(chat_value, str):
@@ -485,10 +644,64 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "chat ID must be 128 characters or fewer"}, HTTPStatus.BAD_REQUEST)
             if not re.fullmatch(r"[^@\s]+@g\.us", chat_id):
                 return self.send_json({"error": "Enter a WhatsApp group ID ending in @g.us"}, HTTPStatus.BAD_REQUEST)
-            write_json(SETTINGS_FILE, {"waha_alert_chat_id": chat_id, "updated_at": utcnow()})
+            update_json(SETTINGS_FILE, {}, lambda settings: settings.update({"waha_alert_chat_id": chat_id, "updated_at": utcnow()}))
             return self.send_json({"status": "ok", "chat_id": chat_id})
         if path == "/api/admin/alerts/test":
             return self.send_json({"request_id": append_request("test_alert")}, HTTPStatus.ACCEPTED)
+        if path == "/api/admin/alerts/test-email":
+            return self.send_json({"request_id": append_request("test_email")}, HTTPStatus.ACCEPTED)
+        if path == "/api/admin/email-config":
+            if os.environ.get("CYD_MONITOR_SMTP_HOST", "").strip():
+                return self.send_json({"error": "Email is managed by the host environment"}, HTTPStatus.CONFLICT)
+            provider = body.get("provider", "gmail")
+            sender = body.get("sender", "")
+            recipient = body.get("recipient", "")
+            username = body.get("username", "")
+            password = body.get("password", "")
+            host = body.get("host", "")
+            security = body.get("security", "starttls")
+            port = body.get("port", 587)
+            if not all(isinstance(value, str) for value in (provider, sender, recipient, username, password, host, security)):
+                return self.send_json({"error": "Email settings must be text"}, HTTPStatus.BAD_REQUEST)
+            provider, sender, recipient = provider.strip().lower(), sender.strip(), recipient.strip()
+            username, password, host, security = username.strip(), password.strip(), host.strip(), security.strip().lower()
+            if provider not in {"gmail", "custom"}:
+                return self.send_json({"error": "Choose Gmail or custom SMTP"}, HTTPStatus.BAD_REQUEST)
+            email_pattern = r"[^@\s]+@[^@\s]+\.[^@\s]+"
+            if not re.fullmatch(email_pattern, sender) or not re.fullmatch(email_pattern, recipient):
+                return self.send_json({"error": "Enter valid sender and recipient email addresses"}, HTTPStatus.BAD_REQUEST)
+            if provider == "gmail":
+                host, port, security = "smtp.gmail.com", 587, "starttls"
+                username = username or sender
+                password = re.sub(r"\s+", "", password)
+            else:
+                try:
+                    port = int(port)
+                except (TypeError, ValueError):
+                    return self.send_json({"error": "SMTP port must be a number"}, HTTPStatus.BAD_REQUEST)
+            if not host or len(host) > 253 or not re.fullmatch(r"[A-Za-z0-9.-]+", host):
+                return self.send_json({"error": "Enter a valid SMTP hostname"}, HTTPStatus.BAD_REQUEST)
+            if not 1 <= int(port) <= 65535 or security not in {"starttls", "tls"}:
+                return self.send_json({"error": "Use a valid port and STARTTLS or TLS"}, HTTPStatus.BAD_REQUEST)
+            if not username or len(username) > 254 or not password or len(password) > 1024:
+                return self.send_json({"error": "SMTP username and app password/API credential are required"}, HTTPStatus.BAD_REQUEST)
+            write_json(EMAIL_SECRET_FILE, {
+                "provider": provider, "host": host, "port": int(port), "security": security,
+                "username": username, "password": password, "sender": sender,
+                "recipients": [recipient], "updated_at": utcnow(),
+            })
+            return self.send_json({"status": "ok", "configured": True, "email_config": email_public_config()})
+        if path == "/api/admin/remove-email-config":
+            if os.environ.get("CYD_MONITOR_SMTP_HOST", "").strip():
+                return self.send_json({"error": "Email is managed by the host environment"}, HTTPStatus.CONFLICT)
+            try:
+                EMAIL_SECRET_FILE.unlink()
+            except FileNotFoundError:
+                pass
+            update_json(ALERTS_FILE, {}, lambda alerts: alerts.update({
+                "email_fallback_configured": False, "fallback_email_last_error": "",
+            }))
+            return self.send_json({"status": "ok", "configured": False})
         if path == "/api/admin/collect":
             profile_id = body.get("profile_id")
             with data_lock(DATA_DIR):

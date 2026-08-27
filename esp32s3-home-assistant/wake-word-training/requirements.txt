@@ -1,0 +1,5 @@
+# The trainer is installed from a pinned checkout by setup-micro-wake-word.ps1.
+datasets==3.6.0
+tensorflow[and-cuda]==2.21.0
+tensorboard==2.21.0
+git+https://github.com/whatsnowplaying/audio-metadata@d4ebb238e6a401bb1a5aaaac60c9e2b3cb30929f

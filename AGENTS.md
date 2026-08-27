@@ -52,6 +52,15 @@ Treat `AGENTS.md` as the durable source of project-wide instructions:
 
 ---
 
+## Local Operator Map
+
+After the mandatory Brain pre-flight, read `docs/map.local.md` when it exists.
+It is an intentionally Git-ignored operator map for private deployment hosts,
+LAN targets, and machine-specific recovery details that must remain available
+to future local sessions without entering the public repository.
+
+---
+
 ## ESP32 Workspace Guidelines
 
 This repository contains independent ESP32 projects. Keep changes scoped to
@@ -81,8 +90,14 @@ and retain its own build configuration.
 
 ## Project Facts
 
-- The current project is `cyd-usage-monitor`, documented at the repository
-  root and in `cyd-usage-monitor/README.md`.
+- The two primary projects are `esp32s3-home-assistant` (the main Home
+  Assistant voice satellite) and `cyd-usage-monitor`, both documented at the
+  repository root and in their project READMEs.
+- `esp32s3-home-assistant` v2 uses ESPHome 2026.7.0 with the ESP-IDF backend,
+  on-device microWakeWord, the encrypted native API, and the standard Home
+  Assistant Assist pipeline. Its previous custom Arduino implementation is a
+  dated rollback-only directory and must not be used as a source of networking
+  or voice-state code.
 - Firmware targets the ESP32-2432S028R Cheap Yellow Display using C++,
   Arduino, PlatformIO, LVGL 8, TFT_eSPI, XPT2046_Touchscreen, and ArduinoJson.
 - The self-hosted server and dashboard use Python, HTML, JavaScript, Docker,
@@ -102,6 +117,10 @@ cd cyd-usage-monitor
 pio run
 docker compose --env-file .env.example config --quiet
 docker compose up -d --build
+cd ../esp32s3-home-assistant
+.venv/Scripts/esphome.exe config device.yaml
+.venv/Scripts/esphome.exe compile device.yaml
+docker compose -f server/docker-compose.yml config --quiet
 ```
 
 For simulator changes, run `cyd-usage-monitor/simulator/build-wasm.ps1` in

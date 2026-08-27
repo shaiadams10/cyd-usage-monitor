@@ -9,16 +9,20 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
 import select
 import shutil
+import smtplib
+import ssl
 import subprocess
 import struct
 import threading
 import time
 import uuid
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Callable
 from urllib import error as urlerror
@@ -50,6 +54,7 @@ STATE_FILE = DATA_DIR / "telemetry.json"
 OPENROUTER_SECRET_FILE = DATA_DIR / "openrouter-secret.json"
 OPENROUTER_STATE_FILE = DATA_DIR / "openrouter-telemetry.json"
 ALERTS_FILE = DATA_DIR / "alert-status.json"
+EMAIL_SECRET_FILE = DATA_DIR / "email-secret.json"
 INCIDENTS_FILE = DATA_DIR / "collector-incidents.json"
 SETTINGS_FILE = DATA_DIR / "monitor-settings.json"
 LOGIN_INPUT_DIR = DATA_DIR / ".login-inputs"
@@ -231,20 +236,44 @@ def parse_codex_status(raw: str) -> dict:
     # normalize it so the same parser also handles plain and legacy captures.
     text = text.replace("│", "|")
     account = re.search(r"^\s*(?:[│|]\s*)?Account:\s*(.+?)\s*\(([^)]*)\)\s*(?:[│|])?\s*$", text, re.MULTILINE)
-    limit = re.search(r"(?P<label>Monthly|Weekly) limit:\s*(?:\[[^\n]*\]\s*)?(?P<pct>\d+(?:\.\d+)?)%\s+left\s*\(resets\s+(?P<reset>[^)]*)\)", text, re.I)
+    limits = list(re.finditer(
+        r"(?P<label>5h|Five Hour|Monthly|Weekly) limit:\s*(?:\[[^\n]*\]\s*)?"
+        r"(?P<pct>\d+(?:\.\d+)?)%\s+left\s*\(resets\s+(?P<reset>[^)]*)\)",
+        text, re.I,
+    ))
     credits = re.search(r"^\s*(?:[│|]\s*)?Credits:\s*(.+?)\s*(?:[│|])?\s*$", text, re.MULTILINE | re.I)
-    if not account or not limit:
-        raise ValueError("Codex /status did not contain account and a monthly or weekly limit field")
+    if not account or not limits:
+        raise ValueError("Codex /status did not contain account and a 5-hour, weekly, or monthly limit field")
+    metrics = {}
+    labels = {}
+    for limit in limits:
+        normalized = limit.group("label").lower()
+        key = "five_hour" if normalized in {"5h", "five hour"} else normalized
+        metrics[key] = {
+            "remaining_pct": percentage(limit.group("pct")),
+            "reset": limit.group("reset").strip(),
+        }
+        labels[key] = "5-Hour Limit" if key == "five_hour" else key.title() + " Limit"
+    primary_key = next((key for key in ("five_hour", "weekly", "monthly") if key in metrics), None)
+    metrics["primary"] = metrics[primary_key]
     return {
         "provider": "codex",
         "account_name": account.group(1).strip(),
         "plan_type": account.group(2).strip() or "ChatGPT",
-        "metrics": {
-            "primary": {"remaining_pct": percentage(limit.group("pct")), "reset": limit.group("reset").strip()}
-        },
-        "limit_label": limit.group("label").title() + " Limit",
+        "metrics": metrics,
+        "limit_label": labels[primary_key],
         "credits": credits.group(1).strip() if credits else "None",
     }
+
+
+def account_name_from_transcript(provider: str, raw: str) -> str:
+    """Extract only the CLI-visible account identity from a partial panel."""
+    text = strip_terminal(raw).replace("│", "|")
+    if provider == "codex":
+        match = re.search(r"^\s*(?:[|]\s*)?Account:\s*(.+?)\s*\([^)]*\)\s*(?:[|])?\s*$", text, re.MULTILINE)
+    else:
+        match = re.search(r"^\s*Account:\s*(.+?)\s*$", text, re.MULTILINE | re.I)
+    return match.group(1).strip()[:160] if match else ""
 
 
 def parse_antigravity_usage(raw: str) -> dict:
@@ -302,10 +331,24 @@ def open_terminal() -> tuple[int, int]:
     return master, slave
 
 
+def matching_pty_responses(
+    text: str, responders: list[tuple[str, str, str]], handled: set[int]
+) -> list[tuple[str, str]]:
+    """Return newly matched one-shot PTY responses and mark them handled."""
+    text = strip_terminal(text)
+    matches: list[tuple[str, str]] = []
+    for index, (pattern, response, message) in enumerate(responders):
+        if index not in handled and re.search(pattern, text, re.I | re.S):
+            handled.add(index)
+            matches.append((response, message))
+    return matches
+
+
 def pty_command(
     command: list[str], env: dict[str, str], inputs: list[tuple[float, str, str]], timeout: float = 20.0,
     cwd: str | None = None, complete: Callable[[str], bool] | None = None,
     progress: Callable[[str], None] | None = None,
+    responders: list[tuple[str, str, str]] | None = None,
 ) -> str:
     """Run a TUI command, stream meaningful progress, and stop once a panel is complete."""
     master, slave = open_terminal()
@@ -314,6 +357,7 @@ def pty_command(
     transcript = bytearray()
     deadline = time.monotonic() + timeout
     next_input = 0
+    handled_responders: set[int] = set()
     started = time.monotonic()
     try:
         while time.monotonic() < deadline:
@@ -332,7 +376,12 @@ def pty_command(
                 if not data:
                     break
                 transcript.extend(data)
-                if complete and complete(transcript.decode("utf-8", errors="replace")):
+                decoded = transcript.decode("utf-8", errors="replace")
+                for response, message in matching_pty_responses(decoded, responders or [], handled_responders):
+                    os.write(master, response.encode("utf-8"))
+                    if progress:
+                        progress(message)
+                if complete and complete(decoded):
                     if progress:
                         progress("Quota panel is complete. Parsing the normalized values now.")
                     break
@@ -499,6 +548,11 @@ def collect_profile(profile: dict, include_transcript: bool = False, progress: C
             ],
             timeout=60, cwd=str(profile_workdir(profile)),
             complete=lambda text: _panel_parses(parse_codex_status, text), progress=progress,
+            responders=[(
+                r"Update now\s*\(runs .*?\)\s*2\.?\s*Skip",
+                "2\r",
+                "Codex offered an interactive CLI update. Skipping it inside the read-only collector.",
+            )],
         )
         try:
             parsed = parse_codex_status(raw)
@@ -530,8 +584,11 @@ def error_snapshot(profile: dict, error: Exception) -> dict:
         diagnostics["evidence_id"] = archive_failure_evidence(profile, error, diagnostics)
     except (OSError, ValueError, TypeError) as storage_error:
         diagnostics["evidence_storage"] = f"unavailable ({type(storage_error).__name__})"
+    account_name = account_name_from_transcript(profile["provider"], error.transcript) if isinstance(error, CollectionError) else ""
+    account_name = account_name or str(profile.get("last_account_name") or "")[:160]
     return {
         "profile_id": profile["id"], "label": profile.get("label", ""), "provider": profile["provider"],
+        "account_name": account_name,
         "status": "error", "error": str(error), "diagnostics": diagnostics,
         "collected_at": utcnow(), "source": "CLI collector",
     }
@@ -548,11 +605,106 @@ def waha_settings() -> dict:
     }
 
 
+def email_settings() -> dict:
+    """Read host-only SMTP fallback settings without persisting credentials."""
+    saved = read_json(EMAIL_SECRET_FILE, {})
+    env_host = os.environ.get("CYD_MONITOR_SMTP_HOST", "").strip()
+    if not env_host and saved:
+        return {
+            "host": str(saved.get("host", "")).strip(),
+            "port": max(1, min(65535, int(saved.get("port", 587)))),
+            "security": str(saved.get("security", "starttls")).strip().lower(),
+            "username": str(saved.get("username", "")).strip(),
+            "password": str(saved.get("password", "")).strip(),
+            "sender": str(saved.get("sender", "")).strip(),
+            "recipients": [str(item).strip() for item in saved.get("recipients", []) if str(item).strip()][:5],
+        }
+    return {
+        "host": env_host,
+        "port": bounded_int_env("CYD_MONITOR_SMTP_PORT", 587, 1, 65535),
+        "security": os.environ.get("CYD_MONITOR_SMTP_SECURITY", "starttls").strip().lower(),
+        "username": os.environ.get("CYD_MONITOR_SMTP_USERNAME", "").strip(),
+        "password": os.environ.get("CYD_MONITOR_SMTP_PASSWORD", "").strip(),
+        "sender": os.environ.get("CYD_MONITOR_SMTP_FROM", "").strip(),
+        "recipients": [item.strip() for item in os.environ.get("CYD_MONITOR_ALERT_EMAIL_TO", "").split(",") if item.strip()][:5],
+    }
+
+
+def email_fallback_configured(settings: dict | None = None) -> bool:
+    settings = settings or email_settings()
+    valid_recipients = bool(settings["recipients"]) and all(
+        re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", item) for item in settings["recipients"]
+    )
+    return bool(
+        settings["host"] and settings["username"] and settings["password"]
+        and re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", settings["sender"])
+        and valid_recipients and settings["security"] in {"starttls", "tls"}
+    )
+
+
 def record_alert_status(**changes) -> None:
     def apply_changes(current: dict) -> None:
         current.update(changes)
         current["updated_at"] = utcnow()
     update_json(ALERTS_FILE, {}, apply_changes)
+
+
+def send_email_message(subject: str, body: str) -> tuple[bool, str]:
+    """Send through an SMTP transport independent of WAHA and its session."""
+    settings = email_settings()
+    configured = email_fallback_configured(settings)
+    record_alert_status(email_fallback_configured=configured)
+    if not configured:
+        message = "Email fallback is not configured with TLS SMTP host credentials, sender, and recipient"
+        record_alert_status(fallback_email_last_error=message)
+        return False, message
+    email = EmailMessage()
+    email["Subject"] = subject[:180]
+    email["From"] = settings["sender"]
+    email["To"] = ", ".join(settings["recipients"])
+    email.set_content(body)
+    context = ssl.create_default_context()
+    try:
+        if settings["security"] == "tls":
+            client = smtplib.SMTP_SSL(settings["host"], settings["port"], timeout=12, context=context)
+        else:
+            client = smtplib.SMTP(settings["host"], settings["port"], timeout=12)
+        with client:
+            if settings["security"] == "starttls":
+                client.ehlo()
+                client.starttls(context=context)
+                client.ehlo()
+            client.login(settings["username"], settings["password"])
+            client.send_message(email)
+        record_alert_status(fallback_email_last_success_at=utcnow(), fallback_email_last_error="")
+        return True, "Fallback email delivery accepted by the SMTP server."
+    except (OSError, ValueError, smtplib.SMTPException) as error:
+        message = f"Email fallback failed: {type(error).__name__}"
+        record_alert_status(fallback_email_last_error=message)
+        return False, message
+
+
+def send_waha_failure_email(event: str, alert_message: str, waha_error: str) -> tuple[bool, str]:
+    """Send one deduplicated fallback email for a distinct failed WAHA message."""
+    delivery_key = hashlib.sha256((event + "\0" + alert_message).encode("utf-8")).hexdigest()
+    status = read_json(ALERTS_FILE, {})
+    if status.get("fallback_email_delivery_key") == delivery_key:
+        return True, "Fallback email was already delivered for this WAHA failure."
+    delivered, detail = send_email_message(
+        "[CYD Usage Monitor] WhatsApp alert delivery failed",
+        "The CYD Usage Monitor detected an event, but WAHA could not deliver its WhatsApp notification.\n\n"
+        f"WAHA result: {waha_error}\n\nOriginal monitor notification:\n\n{alert_message}\n",
+    )
+    if delivered:
+        record_alert_status(fallback_email_delivery_key=delivery_key, fallback_email_last_event=event)
+    return delivered, detail
+
+
+def send_test_email() -> tuple[bool, str]:
+    return send_email_message(
+        "[CYD Usage Monitor] Fallback email test",
+        "This confirms that the independent SMTP fallback for CYD Usage Monitor alerts is working.\n",
+    )
 
 
 def alert_title(profile: dict, snapshot: dict) -> str:
@@ -650,13 +802,15 @@ def record_incident(profile: dict, previous: dict | None, snapshot: dict) -> Non
 
 def deliver_waha_message(event: str, message: str) -> tuple[bool, str]:
     """Deliver a dashboard/collector alert without exposing the WAHA key."""
+    alert_message = message
     settings = waha_settings()
     configured = bool(settings["api_key"] and settings["chat_id"])
     record_alert_status(configured=configured, session=settings["session"], chat_id=settings["chat_id"] if configured else "")
     if not configured:
         error = "WAHA alerts are not configured: set WAHA_API_KEY and a chat ID"
         record_alert_status(last_event=event, last_error=error)
-        return False, error
+        _, fallback = send_waha_failure_email(event, alert_message, error)
+        return False, error + " " + fallback
     payload = json.dumps({"session": settings["session"], "chatId": settings["chat_id"], "text": message}).encode("utf-8")
     request = urlrequest.Request(
         settings["url"] + "/api/sendText", data=payload, method="POST",
@@ -683,11 +837,13 @@ def deliver_waha_message(event: str, message: str) -> tuple[bool, str]:
         if detail:
             message += f": {detail[:600]}"
         record_alert_status(last_event=event, last_error=message)
-        return False, message
+        _, fallback = send_waha_failure_email(event, alert_message, message)
+        return False, message + " " + fallback
     except (OSError, ValueError, RuntimeError, urlerror.URLError) as error:
         message = f"WAHA delivery failed: {error}"
         record_alert_status(last_event=event, last_error=message)
-        return False, message
+        _, fallback = send_waha_failure_email(event, alert_message, message)
+        return False, message + " " + fallback
 
 
 def send_test_alert() -> tuple[bool, str]:
@@ -700,7 +856,7 @@ def send_test_alert() -> tuple[bool, str]:
     )
 
 
-def notify_transition(profile: dict, previous: dict | None, snapshot: dict) -> None:
+def notify_transition(profile: dict, previous: dict | None, snapshot: dict) -> bool | None:
     """Send at most one confirmed failure and one recovery notice per outage.
 
     The snapshot itself is the durable deduplication state: restarting the
@@ -712,8 +868,13 @@ def notify_transition(profile: dict, previous: dict | None, snapshot: dict) -> N
         previous and previous.get("status") == "error" and previous.get("alert_confirmed", True)
     )
     is_alerting = bool(snapshot.get("status") == "error" and snapshot.get("alert_confirmed", True))
-    if is_alerting == was_alerting:
-        return
+    retry_pending_failure = bool(is_alerting and snapshot.get("alert_delivery_pending"))
+    if is_alerting == was_alerting and not retry_pending_failure:
+        return None
+    if not is_alerting and previous and previous.get("alert_delivery_pending"):
+        # Do not send a confusing recovery message when the corresponding
+        # failure could not be delivered. The incident remains in history.
+        return None
     name = snapshot.get("account_name") or profile.get("label") or profile["provider"].title() + " account"
     if is_alerting:
         event = "failure"
@@ -745,7 +906,8 @@ def notify_transition(profile: dict, previous: dict | None, snapshot: dict) -> N
             f"⏱️ *Interruption:* {elapsed_text((previous.get('failure_started_at') or previous.get('collected_at')) if previous else None, snapshot.get('collected_at'))}\n\n"
             "🔧 *Resolution*\nA later scheduled poll returned a complete quota panel. The monitor recovered automatically; no reconnect or credential change was performed."
         )
-    deliver_waha_message(event, message)
+    delivered, _ = deliver_waha_message(event, message)
+    return delivered
 
 
 def persist_snapshot(profile: dict, snapshot: dict) -> bool:
@@ -753,10 +915,20 @@ def persist_snapshot(profile: dict, snapshot: dict) -> bool:
     profile_id = profile["id"]
     with data_lock(DATA_DIR):
         config = read_json_unlocked(PROFILES_FILE, {"profiles": []})
-        if profile_id not in {item.get("id") for item in config.get("profiles", [])}:
+        configured_profile = next((item for item in config.get("profiles", []) if item.get("id") == profile_id), None)
+        if configured_profile is None:
             return False
         state = read_json_unlocked(STATE_FILE, {"profiles": {}})
         previous = state.setdefault("profiles", {}).get(profile_id)
+        account_name = str(snapshot.get("account_name") or "").strip()[:160]
+        if not account_name:
+            account_name = str(configured_profile.get("last_account_name") or (previous or {}).get("account_name") or "").strip()[:160]
+            if account_name:
+                snapshot["account_name"] = account_name
+        if account_name and configured_profile.get("last_account_name") != account_name:
+            configured_profile["last_account_name"] = account_name
+            configured_profile["account_recorded_at"] = snapshot.get("collected_at") or utcnow()
+            write_json_unlocked(PROFILES_FILE, config)
         if snapshot.get("status") == "error":
             previous_is_error = bool(previous and previous.get("status") == "error")
             previous_confirmed = bool(previous_is_error and previous.get("alert_confirmed", True))
@@ -767,6 +939,14 @@ def persist_snapshot(profile: dict, snapshot: dict) -> bool:
                 if previous_is_error else snapshot.get("collected_at")
             )
             snapshot["alert_confirmed"] = previous_confirmed or snapshot["consecutive_failures"] >= ALERT_FAILURE_THRESHOLD
+            previous_pending = previous.get("alert_delivery_pending") if previous_is_error else False
+            if previous_pending is None and previous_confirmed:
+                previous_pending = bool(read_json(ALERTS_FILE, {}).get("last_error"))
+            snapshot["alert_delivery_pending"] = bool(
+                snapshot["alert_confirmed"] and (
+                    previous_pending or not previous_confirmed
+                )
+            )
         state["profiles"][profile_id] = snapshot
         state["updated_at"] = utcnow()
         write_json_unlocked(STATE_FILE, state)
@@ -779,7 +959,15 @@ def persist_snapshot(profile: dict, snapshot: dict) -> bool:
             "event": "incident_history_write_failed", "provider": profile.get("provider"),
             "error_type": type(incident_error).__name__, "at": utcnow(),
         }), flush=True)
-    notify_transition(profile, previous, snapshot)
+    delivery_result = notify_transition(profile, previous, snapshot)
+    if delivery_result is not None and snapshot.get("status") == "error":
+        snapshot["alert_delivery_pending"] = not delivery_result
+        with data_lock(DATA_DIR):
+            state = read_json_unlocked(STATE_FILE, {"profiles": {}})
+            current = state.setdefault("profiles", {}).get(profile_id)
+            if current and current.get("collected_at") == snapshot.get("collected_at"):
+                current["alert_delivery_pending"] = not delivery_result
+                write_json_unlocked(STATE_FILE, state)
     return True
 
 
@@ -1081,6 +1269,13 @@ def process_requests(sessions: dict[str, LoginSession]) -> None:
                 "phase": "alert_delivery", "updated_at": utcnow(), "output": message,
             }
             changed = True
+        elif kind == "test_email":
+            delivered, message = send_test_email()
+            records[request_id] = {
+                "kind": kind, "status": "completed" if delivered else "error",
+                "phase": "email_delivery", "updated_at": utcnow(), "output": message,
+            }
+            changed = True
         elif not profile:
             records[request_id] = {
                 "kind": kind, "profile_id": profile_id, "status": "error",
@@ -1210,6 +1405,7 @@ def main() -> None:
     parser.add_argument("--once", action="store_true", help="Collect each configured profile once and exit")
     args = parser.parse_args()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    record_alert_status(email_fallback_configured=email_fallback_configured())
     if args.once:
         collect_all()
         return

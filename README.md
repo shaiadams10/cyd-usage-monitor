@@ -1,45 +1,58 @@
-# CYD Usage Monitor
+# ESP32 Projects Workspace & Usage Monitor
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![PlatformIO](https://img.shields.io/badge/firmware-PlatformIO-orange.svg)](cyd-usage-monitor/platformio.ini)
-[![ESP32](https://img.shields.io/badge/hardware-ESP32--2432S028R-red.svg)](cyd-usage-monitor/README.md#hardware)
+[![ESPHome](https://img.shields.io/badge/voice%20firmware-ESPHome-blue.svg)](esp32s3-home-assistant/device.yaml)
+[![ESP32-S3](https://img.shields.io/badge/hardware-ESP32--S3-blueviolet.svg)](docs/hardware.md)
+[![CYD](https://img.shields.io/badge/hardware-ESP32--2432S028R-red.svg)](cyd-usage-monitor/README.md#hardware)
 
-A self-hosted usage dashboard for the ESP32 Cheap Yellow Display. It collects
-quota snapshots from locally authenticated OpenAI Codex and Google Antigravity
-CLIs, renders them in a browser dashboard, and keeps the selected account
-visible on a physical 320×240 CYD screen.
+A unified workspace of independent ESP32 firmware projects, self-hosted voice AI pipelines, and smart home automation tools.
 
-![CYD Usage Monitor dashboard](docs/images/cyd-usage-monitor-dashboard.png)
+---
 
-## Highlights
+## 🧭 Master Quick Links & Web Portals Directory
 
-- Multiple isolated Codex and Antigravity CLI profiles
-- Live quota cards for Codex, Gemini, and Claude usage windows
-- A browser-based LVGL/WebAssembly preview matching the physical display
-- Fast profile switching from the dashboard, touchscreen, or serial input
-- Optional WhatsApp outage and recovery alerts through WAHA
-- Hardened Docker Compose deployment with configurable, private host mounts
-- Process-safe local state and isolated, least-privilege CLI subprocesses
-- No provider tokens, browser cookies, or private provider APIs in the app
+| Service / Device | URL / Endpoint | Purpose / Function | Documentation |
+| :--- | :--- | :--- | :--- |
+| **🎙️ ESP32-S3 Voice Satellite** | Device-local web server | On-device wake detection, Home Assistant Assist audio, and focused diagnostics | [`esp32s3-home-assistant`](esp32s3-home-assistant/README.md) |
+| **🏠 Home Assistant Dashboard** | Private operator configuration | Master smart home automation interface, device control, and voice pipelines | [`docs/hardware.md`](docs/hardware.md) |
+| **🗣️ Wyoming Piper TTS** | Private Wyoming endpoint | Local neural text-to-speech | [`esp32s3-home-assistant/server`](esp32s3-home-assistant/server/README.md) |
+| **🎙️ Wyoming Faster Whisper** | Private Wyoming endpoint | Local speech-to-text | [`esp32s3-home-assistant/server`](esp32s3-home-assistant/server/README.md) |
+| **📊 CYD Usage Monitor Dashboard** | `http://127.0.0.1:8000` | Self-hosted CLI quota monitor and interactive WebAssembly CYD preview | [`cyd-usage-monitor`](cyd-usage-monitor/README.md) |
 
-## Architecture
+---
 
-```text
-Codex /status + Antigravity /usage
-                 │
-       isolated CLI collector
-                 │
-       normalized local snapshot
-          ┌──────┴──────┐
-          │             │
-  protected dashboard   authenticated CYD API
-          │             │
-  LVGL browser preview  ESP32-2432S028R
-```
+## 📦 Active Projects in this Repository
 
-Provider authentication remains inside each official CLI profile. The
-collector parses only the quota panels those CLIs display and writes a small
-normalized snapshot for the dashboard and device.
+### 1. [ESP32-S3 Home Assistant](esp32s3-home-assistant/README.md) — Primary Home Assistant Project
+- **Target Hardware:** ESP32-S3-DevKitC-1 (16MB Flash, 8MB PSRAM), INMP441 I2S Microphone, MAX98357A 3.2W I2S Class D DAC, 4Ω 3W Box Speaker, SSD1306 128×64 OLED Display.
+- **Key Features:**
+  - ESPHome/ESP-IDF clean-room firmware using on-device microWakeWord detection.
+  - Standard encrypted Home Assistant Assist audio and intent pipeline.
+  - Immediate 17%-volume listening earcon and explicit OLED voice states.
+  - Minimal device-local diagnostics dashboard with logs, lifecycle state,
+    reset reason, heap, PSRAM, loop-time, Wi-Fi, and safe recovery controls.
+  - Pinned Faster Whisper and Piper staging services with no server-side wake
+    stream in the production architecture.
+
+### 2. [CYD Usage Monitor](cyd-usage-monitor/README.md)
+- **Target Hardware:** ESP32-2432S028R Cheap Yellow Display (2.8" ILI9341 LCD + XPT2046 Touch).
+- **Key Features:**
+  - Self-hosted dashboard collecting quota snapshots from OpenAI Codex and Google Antigravity CLIs.
+  - Interactive browser-based LVGL WebAssembly preview matching the physical screen.
+  - Touchscreen and serial navigation shortcuts with optional WhatsApp outage alerts.
+
+### 3. [ESP32-S3 Standalone Voice Assistant ("assistant")](assistant/README.md)
+- **Target Hardware:** ESP32-S3-DevKitC-1, INMP441 I2S Microphone, MAX98357A 3.2W I2S Class D DAC, 4Ω 3W Box Speaker *(No OLED — zero bus latency)*.
+- **Key Features:**
+  - Dedicated STT and light control firmware: triggers on *"Hey Burden lights on"* / *"Hey Burden lights off"*.
+  - Direct local Govee UDP unicast (<5ms) & Home Assistant REST synchronization.
+  - Complete wiring documentation covering all 7 amplifier pins (`SD_MODE` pull-up to 3.3V, `GAIN` to GND) and 6 microphone pins.
+  - Interactive Serial CLI and real-time Web Dashboard with live VU meter.
+
+## 📌 Pin Mapping Matrix & Schematics
+
+Full pin tables, visual Mermaid flowcharts, ASCII circuit diagrams, and interactive Wokwi visual layouts are available in [`docs/hardware.md`](docs/hardware.md).
+
 
 ## Quick start
 

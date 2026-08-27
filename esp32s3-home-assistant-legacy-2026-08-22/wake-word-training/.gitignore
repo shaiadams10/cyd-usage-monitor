@@ -1,0 +1,11 @@
+# Generated models and training data stay local.
+artifacts/*
+!artifacts/README.md
+datasets/
+downloads/
+*.onnx
+*.tflite
+*.wav
+*.npy
+*.npz
+deployment.local.json

@@ -1,0 +1,1297 @@
+substitutions:
+  device_name: esp32s3-home-assistant
+  friendly_name: ESP32-S3 Home Assistant
+  # The fitted ring in the operator photo has 12 WS2812/NeoPixel pixels.
+  led_ring_count: "12"
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.7.0
+  project:
+    name: adamshub.esp32s3-home-assistant
+    version: "2.0.0-dev"
+  on_boot:
+    - priority: -100
+      then:
+        - lambda: id(boot_session_nonce) = esp_random();
+        - speaker.volume_set:
+            id: speaker_out
+            volume: !lambda |-
+              // GAIN is strapped to GND (+12 dB). Keep enough digital
+              // headroom that Piper peaks cannot overdrive the amp/USB rail.
+              const float requested = fmaxf(0.10f, fminf(0.60f, id(speaker_volume).state / 100.0f));
+              const float level = requested * 0.50f;
+              const float target_db = 20.0f * log10f(level);
+              return fmaxf(0.0f, fminf(1.0f, (target_db + 49.0f) / 49.0f));
+        - text_sensor.template.publish:
+            id: voice_state
+            state: "WAITING FOR HOME ASSISTANT"
+        - text_sensor.template.publish:
+            id: interaction_availability
+            state: "BUSY - CONNECTING TO HOME ASSISTANT"
+        - binary_sensor.template.publish:
+            id: ready_for_voice
+            state: OFF
+        - script.execute: ring_processing
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    version: recommended
+    sdkconfig_options:
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+external_components:
+  - source:
+      type: local
+      path: components
+    components:
+      - buffered_microphone
+
+logger:
+  level: DEBUG
+  # This board exposes UART0 through its CH343 USB bridge on COM4.
+  hardware_uart: UART0
+  tx_buffer_size: 1024
+  task_log_buffer_size: 1024
+  logs:
+    component: WARN
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  actions:
+    - action: report_voice_result
+      variables:
+        command: string
+        result: string
+        success: bool
+      then:
+        - text_sensor.template.publish:
+            id: matched_command
+            state: !lambda return command;
+        - text_sensor.template.publish:
+            id: action_result
+            state: !lambda return result;
+        - lambda: |-
+            id(action_reported) = true;
+            id(action_succeeded) = success;
+        - sensor.template.publish:
+            id: wake_to_action_latency
+            state: !lambda |-
+              return id(wake_detected_ms) ? millis() - id(wake_detected_ms) : NAN;
+        - lambda: |-
+            ESP_LOGI("voice_trace", "ACTION %s | command=\"%s\" | result=\"%s\"",
+                     success ? "OK" : "FAILED", command.c_str(), result.c_str());
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none
+  reboot_timeout: 15min
+
+web_server:
+  port: 80
+  version: 3
+  # The pinned ESPHome v3 UI and our log controls are bundled together so the
+  # dashboard stays available without access to oi.esphome.io.
+  js_url: ""
+  js_include: dashboard-bundle.js
+  compression: gzip
+  log: true
+  ota: false
+  sorting_groups:
+    - id: dashboard_voice
+      name: "Voice Assistant"
+      sorting_weight: 10
+    - id: dashboard_connection
+      name: "Connection"
+      sorting_weight: 20
+    - id: dashboard_health
+      name: "Device Health"
+      sorting_weight: 30
+    - id: dashboard_recovery
+      name: "Recovery"
+      sorting_weight: 40
+
+debug:
+  update_interval: 10s
+
+globals:
+  - id: wake_feedback_variant
+    type: uint8_t
+    restore_value: false
+    initial_value: "0"
+  - id: boot_session_nonce
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: session_sequence
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: action_reported
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: action_succeeded
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: pipeline_started_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: wake_detected_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: speech_started_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: transcript_ready_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: speech_ended_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: pipeline_failed
+    type: bool
+    restore_value: false
+    initial_value: "false"
+
+i2c:
+  id: display_bus
+  sda: GPIO6
+  scl: GPIO5
+  frequency: 400kHz
+  scan: true
+
+i2s_audio:
+  - id: microphone_bus
+    i2s_bclk_pin: GPIO15
+    i2s_lrclk_pin: GPIO16
+  - id: speaker_bus
+    i2s_bclk_pin: GPIO17
+    i2s_lrclk_pin: GPIO18
+
+microphone:
+  - platform: i2s_audio
+    id: microphone_in
+    i2s_audio_id: microphone_bus
+    i2s_din_pin: GPIO7
+    adc_type: external
+    channel: left
+    pdm: false
+    sample_rate: 16000
+    bits_per_sample: 32bit
+    correct_dc_offset: true
+  # Voice Assistant receives a calibrated slice from before the local wake
+  # callback plus all samples captured during the handoff. microWakeWord stays
+  # on the physical mic, so replay can never retrigger the wake detector.
+  - platform: buffered_microphone
+    id: command_microphone
+    source_microphone: microphone_in
+    history_duration: 1s
+    pre_roll_duration: 260ms
+
+# Status-owned 12-pixel ring. It is deliberately internal so Home Assistant and
+# the local dashboard cannot override the usability signal.
+light:
+  - platform: esp32_rmt_led_strip
+    id: led_ring
+    internal: true
+    pin: GPIO4
+    chipset: WS2812
+    num_leds: ${led_ring_count}
+    rgb_order: GRB
+    restore_mode: ALWAYS_OFF
+    effects:
+      - addressable_lambda:
+          name: "Listening Yellow Rotate"
+          update_interval: 75ms
+          lambda: |-
+            static uint16_t head = 0;
+            it.all() = Color(0, 0, 0);
+            const uint16_t count = it.size();
+            if (count == 0) return;
+            // Exactly three pixels form a bright-to-dim listening comet.
+            const uint8_t levels[3] = {255, 120, 42};
+            for (uint8_t tail = 0; tail < 3; tail++) {
+              const uint16_t pixel = (head + count - tail) % count;
+              it[pixel] = Color(levels[tail], levels[tail] * 45 / 100, 0);
+            }
+            head = (head + 1) % count;
+      - pulse:
+          name: "Processing Yellow Breathe"
+          transition_length: 600ms
+          update_interval: 600ms
+          min_brightness: 10%
+          max_brightness: 34%
+      - pulse:
+          name: "Unavailable Red Pulse"
+          transition_length: 700ms
+          update_interval: 700ms
+          min_brightness: 8%
+          max_brightness: 35%
+
+speaker:
+  - platform: i2s_audio
+    id: speaker_out
+    i2s_audio_id: speaker_bus
+    i2s_dout_pin: GPIO8
+    dac_type: external
+    # The proven legacy driver sent identical left/right slots. Force the
+    # upstream audio pipeline to duplicate mono into stereo so the fitted
+    # amplifier receives audio regardless of its L/R-select strap.
+    channel: stereo
+    # ESPHome's Assist API streams signed 16-bit, 16 kHz mono PCM. Keep local
+    # tones in that same format so a tone cannot leave stale stream metadata
+    # behind and corrupt the following Piper response.
+    sample_rate: 16000
+    bits_per_sample: 16bit
+    # MAX98357A native I2S uses the Philips one-bit delay. The former MSB mode
+    # was left-justified and produced torn/distorted output. Earlier claims
+    # that standard I2S was silent came from a test with incorrect metadata.
+    i2s_comm_fmt: stand_i2s
+    buffer_duration: 300ms
+    timeout: 500ms
+
+font:
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 10
+    glyphs: " !%&'(),-.:0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+  - file: "gfonts://Roboto@500"
+    id: font_state
+    size: 14
+    glyphs: " !%&'(),-.:0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+display:
+  - platform: ssd1306_i2c
+    id: oled
+    i2c_id: display_bus
+    model: "SSD1306 128x64"
+    address: 0x3C
+    contrast: 65%
+    update_interval: 250ms
+    lambda: |-
+      it.printf(64, 0, id(font_small), TextAlign::TOP_CENTER, "HEY BURDEN");
+      it.line(0, 13, 127, 13);
+      it.printf(64, 18, id(font_state), TextAlign::TOP_CENTER, "%s", id(voice_state).state.c_str());
+      if (id(last_request).has_state() && !id(last_request).state.empty()) {
+        std::string request = id(last_request).state;
+        if (request.size() > 21) request = request.substr(0, 18) + "...";
+        it.printf(0, 42, id(font_small), "Heard: %s", request.c_str());
+      }
+      it.printf(0, 54, id(font_small), "WiFi %.0f dBm", id(wifi_signal_db).state);
+
+binary_sensor:
+  - platform: status
+    name: "Device Online"
+    id: device_online
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: dashboard_connection
+      sorting_weight: 10
+  - platform: template
+    id: ready_for_voice
+    name: "Ready for Voice"
+    icon: mdi:account-voice
+    device_class: running
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 5
+  - platform: gpio
+    id: boot_button
+    name: "Physical Assist Button"
+    internal: true
+    pin:
+      number: GPIO0
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    filters:
+      - delayed_on: 30ms
+      - delayed_off: 30ms
+    on_press:
+      - micro_wake_word.stop
+      - voice_assistant.stop
+      - delay: 50ms
+      - voice_assistant.start:
+          silence_detection: true
+      - text_sensor.template.publish:
+          id: interaction_availability
+          state: "BUSY - WAIT FOR GREEN"
+      - binary_sensor.template.publish:
+          id: ready_for_voice
+          state: OFF
+      - script.execute: ring_listening
+      - if:
+          condition:
+            switch.is_on: wake_sound_enabled
+          then:
+            - script.execute: play_feedback_tone
+
+number:
+  - platform: template
+    id: command_pre_roll
+    name: "One-Breath Pre-roll"
+    icon: mdi:waveform
+    entity_category: config
+    unit_of_measurement: "ms"
+    # Shorter values were observed to miss speech and hit the 15-second
+    # no-speech timeout. Keep enough wake/command overlap for one-breath use.
+    min_value: 180
+    max_value: 340
+    step: 20
+    initial_value: 260
+    restore_value: true
+    optimistic: true
+    set_action:
+      - lambda: |-
+          id(command_microphone).set_pre_roll_duration_ms(static_cast<uint32_t>(x));
+          ESP_LOGI("buffered_microphone", "Dashboard pre-roll changed to %u ms", (unsigned) x);
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 24
+  - platform: template
+    id: speaker_volume
+    name: "Speaker Volume"
+    icon: mdi:volume-high
+    unit_of_measurement: "%"
+    min_value: 10
+    # The MAX98357A GAIN pin is strapped to GND (+12 dB). The 60% UI ceiling
+    # maps to 30% PCM amplitude; Piper receives another 0.65 multiplier.
+    max_value: 60
+    step: 5
+    initial_value: 50
+    restore_value: true
+    optimistic: true
+    set_action:
+      - speaker.volume_set:
+          id: speaker_out
+          volume: !lambda |-
+            const float requested = fmaxf(0.10f, fminf(0.60f, x / 100.0f));
+            const float level = requested * 0.50f;
+            const float target_db = 20.0f * log10f(level);
+            return fmaxf(0.0f, fminf(1.0f, (target_db + 49.0f) / 49.0f));
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 25
+
+switch:
+  - platform: template
+    id: wake_word_enabled
+    name: "Wake Word Enabled"
+    icon: mdi:microphone
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 20
+    turn_on_action:
+      - if:
+          condition:
+            voice_assistant.connected
+          then:
+            - micro_wake_word.start
+            - text_sensor.template.publish:
+                id: interaction_availability
+                state: "READY - SAY HEY BURDEN"
+            - binary_sensor.template.publish:
+                id: ready_for_voice
+                state: ON
+            - script.execute: ring_ready
+    turn_off_action:
+      - micro_wake_word.stop
+      - voice_assistant.stop
+      - text_sensor.template.publish:
+          id: voice_state
+          state: "WAKE WORD DISABLED"
+      - text_sensor.template.publish:
+          id: interaction_availability
+          state: "UNAVAILABLE - WAKE WORD DISABLED"
+      - binary_sensor.template.publish:
+          id: ready_for_voice
+          state: OFF
+      - script.execute: ring_disabled
+  - platform: template
+    id: wake_sound_enabled
+    name: Wake Sound
+    icon: mdi:volume-source
+    entity_category: config
+    optimistic: true
+    # Default to an audible acknowledgement. It is deliberately short and
+    # quiet so buffered one-breath audio remains usable.
+    restore_mode: ALWAYS_ON
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 23
+
+button:
+  - platform: template
+    name: "Test Speaker"
+    icon: mdi:volume-medium
+    on_press:
+      - script.execute: test_feedback_tone
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 26
+  - platform: restart
+    name: "Restart Device"
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: dashboard_recovery
+      sorting_weight: 10
+  - platform: safe_mode
+    name: "Restart in Safe Mode"
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: dashboard_recovery
+      sorting_weight: 20
+
+text_sensor:
+  - platform: template
+    id: current_session_id
+    name: "Current Voice Session"
+    icon: mdi:identifier
+    update_interval: never
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 1
+  - platform: template
+    id: interaction_availability
+    name: "Interaction Availability"
+    icon: mdi:traffic-light
+    update_interval: never
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 2
+  - platform: template
+    id: voice_state
+    name: "Voice State"
+    icon: mdi:state-machine
+    update_interval: never
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 10
+  - platform: template
+    id: last_wake_word
+    name: "Last Wake Word"
+    icon: mdi:account-voice
+    update_interval: never
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 30
+  - platform: template
+    id: last_request
+    name: "Heard (Exact STT)"
+    icon: mdi:text-recognition
+    update_interval: never
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 40
+  - platform: template
+    id: last_response
+    name: "Assistant Reply (Exact)"
+    icon: mdi:message-reply-text
+    update_interval: never
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 50
+  - platform: template
+    id: matched_command
+    name: "Matched Command"
+    icon: mdi:check-decagram-outline
+    update_interval: never
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 52
+  - platform: template
+    id: action_result
+    name: "Action Result"
+    icon: mdi:lightning-bolt-circle
+    update_interval: never
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 54
+  - platform: template
+    id: routing_outcome
+    name: "Intent Routing Outcome"
+    icon: mdi:source-branch-check
+    update_interval: never
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 55
+  - platform: template
+    id: pipeline_timing
+    name: "Last Pipeline Timing"
+    icon: mdi:timer-check-outline
+    update_interval: never
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 56
+  - platform: template
+    id: last_error
+    name: "Last Error"
+    icon: mdi:alert-circle-outline
+    update_interval: never
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 60
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+      entity_category: diagnostic
+      web_server:
+        sorting_group_id: dashboard_connection
+        sorting_weight: 30
+    ssid:
+      name: "Connected SSID"
+      entity_category: diagnostic
+      web_server:
+        sorting_group_id: dashboard_connection
+        sorting_weight: 20
+    mac_address:
+      name: "Wi-Fi MAC"
+      entity_category: diagnostic
+      internal: true
+  - platform: debug
+    device:
+      name: "Device Information"
+      entity_category: diagnostic
+      internal: true
+    reset_reason:
+      name: "Reset Reason"
+      entity_category: diagnostic
+      web_server:
+        sorting_group_id: dashboard_health
+        sorting_weight: 50
+  - platform: version
+    name: "ESPHome Version"
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: dashboard_health
+      sorting_weight: 60
+
+sensor:
+  - platform: template
+    id: wake_to_pipeline_latency
+    name: "Wake to Pipeline"
+    icon: mdi:timer-sand
+    unit_of_measurement: "ms"
+    accuracy_decimals: 0
+    update_interval: never
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 62
+  - platform: template
+    id: replay_audio_duration
+    name: "Replayed Command Audio"
+    icon: mdi:waveform
+    unit_of_measurement: "ms"
+    accuracy_decimals: 0
+    update_interval: never
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 64
+  - platform: template
+    id: replay_audio_bytes
+    name: "Replayed Command Bytes"
+    icon: mdi:database-arrow-right
+    unit_of_measurement: "B"
+    accuracy_decimals: 0
+    update_interval: never
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 65
+  - platform: template
+    id: wake_to_speech_latency
+    name: "Wake to Speech Detection"
+    icon: mdi:microphone-message
+    unit_of_measurement: "ms"
+    accuracy_decimals: 0
+    update_interval: never
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 66
+  - platform: template
+    id: speech_capture_duration
+    name: "Speech Capture Duration"
+    icon: mdi:record-rec
+    unit_of_measurement: "ms"
+    accuracy_decimals: 0
+    update_interval: never
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 68
+  - platform: template
+    id: stt_processing_latency
+    name: "STT Processing"
+    icon: mdi:text-recognition
+    unit_of_measurement: "ms"
+    accuracy_decimals: 0
+    update_interval: never
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 70
+  - platform: template
+    id: wake_to_action_latency
+    name: "Wake to Action"
+    icon: mdi:lightning-bolt
+    unit_of_measurement: "ms"
+    accuracy_decimals: 0
+    update_interval: never
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 72
+  - platform: template
+    id: total_pipeline_latency
+    name: "Total Busy Time"
+    icon: mdi:timer-check
+    unit_of_measurement: "ms"
+    accuracy_decimals: 0
+    update_interval: never
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: dashboard_voice
+      sorting_weight: 74
+  - platform: wifi_signal
+    id: wifi_signal_db
+    name: "Wi-Fi Signal"
+    update_interval: 10s
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: dashboard_connection
+      sorting_weight: 40
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 10s
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: dashboard_health
+      sorting_weight: 10
+  - platform: debug
+    free:
+      name: "Free Heap"
+      entity_category: diagnostic
+      web_server:
+        sorting_group_id: dashboard_health
+        sorting_weight: 20
+    block:
+      name: "Largest Heap Block"
+      entity_category: diagnostic
+      internal: true
+    min_free:
+      name: "Minimum Free Heap"
+      entity_category: diagnostic
+      internal: true
+    fragmentation:
+      name: "Heap Fragmentation"
+      entity_category: diagnostic
+      internal: true
+    loop_time:
+      name: "Maximum Loop Time"
+      entity_category: diagnostic
+      web_server:
+        sorting_group_id: dashboard_health
+        sorting_weight: 40
+    psram:
+      name: "Free PSRAM"
+      entity_category: diagnostic
+      web_server:
+        sorting_group_id: dashboard_health
+        sorting_weight: 30
+
+script:
+  - id: ring_ready
+    mode: restart
+    then:
+      - light.turn_on:
+          id: led_ring
+          effect: "None"
+          brightness: 24%
+          red: 0%
+          green: 100%
+          blue: 0%
+  - id: ring_listening
+    mode: restart
+    then:
+      - light.turn_on:
+          id: led_ring
+          effect: "Listening Yellow Rotate"
+          brightness: 32%
+  - id: ring_processing
+    mode: restart
+    then:
+      - light.turn_on:
+          id: led_ring
+          effect: "Processing Yellow Breathe"
+          red: 100%
+          green: 45%
+          blue: 0%
+  - id: ring_unavailable
+    mode: restart
+    then:
+      - light.turn_on:
+          id: led_ring
+          effect: "Unavailable Red Pulse"
+          red: 100%
+          green: 0%
+          blue: 0%
+  - id: ring_disabled
+    mode: restart
+    then:
+      - light.turn_on:
+          id: led_ring
+          effect: "None"
+          brightness: 12%
+          red: 100%
+          green: 28%
+          blue: 0%
+  - id: play_feedback_tone
+    mode: restart
+    then:
+      - speaker.volume_set:
+          id: speaker_out
+          volume: !lambda |-
+            const float requested = fmaxf(0.10f, fminf(0.60f, id(speaker_volume).state / 100.0f));
+            const float level = requested * 0.50f;
+            const float target_db = 20.0f * log10f(level);
+            return fmaxf(0.0f, fminf(1.0f, (target_db + 49.0f) / 49.0f));
+      # Raw speaker.play data has no format metadata. Keep it identical to the
+      # Assist response stream so local feedback cannot poison later TTS.
+      - lambda: |-
+          id(speaker_out).set_audio_stream_info(esphome::audio::AudioStreamInfo(16, 1, 16000));
+      # speaker.play is a non-blocking one-shot action. Start the I2S task
+      # first so the complete tone reaches its ring buffer instead of racing
+      # the driver's asynchronous startup.
+      - lambda: id(speaker_out).start();
+      - wait_until:
+          # speaker.is_playing also returns true during STARTING. Wait for the
+          # actual RUNNING state so play/finish cannot race I2S setup.
+          condition:
+            lambda: return id(speaker_out).is_running();
+          timeout: 2500ms
+      - lambda: |-
+            // Cycle through three very short acknowledgement contours. Keep
+            // phase continuous and fade both ends so higher playback levels
+            // remain crisp instead of clicking at frequency transitions.
+            // A 35 ms, low-energy acknowledgement is immediate but short
+            // enough for noise suppression to reject during one-breath audio.
+            const uint8_t pattern = id(wake_feedback_variant)++ % 3;
+            const size_t sample_count = 560;
+            std::vector<uint8_t> audio(sample_count * 2);
+            float phase = 0.0f;
+            for (size_t i = 0; i < sample_count; i++) {
+              const float attack = fminf(1.0f, static_cast<float>(i) / 80.0f);
+              const float release = fminf(1.0f, static_cast<float>(sample_count - 1 - i) / 112.0f);
+              const float envelope = attack * release;
+              float frequency;
+              if (pattern == 0) {
+              frequency = i < 249 ? 900.0f : 1200.0f;
+              } else if (pattern == 1) {
+                frequency = 820.0f + 180.0f * static_cast<float>(i) / sample_count;
+              } else {
+              frequency = i < 280 ? 1200.0f : 900.0f;
+              }
+              phase += 2.0f * 3.14159265f * frequency / 16000.0f;
+            const int16_t sample = static_cast<int16_t>(8000.0f * envelope * sinf(phase));
+              const size_t frame = i * 2;
+              audio[frame] = static_cast<uint8_t>(sample & 0xFF);
+              audio[frame + 1] = static_cast<uint8_t>((sample >> 8) & 0xFF);
+            }
+            const size_t accepted = id(speaker_out).play(audio.data(), audio.size());
+            ESP_LOGI("speaker_probe", "Wake tone PCM accepted: %u/%u bytes (16 kHz, 16-bit, mono)",
+                     (unsigned) accepted, (unsigned) audio.size());
+      - speaker.finish:
+          id: speaker_out
+      - wait_until:
+          condition:
+            speaker.is_stopped:
+              id: speaker_out
+          timeout: 2s
+  - id: test_feedback_tone
+    # Ignore extra dashboard clicks until the current diagnostic tone has
+    # stopped. Restarting I2S while its ISR queue is active can tear the tone
+    # and overflow the speaker event queue.
+    mode: single
+    then:
+      - speaker.volume_set:
+          id: speaker_out
+          volume: !lambda |-
+            const float requested = fmaxf(0.10f, fminf(0.60f, id(speaker_volume).state / 100.0f));
+            const float level = requested * 0.50f;
+            const float target_db = 20.0f * log10f(level);
+            return fmaxf(0.0f, fminf(1.0f, (target_db + 49.0f) / 49.0f));
+      - lambda: |-
+          id(speaker_out).set_audio_stream_info(esphome::audio::AudioStreamInfo(16, 1, 16000));
+      - lambda: id(speaker_out).start();
+      - wait_until:
+          condition:
+            lambda: return id(speaker_out).is_running();
+          timeout: 2500ms
+      - lambda: |-
+            // A clearly audible 250 ms diagnostic tone. This is deliberately
+            // much longer than the wake acknowledgement.
+            const size_t sample_count = 4000;
+            std::vector<uint8_t> audio(sample_count * 2);
+            float phase = 0.0f;
+            for (size_t i = 0; i < sample_count; i++) {
+              const float attack = fminf(1.0f, static_cast<float>(i) / 220.0f);
+              const float release = fminf(1.0f, static_cast<float>(sample_count - 1 - i) / 440.0f);
+              const float envelope = attack * release;
+              phase += 2.0f * 3.14159265f * 880.0f / 16000.0f;
+              const int16_t sample = static_cast<int16_t>(14000.0f * envelope * sinf(phase));
+              const size_t frame = i * 2;
+              audio[frame] = static_cast<uint8_t>(sample & 0xFF);
+              audio[frame + 1] = static_cast<uint8_t>((sample >> 8) & 0xFF);
+            }
+            const size_t accepted = id(speaker_out).play(audio.data(), audio.size());
+            ESP_LOGI("speaker_probe", "Test tone PCM accepted: %u/%u bytes (16 kHz, 16-bit, mono)",
+                     (unsigned) accepted, (unsigned) audio.size());
+            // Read the actual GPIO pads while the I2S peripheral is sending
+            // the tone. Enabling pad input does not disconnect the peripheral
+            // output, and lets us distinguish a dead ESP/I2S path from a fault
+            // downstream of the header pins.
+            gpio_input_enable(GPIO_NUM_17);
+            gpio_input_enable(GPIO_NUM_18);
+            gpio_input_enable(GPIO_NUM_8);
+            int last_bclk = gpio_get_level(GPIO_NUM_17);
+            int last_lrc = gpio_get_level(GPIO_NUM_18);
+            int last_din = gpio_get_level(GPIO_NUM_8);
+            uint32_t bclk_edges = 0;
+            uint32_t lrc_edges = 0;
+            uint32_t din_edges = 0;
+            const int64_t probe_end = esp_timer_get_time() + 80000;
+            while (esp_timer_get_time() < probe_end) {
+              const int bclk = gpio_get_level(GPIO_NUM_17);
+              const int lrc = gpio_get_level(GPIO_NUM_18);
+              const int din = gpio_get_level(GPIO_NUM_8);
+              if (bclk != last_bclk) bclk_edges++;
+              if (lrc != last_lrc) lrc_edges++;
+              if (din != last_din) din_edges++;
+              last_bclk = bclk;
+              last_lrc = lrc;
+              last_din = din;
+            }
+            ESP_LOGI("speaker_probe", "GPIO pad transitions in 80ms: BCLK=%u LRC=%u DIN=%u",
+                     (unsigned) bclk_edges, (unsigned) lrc_edges, (unsigned) din_edges);
+      - speaker.finish:
+          id: speaker_out
+      - wait_until:
+          condition:
+            speaker.is_stopped:
+              id: speaker_out
+          timeout: 2s
+  - id: resume_local_wake_word
+    mode: restart
+    then:
+      - wait_until:
+          condition:
+            not:
+              voice_assistant.is_running
+          timeout: 30s
+      - if:
+          condition:
+            lambda: return id(pipeline_failed);
+          then:
+            # Keep a failed request visibly red long enough to be understood.
+            - delay: 1500ms
+          else:
+            - delay: 250ms
+      - if:
+          condition:
+            and:
+              - voice_assistant.connected
+              - switch.is_on: wake_word_enabled
+              - not:
+                  voice_assistant.is_running
+          then:
+            - micro_wake_word.start
+            - text_sensor.template.publish:
+                id: voice_state
+                state: "WAITING FOR WAKE WORD"
+            - text_sensor.template.publish:
+                id: interaction_availability
+                state: "READY - SAY HEY BURDEN"
+            - binary_sensor.template.publish:
+                id: ready_for_voice
+                state: ON
+            - script.execute: ring_ready
+          else:
+            - if:
+                condition:
+                  voice_assistant.connected
+                then:
+                  - text_sensor.template.publish:
+                      id: interaction_availability
+                      state: "UNAVAILABLE - WAKE WORD DISABLED"
+                  - binary_sensor.template.publish:
+                      id: ready_for_voice
+                      state: OFF
+                  - script.execute: ring_disabled
+                else:
+                  - text_sensor.template.publish:
+                      id: interaction_availability
+                      state: "UNAVAILABLE - HOME ASSISTANT OFFLINE"
+                  - binary_sensor.template.publish:
+                      id: ready_for_voice
+                      state: OFF
+                  - script.execute: ring_unavailable
+
+micro_wake_word:
+  id: hey_burden_wake
+  microphone:
+    microphone: microphone_in
+    channels: 0
+    gain_factor: 4
+  stop_after_detection: true
+  vad:
+  models:
+    - model: wake-word-training/artifacts/hey_burden.json
+      id: hey_burden_model
+  on_wake_word_detected:
+    - lambda: |-
+        if (id(boot_session_nonce) == 0) id(boot_session_nonce) = esp_random();
+        id(session_sequence)++;
+        char session_id[24];
+        snprintf(session_id, sizeof(session_id), "%08x-%04u",
+                 (unsigned) id(boot_session_nonce), (unsigned) id(session_sequence));
+        id(current_session_id).publish_state(session_id);
+        id(wake_detected_ms) = millis();
+        id(speech_started_ms) = 0;
+        id(speech_ended_ms) = 0;
+        id(transcript_ready_ms) = 0;
+        id(pipeline_failed) = false;
+        id(action_reported) = false;
+        id(action_succeeded) = false;
+        id(last_request).publish_state("");
+        id(last_response).publish_state("");
+        id(matched_command).publish_state("");
+        id(action_result).publish_state("");
+        id(last_error).publish_state("");
+        id(routing_outcome).publish_state("IN PROGRESS");
+        id(wake_to_pipeline_latency).publish_state(NAN);
+        id(replay_audio_duration).publish_state(NAN);
+        id(replay_audio_bytes).publish_state(NAN);
+        id(wake_to_speech_latency).publish_state(NAN);
+        id(speech_capture_duration).publish_state(NAN);
+        id(stt_processing_latency).publish_state(NAN);
+        id(wake_to_action_latency).publish_state(NAN);
+        id(total_pipeline_latency).publish_state(NAN);
+        id(command_microphone).mark_wake_detected();
+        ESP_LOGI("voice_trace", "SESSION %s | LOCAL WAKE HEARD | exact=\"%s\"",
+                 session_id, wake_word.c_str());
+    - text_sensor.template.publish:
+        id: last_wake_word
+        state: "Hey Burden"
+    - text_sensor.template.publish:
+        id: voice_state
+        state: "WAKE DETECTED"
+    - text_sensor.template.publish:
+        id: interaction_availability
+        state: "BUSY - WAIT FOR GREEN"
+    - binary_sensor.template.publish:
+        id: ready_for_voice
+        state: OFF
+    - script.execute: ring_listening
+    - voice_assistant.start:
+        wake_word: !lambda return wake_word;
+        silence_detection: true
+
+voice_assistant:
+  id: assistant
+  micro_wake_word: hey_burden_wake
+  microphone:
+    microphone: command_microphone
+    channels: 0
+    gain_factor: 4
+  speaker: speaker_out
+  use_wake_word: false
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  # Additional peak margin for the GAIN=GND (+12 dB) MAX98357A module.
+  volume_multiplier: 0.65
+  conversation_timeout: 120s
+  on_client_connected:
+    - if:
+        condition:
+          switch.is_on: wake_word_enabled
+        then:
+          - micro_wake_word.start
+          - text_sensor.template.publish:
+              id: voice_state
+              state: "WAITING FOR WAKE WORD"
+          - text_sensor.template.publish:
+              id: interaction_availability
+              state: "READY - SAY HEY BURDEN"
+          - binary_sensor.template.publish:
+              id: ready_for_voice
+              state: ON
+          - script.execute: ring_ready
+        else:
+          - text_sensor.template.publish:
+              id: voice_state
+              state: "WAKE WORD DISABLED"
+          - text_sensor.template.publish:
+              id: interaction_availability
+              state: "UNAVAILABLE - WAKE WORD DISABLED"
+          - binary_sensor.template.publish:
+              id: ready_for_voice
+              state: OFF
+          - script.execute: ring_disabled
+  on_client_disconnected:
+    - micro_wake_word.stop
+    - voice_assistant.stop
+    - text_sensor.template.publish:
+        id: voice_state
+        state: "HOME ASSISTANT OFFLINE"
+    - text_sensor.template.publish:
+        id: interaction_availability
+        state: "UNAVAILABLE - HOME ASSISTANT OFFLINE"
+    - binary_sensor.template.publish:
+        id: ready_for_voice
+        state: OFF
+    - script.execute: ring_unavailable
+  on_start:
+    - lambda: |-
+        id(pipeline_started_ms) = millis();
+        id(speech_started_ms) = 0;
+        id(speech_ended_ms) = 0;
+        id(transcript_ready_ms) = 0;
+        id(pipeline_failed) = false;
+        ESP_LOGI("voice_trace", "COMMAND PIPELINE START | wake_to_pipeline=%ums | local wake already matched",
+                 (unsigned) (id(pipeline_started_ms) - id(wake_detected_ms)));
+    - sensor.template.publish:
+        id: wake_to_pipeline_latency
+        state: !lambda return id(pipeline_started_ms) - id(wake_detected_ms);
+    - text_sensor.template.publish:
+        id: voice_state
+        state: "STARTING COMMAND"
+  on_listening:
+    - text_sensor.template.publish:
+        id: voice_state
+        state: "LISTENING"
+    - text_sensor.template.publish:
+        id: interaction_availability
+        state: "BUSY - LISTENING TO THIS COMMAND"
+    - script.execute: ring_listening
+    - if:
+        condition:
+          switch.is_on: wake_sound_enabled
+        then:
+          - script.execute: play_feedback_tone
+  on_stt_vad_start:
+    - lambda: |-
+        id(speech_started_ms) = millis();
+        ESP_LOGI("voice_trace", "SPEECH START | wake_to_speech=%ums | pipeline_to_speech=%ums | replay=%ums/%u bytes",
+                 (unsigned) (id(speech_started_ms) - id(wake_detected_ms)),
+                 (unsigned) (id(speech_started_ms) - id(pipeline_started_ms)),
+                 (unsigned) id(command_microphone).get_last_replay_duration_ms(),
+                  (unsigned) id(command_microphone).get_last_replay_bytes());
+    - sensor.template.publish:
+        id: replay_audio_duration
+        state: !lambda return id(command_microphone).get_last_replay_duration_ms();
+    - sensor.template.publish:
+        id: replay_audio_bytes
+        state: !lambda return id(command_microphone).get_last_replay_bytes();
+    - sensor.template.publish:
+        id: wake_to_speech_latency
+        state: !lambda return id(speech_started_ms) - id(wake_detected_ms);
+    - text_sensor.template.publish:
+        id: voice_state
+        state: "HEARING SPEECH"
+    - text_sensor.template.publish:
+        id: interaction_availability
+        state: "BUSY - HEARING YOUR COMMAND"
+  on_stt_vad_end:
+    - lambda: |-
+        id(speech_ended_ms) = millis();
+        ESP_LOGI("voice_trace", "SPEECH END | capture=%ums | sending constrained recognition",
+                 id(speech_started_ms)
+                   ? (unsigned) (id(speech_ended_ms) - id(speech_started_ms)) : 0U);
+    - sensor.template.publish:
+        id: speech_capture_duration
+        state: !lambda |-
+          return id(speech_started_ms) ? id(speech_ended_ms) - id(speech_started_ms) : 0U;
+    - text_sensor.template.publish:
+        id: voice_state
+        state: "PROCESSING"
+    - text_sensor.template.publish:
+        id: interaction_availability
+        state: "BUSY - TRANSCRIBING"
+    - script.execute: ring_processing
+  on_stt_end:
+    - lambda: |-
+        id(transcript_ready_ms) = millis();
+        ESP_LOGI("voice_trace", "HEARD EXACT | \"%s\" | recognition=%ums | total=%ums",
+                 x.c_str(),
+                 (unsigned) (id(transcript_ready_ms) - id(speech_started_ms)),
+                  (unsigned) (id(transcript_ready_ms) - id(pipeline_started_ms)));
+    - sensor.template.publish:
+        id: stt_processing_latency
+        state: !lambda |-
+          return id(speech_ended_ms) ? id(transcript_ready_ms) - id(speech_ended_ms) : NAN;
+    - text_sensor.template.publish:
+        id: last_request
+        state: !lambda return x;
+  on_tts_start:
+    - lambda: |-
+        // Voice Assistant audio messages contain raw PCM bytes but no stream
+        // metadata. Restore the protocol's fixed format before its deferred
+        // speaker start, especially after a local feedback tone.
+        id(speaker_out).set_audio_stream_info(esphome::audio::AudioStreamInfo(16, 1, 16000));
+        ESP_LOGI("voice_trace", "ASSISTANT EXACT | \"%s\" | output=16kHz/16-bit/mono", x.c_str());
+    - text_sensor.template.publish:
+        id: last_response
+        state: !lambda return x;
+  on_tts_stream_start:
+    - speaker.volume_set:
+        id: speaker_out
+        volume: !lambda |-
+          const float requested = fmaxf(0.10f, fminf(0.60f, id(speaker_volume).state / 100.0f));
+          const float level = requested * 0.50f;
+          const float target_db = 20.0f * log10f(level);
+          return fmaxf(0.0f, fminf(1.0f, (target_db + 49.0f) / 49.0f));
+    - text_sensor.template.publish:
+        id: voice_state
+        state: "SPEAKING"
+    - text_sensor.template.publish:
+        id: interaction_availability
+        state: "BUSY - ASSISTANT SPEAKING"
+    - script.execute: ring_processing
+    - lambda: ESP_LOGI("voice_trace", "SPEAKER STREAM START");
+  on_tts_stream_end:
+    - lambda: ESP_LOGI("voice_trace", "SPEAKER STREAM END");
+  on_intent_start:
+    - text_sensor.template.publish:
+        id: voice_state
+        state: "MATCHING COMMAND"
+    - text_sensor.template.publish:
+        id: interaction_availability
+        state: "BUSY - RUNNING YOUR ACTION"
+    - script.execute: ring_processing
+    - lambda: ESP_LOGI("voice_trace", "COMMAND MATCH START");
+  on_intent_end:
+    - lambda: ESP_LOGI("voice_trace", "COMMAND MATCH END");
+  on_error:
+    - lambda: |-
+        id(pipeline_failed) = true;
+        ESP_LOGE("voice_trace", "PIPELINE ERROR | %s | %s", code.c_str(), message.c_str());
+    - text_sensor.template.publish:
+        id: last_error
+        state: !lambda |-
+          return code + ": " + message;
+    - text_sensor.template.publish:
+        id: voice_state
+        state: "ERROR"
+    - text_sensor.template.publish:
+        id: interaction_availability
+        state: "ERROR - WAIT FOR RECOVERY"
+    - binary_sensor.template.publish:
+        id: ready_for_voice
+        state: OFF
+    - script.execute: ring_unavailable
+  on_end:
+    - lambda: |-
+        std::string outcome;
+        if (id(pipeline_failed)) {
+          outcome = "PIPELINE ERROR";
+        } else if (id(action_reported) && id(action_succeeded)) {
+          outcome = "CUSTOM ACTION SUCCEEDED";
+        } else if (id(action_reported)) {
+          outcome = "CUSTOM ACTION FAILED";
+        } else if (id(last_request).has_state() && !id(last_request).state.empty()) {
+          outcome = "UNROUTED OR GENERIC INTENT";
+        } else {
+          outcome = "NO TRANSCRIPT";
+        }
+        id(routing_outcome).publish_state(outcome);
+
+        const uint32_t now = millis();
+        const uint32_t wake_to_pipeline = id(pipeline_started_ms) - id(wake_detected_ms);
+        const uint32_t wake_to_speech = id(speech_started_ms)
+          ? id(speech_started_ms) - id(wake_detected_ms) : 0U;
+        const uint32_t capture = id(speech_started_ms) && id(speech_ended_ms)
+          ? id(speech_ended_ms) - id(speech_started_ms) : 0U;
+        const uint32_t stt = id(speech_ended_ms) && id(transcript_ready_ms)
+          ? id(transcript_ready_ms) - id(speech_ended_ms) : 0U;
+        const uint32_t action = id(action_reported) && id(wake_to_action_latency).has_state()
+          ? static_cast<uint32_t>(id(wake_to_action_latency).state) : 0U;
+        const uint32_t total = now - id(pipeline_started_ms);
+        auto trim = [](const std::string &value, size_t limit) {
+          return value.size() <= limit ? value : value.substr(0, limit - 3) + "...";
+        };
+        const std::string record = json::build_json([&](JsonObject root) {
+          root["v"] = 1;
+          root["id"] = id(current_session_id).state;
+          root["wake"] = "Hey Burden";
+          root["heard"] = trim(id(last_request).state, 56);
+          root["reply"] = trim(id(last_response).state, 72);
+          root["matched"] = trim(id(matched_command).state, 40);
+          root["result"] = trim(id(action_result).state, 72);
+          root["error"] = trim(id(last_error).state, 72);
+          root["outcome"] = outcome;
+          root["ok"] = id(action_reported) && id(action_succeeded);
+          root["one_breath"] = wake_to_speech > 0 && wake_to_speech <= 1800;
+          root["wake_pipeline_ms"] = wake_to_pipeline;
+          root["replay_ms"] = id(command_microphone).get_last_replay_duration_ms();
+          root["replay_bytes"] = id(command_microphone).get_last_replay_bytes();
+          root["wake_speech_ms"] = wake_to_speech;
+          root["capture_ms"] = capture;
+          root["stt_ms"] = stt;
+          root["action_ms"] = action;
+          root["total_ms"] = total;
+          root["pre_roll_ms"] = static_cast<uint32_t>(id(command_pre_roll).state);
+          root["rssi_dbm"] = static_cast<int32_t>(id(wifi_signal_db).state);
+          root["wake_sound"] = id(wake_sound_enabled).state;
+        });
+        ESP_LOGI("voice_session", "SESSION_JSON %s", record.c_str());
+    - sensor.template.publish:
+        id: total_pipeline_latency
+        state: !lambda return millis() - id(pipeline_started_ms);
+    - text_sensor.template.publish:
+        id: pipeline_timing
+        state: !lambda |-
+          char timing[72];
+          snprintf(timing, sizeof(timing), "Total %ums, capture %ums, STT %ums",
+                   (unsigned) (millis() - id(pipeline_started_ms)),
+                   id(speech_ended_ms) && id(speech_started_ms)
+                     ? (unsigned) (id(speech_ended_ms) - id(speech_started_ms)) : 0U,
+                   id(transcript_ready_ms) && id(speech_ended_ms)
+                     ? (unsigned) (id(transcript_ready_ms) - id(speech_ended_ms)) : 0U);
+          return std::string(timing);
+    - lambda: |-
+        ESP_LOGI("voice_trace", "PIPELINE END | total=%ums",
+                 (unsigned) (millis() - id(pipeline_started_ms)));
+    - script.execute: resume_local_wake_word

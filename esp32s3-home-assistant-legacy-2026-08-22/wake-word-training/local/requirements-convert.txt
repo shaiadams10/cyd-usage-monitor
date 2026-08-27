@@ -1,0 +1,10 @@
+ai-edge-litert==2.1.0
+numpy==1.26.4
+onnx==1.19.1
+onnx-graphsurgeon==0.5.8
+onnx2tf==1.29.24
+onnxruntime==1.23.0
+onnxsim==0.4.36
+sng4onnx==1.0.5
+tensorflow==2.19.0
+

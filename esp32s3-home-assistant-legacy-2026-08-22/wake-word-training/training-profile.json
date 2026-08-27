@@ -1,0 +1,21 @@
+{
+  "wake_phrase": "Hey Burden",
+  "model_name": "hey_burden",
+  "expected_artifact": "hey_burden.tflite",
+  "engine": "openWakeWord",
+  "sample_rate_hz": 16000,
+  "positive_tests": [
+    "Hey Burden",
+    "Hey Burden, turn on lamp one",
+    "Hey Burden, turn off all lamps",
+    "Hey Burden, what time is it?"
+  ],
+  "negative_tests": [
+    "heavy burden",
+    "close the curtain",
+    "everything is ready",
+    "turn on lamp one"
+  ],
+  "notes": "Listen to the trainer's generated pronunciation before training. Change only its pronunciation spelling if needed; retain model_name and expected_artifact so firmware discovery continues to work."
+}
+

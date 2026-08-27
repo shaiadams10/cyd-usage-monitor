@@ -1,0 +1,20 @@
+language: en
+intents:
+  BedroomLightsOn:
+    data:
+      - sentences:
+          - "lights on"
+          - "turn [the] lights on"
+          - "turn on [the] lights"
+          - "switch [the] lights on"
+          - "switch on [the] lights"
+          - "lights up"
+  BedroomLightsOff:
+    data:
+      - sentences:
+          - "lights off"
+          - "turn [the] lights off"
+          - "turn off [the] lights"
+          - "switch [the] lights off"
+          - "switch off [the] lights"
+          - "lights out"

@@ -10,7 +10,7 @@
 static lv_color_t buffer[SCREEN_W * 24];
 static lv_color_t launcher_icon_buffer[56 * 56];
 static lv_disp_draw_buf_t draw_buffer;
-static lv_obj_t *launcher_screen, *usage_screen, *openrouter_screen, *mascot, *ag_mascot, *header, *home_button, *next_button, *next_icon, *primary_card, *details_card, *error_card, *error_title, *error_detail, *primary_value, *primary_tag, *primary_sub, *primary_warn, *primary_bar, *credits, *server_status;
+static lv_obj_t *launcher_screen, *usage_screen, *openrouter_screen, *mascot, *ag_mascot, *header, *home_button, *next_button, *next_icon, *primary_card, *details_card, *error_card, *error_title, *error_detail, *primary_value, *primary_tag, *primary_sub, *primary_warn, *primary_bar, *weekly_value, *weekly_tag, *weekly_sub, *weekly_bar;
 static lv_obj_t *grid, *gemini_heading, *claude_heading, *g5, *gw, *c5, *cw;
 static lv_obj_t *or_account, *or_arc, *or_balance, *or_today, *or_week, *or_month, *or_chart, *or_model, *or_state;
 static lv_chart_series_t *or_series;
@@ -36,6 +36,12 @@ EM_JS(void, canvas_blit, (int x, int y, int width, int height, const uint16_t *p
 EM_JS(void, request_next_account, (), {
   if (typeof window.cydPreviewNextAccount === 'function') {
     window.cydPreviewNextAccount();
+  }
+});
+
+EM_JS(void, request_display_app, (int app), {
+  if (typeof window.cydPreviewDisplayApp === 'function') {
+    window.cydPreviewDisplayApp(app === 1 ? 'usage' : app === 2 ? 'openrouter' : 'launcher');
   }
 });
 
@@ -136,18 +142,21 @@ static void pointer_read(lv_indev_drv_t *driver, lv_indev_data_t *data) {
 static void open_usage_event(lv_event_t *event) {
   if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
     lv_scr_load_anim(usage_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 180, 0, false);
+    request_display_app(1);
   }
 }
 
 static void open_openrouter_event(lv_event_t *event) {
   if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
     lv_scr_load_anim(openrouter_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 180, 0, false);
+    request_display_app(2);
   }
 }
 
 static void home_event(lv_event_t *event) {
   if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
     lv_scr_load_anim(launcher_screen, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 180, 0, false);
+    request_display_app(0);
   }
 }
 
@@ -271,6 +280,7 @@ static void build_launcher(void) {
   lv_obj_set_style_bg_color(tile, lv_color_hex(0x332D42), LV_STATE_PRESSED);
   lv_obj_add_event_cb(tile, open_usage_event, LV_EVENT_CLICKED, NULL);
   lv_obj_t *icon = lv_canvas_create(tile);
+  lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
   draw_launcher_icon(icon);
   lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 10);
   lv_obj_t *app_title = lv_label_create(tile);
@@ -302,6 +312,7 @@ static void build_launcher(void) {
   lv_obj_set_style_transform_zoom(router_tile, 242, LV_STATE_PRESSED);
   lv_obj_add_event_cb(router_tile, open_openrouter_event, LV_EVENT_CLICKED, NULL);
   lv_obj_t *route_icon = lv_obj_create(router_tile);
+  lv_obj_clear_flag(route_icon, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_set_size(route_icon, 56, 56);
   lv_obj_align(route_icon, LV_ALIGN_TOP_MID, 0, 10);
   lv_obj_set_style_bg_opa(route_icon, LV_OPA_TRANSP, LV_PART_MAIN);
@@ -314,6 +325,7 @@ static void build_launcher(void) {
   lv_obj_set_style_line_rounded(route, true, LV_PART_MAIN);
   for (int i = 0; i < 4; ++i) {
     lv_obj_t *node = lv_obj_create(route_icon);
+    lv_obj_clear_flag(node, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_size(node, 9, 9);
     lv_obj_set_pos(node, or_route_points[i].x - 4, or_route_points[i].y - 4);
     lv_obj_set_style_radius(node, LV_RADIUS_CIRCLE, LV_PART_MAIN);
@@ -538,16 +550,25 @@ EMSCRIPTEN_KEEPALIVE void cyd_init(void) {
   lv_obj_set_size(details, 312, 60);
   lv_obj_set_pos(details, 4, 160);
   style_card(details, 0x27272A, 10);
-  credits = lv_label_create(details);
-  lv_label_set_recolor(credits, true);
-  lv_label_set_text(credits, "Credits: #38bdf8 -#");
-  lv_obj_set_style_text_font(credits, &lv_font_montserrat_14, LV_PART_MAIN);
-  lv_obj_set_pos(credits, 6, 12);
-  server_status = lv_label_create(details);
-  lv_label_set_text(server_status, "ChatGPT");
-  lv_obj_set_style_text_color(server_status, lv_color_hex(0x10B981), LV_PART_MAIN);
-  lv_obj_set_style_text_font(server_status, &lv_font_montserrat_14, LV_PART_MAIN);
-  lv_obj_align(server_status, LV_ALIGN_TOP_RIGHT, -6, 12);
+  weekly_value = lv_label_create(details);
+  lv_label_set_text(weekly_value, "-");
+  lv_obj_set_style_text_font(weekly_value, &lv_font_montserrat_20, LV_PART_MAIN);
+  lv_obj_set_pos(weekly_value, 4, -2);
+  weekly_tag = lv_label_create(details);
+  lv_label_set_text(weekly_tag, "Weekly Limit");
+  lv_obj_set_style_text_font(weekly_tag, &lv_font_montserrat_12, LV_PART_MAIN);
+  lv_obj_align(weekly_tag, LV_ALIGN_TOP_RIGHT, -2, 1);
+  weekly_bar = lv_bar_create(details);
+  lv_obj_set_size(weekly_bar, 296, 10);
+  lv_obj_set_pos(weekly_bar, 1, 23);
+  lv_bar_set_range(weekly_bar, 0, 100);
+  lv_obj_set_style_bg_color(weekly_bar, lv_color_hex(0x27272A), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(weekly_bar, lv_color_hex(0x10B981), LV_PART_INDICATOR);
+  weekly_sub = lv_label_create(details);
+  lv_label_set_text(weekly_sub, "Waiting for weekly quota");
+  lv_obj_set_style_text_color(weekly_sub, lv_color_hex(0x94A3B8), LV_PART_MAIN);
+  lv_obj_set_style_text_font(weekly_sub, &lv_font_montserrat_12, LV_PART_MAIN);
+  lv_obj_set_pos(weekly_sub, 3, 36);
 
   error_card = lv_obj_create(usage_screen);
   lv_obj_set_size(error_card, 312, 154);
@@ -606,7 +627,8 @@ EMSCRIPTEN_KEEPALIVE void cyd_tick(uint32_t elapsed_ms) {
   lv_timer_handler();
 }
 
-EMSCRIPTEN_KEEPALIVE void cyd_set_codex(const char *account, const char *plan_name, const char *value, const char *tag, const char *sub, const char *credit_value, int used) {
+EMSCRIPTEN_KEEPALIVE void cyd_set_codex(const char *account, const char *value, const char *tag, const char *sub, int used,
+                                        const char *week_value, const char *week_sub, int week_used) {
   lv_obj_add_flag(error_card, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(grid, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(primary_card, LV_OBJ_FLAG_HIDDEN);
@@ -617,14 +639,30 @@ EMSCRIPTEN_KEEPALIVE void cyd_set_codex(const char *account, const char *plan_na
   lv_label_set_text(primary_value, value);
   lv_label_set_text(primary_tag, tag);
   lv_label_set_text(primary_sub, sub);
-  lv_label_set_text_fmt(credits, "Credits: #38bdf8 %s#", credit_value);
-  lv_label_set_text(server_status, plan_name);
   lv_bar_set_value(primary_bar, 100 - used, LV_ANIM_OFF);
   uint32_t status_color = used > 80 ? 0xF43F5E : used > 50 ? 0xF59E0B : 0x10B981;
   lv_obj_set_style_text_color(primary_value, lv_color_hex(status_color), LV_PART_MAIN);
   lv_obj_set_style_bg_color(primary_bar, lv_color_hex(status_color), LV_PART_INDICATOR);
   if (used >= 100) lv_obj_clear_flag(primary_warn, LV_OBJ_FLAG_HIDDEN);
   else lv_obj_add_flag(primary_warn, LV_OBJ_FLAG_HIDDEN);
+  lv_label_set_text(weekly_value, week_value);
+  lv_label_set_text(weekly_sub, week_sub);
+  lv_bar_set_value(weekly_bar, 100 - week_used, LV_ANIM_OFF);
+  uint32_t weekly_color = week_used > 80 ? 0xF43F5E : week_used > 50 ? 0xF59E0B : 0x10B981;
+  lv_obj_set_style_text_color(weekly_value, lv_color_hex(weekly_color), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(weekly_bar, lv_color_hex(weekly_color), LV_PART_INDICATOR);
+}
+
+EMSCRIPTEN_KEEPALIVE void cyd_show_usage(void) {
+  lv_scr_load_anim(usage_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 180, 0, false);
+}
+
+EMSCRIPTEN_KEEPALIVE void cyd_show_launcher(void) {
+  lv_scr_load_anim(launcher_screen, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 180, 0, false);
+}
+
+EMSCRIPTEN_KEEPALIVE void cyd_show_openrouter(void) {
+  lv_scr_load_anim(openrouter_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 180, 0, false);
 }
 
 EMSCRIPTEN_KEEPALIVE void cyd_set_antigravity(const char *account, const char *gemini5, const char *gemini5sub, const char *geminiweek, const char *geminiweeksub, const char *claude5, const char *claude5sub, const char *claudeweek, const char *claudeweeksub) {

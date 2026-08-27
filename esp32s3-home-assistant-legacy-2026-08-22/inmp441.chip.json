@@ -1,0 +1,12 @@
+{
+  "name": "INMP441 I2S MEMS Mic",
+  "author": "Antigravity",
+  "pins": [
+    "VDD",
+    "GND",
+    "SD",
+    "L/R",
+    "WS",
+    "SCK"
+  ]
+}

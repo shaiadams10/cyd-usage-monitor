@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+- Added a persistent dashboard screen-orientation control that flips only the
+  physical CYD by 180 degrees while retaining the 480x320 landscape layout.
+  The CYD stores the last orientation in NVS for immediate reboot recovery;
+  the upright browser preview uses a clear physical-orientation indicator.
+- Added bidirectional screen-state synchronization for the launcher, Usage
+  Monitor, OpenRouter, Home, and account selection. Browser LVGL interactions
+  now command the physical CYD, while physical navigation reports through a
+  private Bearer-protected endpoint so the preview follows on refresh.
+- Fixed the email integration form losing previously entered values during the
+  dashboard's 1.2-second status refresh. Once any email field is edited, the
+  complete draft now remains browser-owned until a successful save or removal.
+- Added protected dashboard email integration setup with Gmail/Google
+  Workspace app-password and custom STARTTLS/implicit-TLS SMTP modes. SMTP
+  credentials are written atomically as mode-`0600` private runtime data,
+  never returned by the status API, and can be tested or removed from Alerts.
+  Host environment configuration remains an explicit read-only override.
+- Added current Codex quota support for both the rolling 5-hour window and the
+  weekly window across normalized telemetry, the dashboard, physical CYD, and
+  WebAssembly LVGL preview. The shared update-prompt responder remains part of
+  the generic Codex collector path, so it applies automatically to every new
+  isolated Codex profile.
+- Persisted the last CLI-visible account identity in each profile after a
+  successful capture. Later collection failures, incidents, alerts, the
+  dashboard, and the device API now identify the affected account instead of
+  falling back to a generic provider label.
+- Added dashboard-to-device app commands and an OpenRouter **Show on CYD**
+  control. The physical display polls the private Bearer-protected command
+  endpoint, while the same action switches the live LVGL preview immediately.
+- Added an independent TLS SMTP fallback when a WAHA delivery fails, including
+  per-alert deduplication, protected dashboard health, and an explicit test
+  action. SMTP credentials remain host-only and are never persisted in monitor
+  state or inherited by provider CLI processes.
+- Fixed Codex usage collection with newer CLI releases that show an
+  interactive self-update prompt before `/status`: the collector now selects
+  **Skip** once per capture and leaves CLI upgrades under operator control.
+  Failed WAHA deliveries remain pending for retry, undelivered outages no
+  longer produce misleading recovery messages, and the dashboard overview
+  turns red when alert delivery itself is failing.
+- Fixed physical and simulated launcher navigation by making decorative tile
+  children click-through, using TFT_eSPI's full resistive-touch calibration
+  transform, clearing competing route requests, and enlarging the Home targets.
+  OpenRouter taps now open OpenRouter, and Home reliably returns to the
+  launcher on the Hosyond 4.0-inch display.
+- Corrected the physical firmware target for the Hosyond/LCDWiki E32R40T
+  4.0-inch board: ST7796S at 320x480, backlight on GPIO27, red status LED on
+  GPIO22, and XPT2046 resistive touch sharing the LCD SPI bus. Removed the
+  incompatible GT911/ESP32-3248S035 probing path that could interfere with
+  touch chip select during startup, and lowered the upload speed from 921600
+  to a more reliable 460800 baud for the onboard CH340C bridge.
 - Debounced CLI outage notifications until three consecutive collection cycles
   fail (configurable from 1–10), while retaining first-failure diagnostics in
   incident history. One-cycle Antigravity authentication/eligibility glitches

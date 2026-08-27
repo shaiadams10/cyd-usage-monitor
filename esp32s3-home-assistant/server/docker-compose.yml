@@ -1,0 +1,117 @@
+name: esp32s3-home-assistant-voice-v2
+
+services:
+  speech-to-phrase:
+    image: esp32s3-speech-to-phrase-diagnostics:1.4.3-1
+    build:
+      context: .
+      dockerfile: Dockerfile.speech-to-phrase-diagnostics
+    init: true
+    restart: unless-stopped
+    command:
+      - --hass-websocket-uri
+      - ${SPEECH_TO_PHRASE_HASS_WEBSOCKET_URI:-ws://host.docker.internal:8123/api/websocket}
+      - --hass-token
+      - ${SPEECH_TO_PHRASE_HASS_TOKEN:-}
+      - --custom-sentences-dir
+      - /custom_sentences
+      - --retrain-on-start
+    environment:
+      STP_DIAGNOSTICS_DIR: /diagnostics
+    ports:
+      - "${SPEECH_TO_PHRASE_BIND_ADDRESS:-127.0.0.1}:${SPEECH_TO_PHRASE_PORT:-11300}:10300"
+    volumes:
+      - ./data/speech-to-phrase/models:/models
+      - ./data/speech-to-phrase/train:/train
+      - ./data/speech-to-phrase/tools:/tools
+      - ./custom_sentences:/custom_sentences:ro
+      - ./data/speech-to-phrase/diagnostics:/diagnostics
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import socket; s=socket.create_connection(('127.0.0.1',10300),2); s.close()"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  voice-diagnostics:
+    image: esp32s3-speech-to-phrase-diagnostics:1.4.3-1
+    depends_on:
+      speech-to-phrase:
+        condition: service_healthy
+    init: true
+    restart: unless-stopped
+    entrypoint:
+      - /usr/bin/python3
+      - /app/diagnostics_server.py
+    environment:
+      VOICE_DIAGNOSTICS_DIR: /diagnostics
+      VOICE_DIAGNOSTICS_HOST: 0.0.0.0
+      VOICE_DIAGNOSTICS_PORT: 10400
+      VOICE_DIAGNOSTICS_SERVE_AUDIO: ${SPEECH_DIAGNOSTICS_SERVE_AUDIO:-1}
+      VOICE_DIAGNOSTICS_MAX_RECORDS: ${SPEECH_DIAGNOSTICS_MAX_RECORDS:-200}
+      VOICE_DIAGNOSTICS_MAX_BYTES: ${SPEECH_DIAGNOSTICS_MAX_BYTES:-268435456}
+      VOICE_REPORTS_DIR: /reports
+    ports:
+      - "${SPEECH_DIAGNOSTICS_BIND_ADDRESS:-127.0.0.1}:${SPEECH_DIAGNOSTICS_PORT:-11400}:10400"
+    volumes:
+      - ./diagnostics_server.py:/app/diagnostics_server.py:ro
+      - ./data/speech-to-phrase/diagnostics:/diagnostics
+      - ./data/speech-to-phrase/reports:/reports
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - /usr/bin/python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:10400/health', timeout=2)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+
+  piper:
+    image: rhasspy/wyoming-piper@sha256:72ee1b06b062cb14f4a70de002eb420a068efd5a7a8cb7620be6bf600307f867
+    init: true
+    restart: unless-stopped
+    command:
+      - --voice
+      - ${PIPER_VOICE:-en_US-lessac-medium}
+    ports:
+      - "${PIPER_BIND_ADDRESS:-127.0.0.1}:${PIPER_PORT:-11200}:10200"
+    volumes:
+      - ./data/piper:/data
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import socket; s=socket.create_connection(('127.0.0.1',10200),2); s.close()"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 1m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

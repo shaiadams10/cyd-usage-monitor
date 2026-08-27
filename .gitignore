@@ -1,3 +1,17 @@
 # Project Brain Protocol
 graphify-out/
 .brain/backups/
+
+# Local Secrets and Private Configuration
+**/secrets.h
+!**/secrets.h.example
+.env
+.pio/
+**/__pycache__/
+*.pyc
+docs/map.local.md
+.agents/
+.tscircuit/
+**/data/
+*.bin
+/*.wav

@@ -1,0 +1,6 @@
+FROM rhasspy/wyoming-speech-to-phrase@sha256:85580e14114b866f5ccd6ed856b0b97f634d8d0936ed7e31edc7822840327422
+
+COPY diagnostics/transcribe_kaldi.py /tmp/transcribe_kaldi.py
+RUN package_dir="$(/usr/src/.venv/bin/python -c 'import inspect, os, speech_to_phrase; print(os.path.dirname(inspect.getfile(speech_to_phrase)))')" \
+    && cp /tmp/transcribe_kaldi.py "${package_dir}/transcribe_kaldi.py" \
+    && rm /tmp/transcribe_kaldi.py

@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP32-S3 Voice Satellite & Smart Home Hub</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+    :root {
+      --bg: #090d16;
+      --surface: #121829;
+      --surface-card: #172036;
+      --surface-hover: #1e2947;
+      --border: rgba(255, 255, 255, 0.08);
+      --accent: #38bdf8;
+      --accent-dim: rgba(56, 189, 248, 0.12);
+      --accent-hover: #0ea5e9;
+      --emerald: #34d399;
+      --emerald-dim: rgba(52, 211, 153, 0.12);
+      --amber: #fbbf24;
+      --amber-dim: rgba(251, 191, 36, 0.12);
+      --text: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --danger: #f87171;
+      --danger-dim: rgba(248, 113, 113, 0.15);
+      --radius: 12px;
+      --radius-sm: 8px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100dvh;
+      display: flex;
+      justify-content: center;
+      padding: 16px;
+      -webkit-font-smoothing: antialiased;
+    }
+    .container {
+      width: 100%;
+      max-width: 520px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    /* Connection Bar */
+    .conn-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: var(--radius-sm);
+      font-size: 0.82rem;
+      font-weight: 500;
+      transition: background 0.3s ease, color 0.3s ease;
+    }
+    .conn-status-left { display: flex; align-items: center; gap: 8px; }
+    .conn-bar.connected { background: var(--emerald-dim); color: var(--emerald); }
+    .conn-bar.disconnected { background: var(--danger-dim); color: var(--danger); }
+    .conn-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .conn-bar.connected .conn-dot { background: var(--emerald); }
+    .conn-bar.disconnected .conn-dot { background: var(--danger); animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .ip-badge {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      background: rgba(0,0,0,0.3);
+      padding: 2px 7px;
+      border-radius: 4px;
+    }
+
+    /* Mode Navigation Bar */
+    .mode-nav {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 6px;
+      background: var(--surface);
+      padding: 4px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+    }
+    .mode-tab {
+      padding: 9px 4px;
+      border: none;
+      background: transparent;
+      color: var(--text-secondary);
+      font-size: 0.82rem;
+      font-weight: 600;
+      font-family: inherit;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      transition: all 0.15s ease;
+      user-select: none;
+      text-align: center;
+    }
+    .mode-tab:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+    .mode-tab.active {
+      background: var(--surface-card);
+      color: var(--accent);
+      border: 1px solid var(--border);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    }
+
+    /* Content Cards */
+    .tab-content { display: none; flex-direction: column; gap: 14px; }
+    .tab-content.active { display: flex; }
+
+    .card {
+      background: var(--surface);
+      border-radius: var(--radius);
+      padding: 18px;
+      border: 1px solid var(--border);
+    }
+    h1 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .subtitle {
+      color: var(--text-secondary);
+      font-size: 0.8rem;
+      margin-top: 4px;
+      line-height: 1.4;
+    }
+
+    /* Sections */
+    .section { margin-top: 14px; }
+    .section-label {
+      font-size: 0.72rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-secondary);
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    /* Inputs & Buttons */
+    .input-row { display: flex; gap: 8px; }
+    .text-input {
+      flex: 1;
+      padding: 10px 13px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      background: rgba(0,0,0,0.35);
+      color: var(--text);
+      font-size: 0.88rem;
+      font-family: inherit;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .text-input:focus { border-color: var(--accent); }
+    .text-input::placeholder { color: var(--text-secondary); opacity: 0.6; }
+
+    .btn-action {
+      padding: 10px 16px;
+      border-radius: var(--radius-sm);
+      border: none;
+      background: var(--accent);
+      color: #090d16;
+      font-size: 0.88rem;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s, transform 0.08s;
+      flex-shrink: 0;
+    }
+    .btn-action:hover { background: var(--accent-hover); }
+    .btn-action:active { transform: scale(0.97); }
+
+    /* Toggle row */
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 12px;
+      background: rgba(255,255,255,0.03);
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      font-size: 0.84rem;
+    }
+    .toggle-switch {
+      position: relative;
+      width: 40px;
+      height: 22px;
+    }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .slider-toggle {
+      position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+      background-color: rgba(255,255,255,0.2);
+      transition: .2s;
+      border-radius: 22px;
+    }
+    .slider-toggle:before {
+      position: absolute; content: ""; height: 16px; width: 16px;
+      left: 3px; bottom: 3px;
+      background-color: white;
+      transition: .2s;
+      border-radius: 50%;
+    }
+    input:checked + .slider-toggle { background-color: var(--accent); }
+    input:checked + .slider-toggle:before { transform: translateX(18px); }
+
+    /* Chips */
+    .chip-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .chip {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: var(--text-secondary);
+      font-size: 0.76rem;
+      padding: 6px 11px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .chip:hover {
+      background: var(--accent-dim);
+      color: var(--accent);
+      border-color: rgba(56,189,248,0.3);
+    }
+
+    /* Grids */
+    .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .btn-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+    .btn-sound {
+      padding: 12px 10px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.04);
+      color: var(--text);
+      font-size: 0.84rem;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.08s;
+      user-select: none;
+    }
+    .btn-sound:hover { background: var(--surface-hover); }
+    .btn-sound:active { transform: scale(0.96); }
+    .btn-sound:disabled, .btn-action:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* Volume */
+    .vol-row { display: flex; align-items: center; gap: 12px; }
+    .vol-slider {
+      flex: 1; height: 6px;
+      -webkit-appearance: none; appearance: none;
+      background: rgba(255,255,255,0.1);
+      border-radius: 3px; outline: none;
+    }
+    .vol-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 18px; height: 18px; border-radius: 50%;
+      background: var(--accent); cursor: pointer;
+      border: 2px solid var(--bg);
+      box-shadow: 0 0 6px rgba(56,189,248,0.4);
+    }
+    .vol-label {
+      font-size: 0.85rem; font-weight: 600; min-width: 38px;
+      text-align: right; font-variant-numeric: tabular-nums;
+    }
+
+    /* Stop Button */
+    .btn-stop {
+      width: 100%; padding: 11px;
+      border-radius: var(--radius-sm);
+      border: 1px solid rgba(248,113,113,0.25);
+      background: var(--danger-dim);
+      color: var(--danger);
+      font-size: 0.88rem; font-weight: 600;
+      cursor: pointer; display: none;
+    }
+    .btn-stop:hover { background: rgba(248,113,113,0.25); }
+    .btn-stop.visible { display: block; }
+
+    /* Status Bar */
+    .status-bar {
+      display: flex; align-items: center; gap: 10px;
+      padding: 11px 14px; border-radius: var(--radius-sm);
+      background: rgba(0,0,0,0.3);
+      font-size: 0.82rem; font-family: 'JetBrains Mono', monospace;
+      color: var(--text-secondary); min-height: 42px;
+      border: 1px solid rgba(255,255,255,0.04);
+    }
+    .status-bar.playing { color: var(--accent); }
+    .status-bar.error { color: var(--danger); }
+    .status-icon { font-size: 1rem; flex-shrink: 0; }
+    .status-text { flex: 1; word-break: break-word; }
+
+    @media (max-width: 400px) {
+      .input-row { flex-direction: column; }
+      .btn-action { width: 100%; }
+      .mode-nav { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Connection Indicator -->
+    <div id="connBar" class="conn-bar disconnected">
+      <div class="conn-status-left">
+        <span class="conn-dot"></span>
+        <span id="connLabel">Connecting...</span>
+      </div>
+      <span class="ip-badge" id="ipBadge">IP: ---</span>
+    </div>
+
+    <!-- Mode Selector Tabs -->
+    <div class="mode-nav">
+      <button class="mode-tab active" id="tabBtnSmart" type="button" onclick="switchMode('smart_home')">&#x1F3E0; Smart Home</button>
+      <button class="mode-tab" id="tabBtnMedia" type="button" onclick="switchMode('media')">&#x26A1; Media & Voice</button>
+      <button class="mode-tab" id="tabBtnUtils" type="button" onclick="switchMode('utils')">&#x2699;&#xFE0F; Utils</button>
+    </div>
+
+    <!-- TAB 1: Smart Home & Govee Lamps -->
+    <div id="tabSmart" class="tab-content active">
+      <div class="card">
+        <h1>&#x1F3E0; Smart Home & Govee Lamps</h1>
+        <div class="subtitle">Control Govee lamps & Home Assistant devices via microphone voice commands, web buttons, or BOOT button toggle</div>
+
+        <!-- Dedicated Govee Lamps Section -->
+        <div class="section">
+          <div class="section-label">&#x1F4A1; Govee Lamp 1 (configured locally)</div>
+          <div class="btn-grid-3">
+            <button class="btn-action" type="button" onclick="sendLightAction('turn_on', 'lamp1')" style="background:#34d399; color:#090d16">&#x1F4A1; Lamp 1 ON</button>
+            <button class="btn-action" type="button" onclick="sendLightAction('turn_off', 'lamp1')" style="background:#f87171; color:#090d16">&#x26AB; Lamp 1 OFF</button>
+            <button class="btn-action" type="button" onclick="sendLightAction('toggle', 'lamp1')" style="background:#38bdf8; color:#090d16">&#x1F504; Toggle</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-label">&#x1F4A1; Govee Lamp 2 (configured locally)</div>
+          <div class="btn-grid-3">
+            <button class="btn-action" type="button" onclick="sendLightAction('turn_on', 'lamp2')" style="background:#34d399; color:#090d16">&#x1F4A1; Lamp 2 ON</button>
+            <button class="btn-action" type="button" onclick="sendLightAction('turn_off', 'lamp2')" style="background:#f87171; color:#090d16">&#x26AB; Lamp 2 OFF</button>
+            <button class="btn-action" type="button" onclick="sendLightAction('toggle', 'lamp2')" style="background:#38bdf8; color:#090d16">&#x1F504; Toggle</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-label">&#x1F31F; Both Govee Lamps</div>
+          <div class="btn-grid">
+            <button class="btn-sound" type="button" onclick="sendLightAction('turn_on', 'all_lamps')" style="background:#10b981; color:#fff">&#x1F31F; Turn ON Both Lamps</button>
+            <button class="btn-sound" type="button" onclick="sendLightAction('turn_off', 'all_lamps')" style="background:#ef4444; color:#fff">&#x1F311; Turn OFF Both Lamps</button>
+          </div>
+        </div>
+
+        <!-- Trigger Word Status (Locked to Hey Burden) -->
+        <div class="section">
+          <div class="section-label">🔒 Fixed Trigger Word / Wake Phrase</div>
+          <div class="input-row">
+            <input class="text-input" id="triggerWordInput" type="text" value="Hey Burden" disabled style="opacity:0.9; font-weight:700; color:#38bdf8; letter-spacing:0.02em; background:rgba(56,189,248,0.08); border-color:rgba(56,189,248,0.3)">
+          </div>
+          <div style="margin-top:8px; font-size:0.78rem; line-height:1.45; color:var(--text-secondary); background:rgba(255,255,255,0.02); padding:10px; border-radius:var(--radius-sm); border:1px solid var(--border)">
+            <strong style="color:var(--text)">Modern Voice Flow:</strong><br>
+            Say <em>"Hey Burden"</em> &rarr; short confirmation sound &rarr; speak the command.<br>
+            <span id="voiceEngineStatus">Wake engine: checking openWakeWord…</span>
+          </div>
+        </div>
+
+        <!-- Voice Command Testing Chips -->
+        <div class="section">
+          <div class="section-label">Test Spoken Voice Commands</div>
+          <div class="chip-grid">
+            <button class="chip" type="button" onclick="sendSimulatedSpeech('Hey Burden')">🔔 "Hey Burden"</button>
+            <button class="chip" type="button" onclick="sendSimulatedSpeech('Hey Burden turn on lamp 1')">💡 "Hey Burden turn on lamp 1"</button>
+            <button class="chip" type="button" onclick="sendSimulatedSpeech('Hey Burden turn off lamp 2')">💡 "Hey Burden turn off lamp 2"</button>
+            <button class="chip" type="button" onclick="sendSimulatedSpeech('Turn on lamps')">💡 "Turn on lamps"</button>
+            <button class="chip" type="button" onclick="sendSimulatedSpeech('Turn off lamps')">⚫ "Turn off lamps"</button>
+            <button class="chip" type="button" onclick="sendSimulatedSpeech('Toggle lamps')">🔄 "Toggle lamps"</button>
+          </div>
+        </div>
+
+        <!-- Home Assistant LAN Configuration -->
+        <div class="section">
+          <div class="section-label">Home Assistant LAN Connection</div>
+          <div style="display:flex; flex-direction:column; gap:8px">
+            <div class="input-row">
+              <input class="text-input" id="haServerInput" type="text" placeholder="192.0.2.10:8123" value="192.0.2.10:8123">
+              <input class="text-input" id="haEntityInput" type="text" placeholder="all_lamps" value="all_lamps">
+            </div>
+            <input class="text-input" id="haTokenInput" type="password" placeholder="Home Assistant Long-Lived Access Token (Optional)">
+            <button class="btn-action" type="button" onclick="saveHaConfig()">Update Home Assistant Settings</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 2: Media & Voice -->
+    <div id="tabMedia" class="tab-content">
+      <div class="card">
+        <h1>&#x26A1; Neural Voice (Piper TTS)</h1>
+        <div class="subtitle">Stream high-fidelity synthetic voice directly to MAX98357A speaker</div>
+
+        <div class="section">
+          <div class="section-label">Spoken Sentence</div>
+          <div class="input-row">
+            <input class="text-input" id="ttsInput" type="text" placeholder="Type sentence to speak..."
+                   value="Hello! Your smart voice satellite is active and ready." maxlength="190">
+            <button class="btn-action" id="btnSpeak" type="button">Speak Voice</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-label">Sound Effects</div>
+          <div class="btn-grid">
+            <button class="btn-sound" type="button" data-sound="chime">&#x1F514; Wake Chime</button>
+            <button class="btn-sound" type="button" data-sound="coin">&#x1FA99; Mario Coin</button>
+            <button class="btn-sound" type="button" data-sound="fanfare">&#x1F389; Fanfare</button>
+            <button class="btn-sound" type="button" data-sound="sweep">&#x1F30A; Freq Sweep</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-label">Master Volume</div>
+          <div class="vol-row">
+            <input class="vol-slider" id="volSlider" type="range" min="5" max="100" value="17">
+            <span class="vol-label" id="volLabel">17%</span>
+          </div>
+        </div>
+
+        <div class="section">
+          <button class="btn-stop" id="btnStop" type="button">Stop Audio</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h1>&#x1F4FA; OLED Custom Message</h1>
+        <div class="subtitle">Push text to the SSD1306 display screen</div>
+
+        <div class="section">
+          <div class="input-row">
+            <input class="text-input" id="oledInput" type="text" placeholder="Type text to display..."
+                   value="Smart Voice Hub Active!" maxlength="120">
+            <button class="btn-action" id="btnDisplay" type="button">Show on OLED</button>
+          </div>
+          <div class="chip-grid">
+            <button class="chip" type="button" onclick="sendOledText('Hello World!')">Hello World!</button>
+            <button class="chip" type="button" onclick="sendOledText('Meeting in 5m')">Meeting in 5m</button>
+            <button class="chip" type="button" onclick="sendOledText('Lights Turned On')">Lights On</button>
+            <button class="chip" type="button" onclick="clearOled()">Reset Screen</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 3: Utilities & OTA -->
+    <div id="tabUtils" class="tab-content">
+      <div class="card">
+        <h1>&#x2699;&#xFE0F; Utilities & Firmware Flash</h1>
+        <div class="subtitle">System diagnostics and Web OTA firmware updating</div>
+
+        <div class="section">
+          <div class="section-label">Web OTA Firmware Flashing</div>
+          <p style="font-size:0.85rem; color:var(--text-secondary); margin-bottom:12px">
+            Update your firmware over Wi-Fi without needing a USB cable.
+          </p>
+          <a href="/update" target="_blank" style="text-decoration:none">
+            <button class="btn-action" style="width:100%" type="button">&#x26A1; Open Web OTA Flasher</button>
+          </a>
+        </div>
+
+        <div class="section">
+          <div class="section-label">Screen Maintenance</div>
+          <button class="btn-sound" style="width:100%" type="button" onclick="clearOled()">Reset OLED Screen to Default</button>
+        </div>
+
+        <div class="section">
+          <div class="section-label">Voice Pipeline Diagnostics</div>
+          <div id="voiceDiag" style="font-family:'JetBrains Mono',monospace;font-size:0.76rem;line-height:1.55;color:var(--text-secondary);background:#080b12;padding:10px;border-radius:var(--radius-sm);border:1px solid var(--border)">Waiting for status…</div>
+          <button class="btn-action" id="btnResetVoice" style="width:100%;margin-top:10px" type="button">Reset Voice Pipeline</button>
+        </div>
+
+        <div class="section">
+          <div class="section-label">USB Serial Commands</div>
+          <p style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:8px">Run from the workspace root. The RTS/DTR flags prevent this ESP32-S3 board from being held in download mode.</p>
+          <pre style="white-space:pre-wrap;overflow-wrap:anywhere;background:#080b12;color:#cbd5e1;padding:10px;border-radius:var(--radius-sm);border:1px solid var(--border);font-size:0.72rem;line-height:1.5">cd esp32s3-home-assistant
+pio device monitor --port COM4 --baud 115200 --rts 0 --dtr 0
+
+# Build and flash
+pio run -t upload --upload-port COM4</pre>
+        </div>
+
+        <div class="section">
+          <div class="section-label">Live Device Terminal</div>
+          <pre id="terminalOutput" style="height:260px;overflow:auto;white-space:pre-wrap;background:#020409;color:#86efac;padding:10px;border-radius:var(--radius-sm);border:1px solid var(--border);font-size:0.7rem;line-height:1.45">Loading device logs…</pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- Global Status Footer -->
+    <div id="statusBar" class="status-bar">
+      <span class="status-icon" id="statusIcon">&#x23F8;&#xFE0F;</span>
+      <span class="status-text" id="statusText">System Ready</span>
+    </div>
+  </div>
+
+  <script>
+    /* ---- DOM Elements ---- */
+    const connBar = document.getElementById('connBar');
+    const connLabel = document.getElementById('connLabel');
+    const ipBadge = document.getElementById('ipBadge');
+
+    const tabBtnSmart = document.getElementById('tabBtnSmart');
+    const tabBtnMedia = document.getElementById('tabBtnMedia');
+    const tabBtnUtils = document.getElementById('tabBtnUtils');
+
+    const tabSmart = document.getElementById('tabSmart');
+    const tabMedia = document.getElementById('tabMedia');
+    const tabUtils = document.getElementById('tabUtils');
+
+    const oledInput = document.getElementById('oledInput');
+    const btnDisplay = document.getElementById('btnDisplay');
+    const ttsInput = document.getElementById('ttsInput');
+    const btnSpeak = document.getElementById('btnSpeak');
+    const btnStop = document.getElementById('btnStop');
+    const volSlider = document.getElementById('volSlider');
+    const volLabel = document.getElementById('volLabel');
+    const statusBar = document.getElementById('statusBar');
+    const statusIcon = document.getElementById('statusIcon');
+    const statusText = document.getElementById('statusText');
+    const soundBtns = document.querySelectorAll('.btn-sound');
+
+    const triggerWordInput = document.getElementById('triggerWordInput');
+    const voiceEngineStatus = document.getElementById('voiceEngineStatus');
+    const haServerInput = document.getElementById('haServerInput');
+    const haEntityInput = document.getElementById('haEntityInput');
+    const haTokenInput = document.getElementById('haTokenInput');
+    const voiceDiag = document.getElementById('voiceDiag');
+    const btnResetVoice = document.getElementById('btnResetVoice');
+    const terminalOutput = document.getElementById('terminalOutput');
+
+    /* ---- State ---- */
+    let ws = null;
+    let reconnectDelay = 500;
+    const MAX_RECONNECT = 6000;
+    let isPlaying = false;
+    let volTimeout = null;
+    let currentModeName = 'smart_home';
+
+    /* ---- Tab & Mode Navigation ---- */
+    function switchMode(mode) {
+      currentModeName = mode;
+      tabBtnSmart.classList.toggle('active', mode === 'smart_home');
+      tabBtnMedia.classList.toggle('active', mode === 'media');
+      tabBtnUtils.classList.toggle('active', mode === 'utils');
+
+      tabSmart.classList.toggle('active', mode === 'smart_home');
+      tabMedia.classList.toggle('active', mode === 'media');
+      tabUtils.classList.toggle('active', mode === 'utils');
+
+      send({ action: 'set_mode', mode: mode });
+    }
+
+    /* ---- Smart Home Actions ---- */
+    function sendLightAction(lightAction, entity) {
+      send({
+        action: 'smart_home_light',
+        light_action: lightAction,
+        entity: entity
+      });
+    }
+
+    function saveHaConfig() {
+      const serverParts = haServerInput.value.trim().split(':');
+      const ip = serverParts[0] || '192.0.2.10';
+      const port = parseInt(serverParts[1]) || 8123;
+      send({
+        action: 'set_ha_config',
+        ip: ip,
+        port: port,
+        token: haTokenInput.value.trim(),
+        entity: haEntityInput.value.trim()
+      });
+      statusText.textContent = 'Home Assistant configuration sent to device';
+    }
+
+    function sendSimulatedSpeech(text) {
+      statusText.textContent = 'Testing voice: "' + text + '"';
+      send({
+        action: 'test_voice',
+        text: text
+      });
+    }
+
+    /* ---- WebSocket Connection ---- */
+    function connect() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      ws = new WebSocket(proto + '://' + location.host + '/ws');
+
+      ws.onopen = function() {
+        reconnectDelay = 500;
+        setConnected(true);
+      };
+
+      ws.onclose = function() {
+        setConnected(false);
+        setTimeout(connect, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 1.5, MAX_RECONNECT);
+      };
+
+      ws.onerror = function() { ws.close(); };
+
+      ws.onmessage = function(evt) {
+        try {
+          const msg = JSON.parse(evt.data);
+          if (msg.type === 'status') {
+            handleStatus(msg);
+          } else if (msg.type === 'diagnostics') {
+            updateVoiceDiagnostics(msg);
+            if (typeof msg.logs === 'string') {
+              const wasNearBottom = terminalOutput.scrollHeight - terminalOutput.scrollTop - terminalOutput.clientHeight < 36;
+              terminalOutput.textContent = msg.logs || 'No device log lines yet.';
+              if (wasNearBottom) terminalOutput.scrollTop = terminalOutput.scrollHeight;
+            }
+          } else if (msg.type === 'smart_home_action') {
+            handleSmartHomeAction(msg);
+          }
+        } catch(e) {}
+      };
+    }
+
+    function send(obj) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(obj));
+      }
+    }
+
+    function setConnected(yes) {
+      if (yes) {
+        connBar.className = 'conn-bar connected';
+        connLabel.textContent = 'Connected';
+      } else {
+        connBar.className = 'conn-bar disconnected';
+        connLabel.textContent = 'Reconnecting\u2026';
+        setBusy(false);
+      }
+    }
+
+    function handleSmartHomeAction(msg) {
+      const message = msg.message || '';
+      statusBar.className = 'status-bar playing';
+      statusIcon.textContent = '\uD83D\uDCA1';
+      statusText.textContent = '\u26A1 Smart Action: ' + message;
+    }
+
+    function updateVoiceDiagnostics(msg) {
+      if (!voiceDiag) return;
+      const remaining = typeof msg.commandWindowRemainingMs === 'number' ? msg.commandWindowRemainingMs : 0;
+      voiceDiag.textContent =
+        'phase: ' + (msg.voicePhase || 'unknown') + '\n' +
+        'wake stream: ' + (msg.wakeStreamConnected ? 'connected' : 'disconnected') + '\n' +
+        'speaker / record / STT: ' + Boolean(msg.speakerPlaying) + ' / ' + Boolean(msg.recording) + ' / ' + Boolean(msg.transcribing) + '\n' +
+        'command window: ' + (remaining ? (remaining / 1000).toFixed(1) + 's' : 'inactive');
+      voiceDiag.style.whiteSpace = 'pre-wrap';
+    }
+
+    function handleStatus(msg) {
+      const s = msg.state || 'idle';
+      const d = msg.detail || '';
+
+      if (typeof msg.volume === 'number') {
+        volSlider.value = msg.volume;
+        volLabel.textContent = msg.volume + '%';
+      }
+
+      if (msg.ip && msg.ip !== 'Connecting...') {
+        ipBadge.textContent = 'IP: ' + msg.ip;
+      }
+
+      if (msg.triggerWord) triggerWordInput.value = msg.triggerWord;
+      if (voiceEngineStatus && msg.wakeEngine) {
+        const vad = typeof msg.vadThreshold === 'number' ? msg.vadThreshold : '—';
+        const floor = typeof msg.noiseFloor === 'number' ? msg.noiseFloor : '—';
+        voiceEngineStatus.textContent = 'Wake engine: ' + msg.wakeEngine + ' · noise ' + floor + ' · VAD ' + vad;
+      }
+      updateVoiceDiagnostics(msg);
+      if (msg.haLight) haEntityInput.value = msg.haLight;
+      if (msg.haServer) haServerInput.value = msg.haServer;
+
+      if (s === 'playing') {
+        setBusy(true);
+        statusBar.className = 'status-bar playing';
+        statusIcon.textContent = '\u25B6\uFE0F';
+        statusText.textContent = d;
+      } else if (s === 'error') {
+        setBusy(false);
+        statusBar.className = 'status-bar error';
+        statusIcon.textContent = '\u26A0\uFE0F';
+        statusText.textContent = d;
+      } else {
+        setBusy(false);
+        statusBar.className = 'status-bar';
+        statusIcon.textContent = '\u23F8\uFE0F';
+        statusText.textContent = d || 'Ready';
+      }
+    }
+
+    function setBusy(busy) {
+      isPlaying = busy;
+      soundBtns.forEach(function(b) { b.disabled = busy; });
+      btnSpeak.disabled = busy;
+      if (busy) {
+        btnStop.classList.add('visible');
+      } else {
+        btnStop.classList.remove('visible');
+      }
+    }
+
+    /* ---- Action Handlers ---- */
+    function sendOledText(text) {
+      if (!text) return;
+      oledInput.value = text;
+      send({ action: 'display', text: text, title: 'OLED MESSAGE' });
+      statusText.textContent = 'Displayed on OLED: "' + text + '"';
+    }
+
+    function clearOled() {
+      send({ action: 'clear_display' });
+      oledInput.value = '';
+      statusText.textContent = 'Screen reset to default';
+    }
+
+    btnDisplay.addEventListener('click', function() {
+      sendOledText(oledInput.value.trim());
+    });
+
+    oledInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        btnDisplay.click();
+      }
+    });
+
+    btnSpeak.addEventListener('click', function() {
+      var text = ttsInput.value.trim();
+      if (!text) return;
+      send({ action: 'speak', text: text });
+    });
+
+    ttsInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        btnSpeak.click();
+      }
+    });
+
+    soundBtns.forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        if (isPlaying) return;
+        send({ action: 'play', sound: btn.dataset.sound });
+      });
+    });
+
+    btnStop.addEventListener('click', function() {
+      send({ action: 'stop' });
+    });
+
+    btnResetVoice.addEventListener('click', function() {
+      send({ action: 'reset_voice_pipeline' });
+      statusText.textContent = 'Resetting wake, VAD, and STT state…';
+    });
+
+    volSlider.addEventListener('input', function() {
+      volLabel.textContent = volSlider.value + '%';
+    });
+    volSlider.addEventListener('change', function() {
+      clearTimeout(volTimeout);
+      volTimeout = setTimeout(function() {
+        send({ action: 'volume', value: parseInt(volSlider.value) });
+      }, 80);
+    });
+
+    /* Initialize default */
+    switchMode('smart_home');
+    connect();
+  </script>
+</body>
+</html>

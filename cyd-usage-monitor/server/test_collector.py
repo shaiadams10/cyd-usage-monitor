@@ -103,6 +103,30 @@ Weekly limit: [bar] 100% left (resets 20:04 on 15 Aug)
         self.assertEqual(snapshot["limit_label"], "Weekly Limit")
         self.assertEqual(snapshot["metrics"]["primary"]["remaining_pct"], 100)
 
+    def test_parses_current_codex_five_hour_and_weekly_limits(self):
+        snapshot = parse_codex_status("""
+│  Account: demo-account (Plus)                                      │
+│  5h limit: [bar] 44% left (resets 05:03)                         │
+│  Weekly limit: [bar] 91% left (resets 00:03 on 3 Sep)            │
+""")
+        self.assertEqual(snapshot["limit_label"], "5-Hour Limit")
+        self.assertEqual(snapshot["metrics"]["five_hour"], {"remaining_pct": 44, "reset": "05:03"})
+        self.assertEqual(snapshot["metrics"]["weekly"], {"remaining_pct": 91, "reset": "00:03 on 3 Sep"})
+        self.assertEqual(snapshot["metrics"]["primary"], snapshot["metrics"]["five_hour"])
+
+    def test_every_codex_profile_uses_the_update_prompt_responder(self):
+        panel = "Account: future-account (Plus)\n5h limit: 80% left (resets 05:00)\nWeekly limit: 90% left (resets Friday)"
+        for profile_id in ("codex-new-profile-a", "codex-new-profile-b"):
+            profile = {"id": profile_id, "provider": "codex", "label": ""}
+            with patch.object(collector, "cli_executable", return_value="codex"), \
+                 patch.object(collector, "profile_environment", return_value={}), \
+                 patch.object(collector, "profile_workdir", return_value=Path(".")), \
+                 patch.object(collector, "pty_command", return_value=panel) as command:
+                self.assertEqual(collector.collect_profile(profile)["status"], "ok")
+            responder = command.call_args.kwargs["responders"][0]
+            self.assertRegex("1. Update now (runs npm install) 2. Skip", responder[0])
+            self.assertEqual(responder[1], "2\r")
+
     def test_parses_antigravity_usage(self):
         snapshot = parse_antigravity_usage("""
 Account: demo-account
@@ -179,6 +203,126 @@ If you are not redirected, paste the authorization code below:
             collector.notify_transition(profile, None, failed)
             collector.notify_transition(profile, failed, recovered)
             delivery.assert_not_called()
+
+    def test_failed_whatsapp_delivery_is_retried_for_confirmed_outage(self):
+        profile = {"id": "codex-test", "provider": "codex", "label": "Test account"}
+        previous = {"status": "error", "alert_confirmed": True, "alert_delivery_pending": True}
+        failed = {
+            "status": "error", "error": "Codex collection failed", "alert_confirmed": True,
+            "alert_delivery_pending": True, "consecutive_failures": 4, "collected_at": collector.utcnow(),
+        }
+        with patch.object(collector, "deliver_waha_message", return_value=(True, "ok")) as delivery:
+            self.assertTrue(collector.notify_transition(profile, previous, failed))
+            self.assertEqual(delivery.call_count, 1)
+
+    def test_last_cli_account_identity_survives_a_later_parse_failure(self):
+        profile = {"id": "codex-test", "provider": "codex", "label": "Friendly label"}
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            paths = {
+                "DATA_DIR": data_dir, "PROFILES_FILE": data_dir / "cli-profiles.json",
+                "STATE_FILE": data_dir / "telemetry.json", "INCIDENTS_FILE": data_dir / "incidents.json",
+                "ALERTS_FILE": data_dir / "alerts.json", "DEBUG_EVIDENCE_DIR": data_dir / ".debug",
+            }
+            with patch.multiple(collector, **paths), patch.object(collector, "ALERT_FAILURE_THRESHOLD", 3):
+                collector.write_json(collector.PROFILES_FILE, {"profiles": [profile]})
+                healthy = {
+                    "profile_id": profile["id"], "provider": "codex", "status": "ok",
+                    "account_name": "actual-account@example.com", "collected_at": "2026-08-26T20:00:00Z",
+                }
+                collector.persist_snapshot(profile, healthy)
+                configured = collector.read_json(collector.PROFILES_FILE, {})["profiles"][0]
+                self.assertEqual(configured["last_account_name"], "actual-account@example.com")
+                failed = collector.error_snapshot(
+                    configured,
+                    collector.CollectionError("quota fields missing", "Account: actual-account@example.com (Plus)\nUsage unavailable"),
+                )
+                collector.persist_snapshot(configured, failed)
+                stored = collector.read_json(collector.STATE_FILE, {})["profiles"][profile["id"]]
+                self.assertEqual(stored["account_name"], "actual-account@example.com")
+
+    def test_waha_failure_email_is_deduplicated_per_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            alerts = Path(directory) / "alerts.json"
+            with patch.object(collector, "ALERTS_FILE", alerts), \
+                 patch.object(collector, "send_email_message", return_value=(True, "sent")) as send:
+                self.assertTrue(collector.send_waha_failure_email("failure", "same alert", "WAHA failed")[0])
+                self.assertTrue(collector.send_waha_failure_email("failure", "same alert", "WAHA failed")[0])
+                self.assertEqual(send.call_count, 1)
+
+    def test_smtp_fallback_uses_starttls_without_persisting_credentials(self):
+        class FakeSmtp:
+            instance = None
+
+            def __init__(self, host, port, timeout):
+                self.host, self.port, self.timeout = host, port, timeout
+                self.calls = []
+                FakeSmtp.instance = self
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def ehlo(self):
+                self.calls.append("ehlo")
+
+            def starttls(self, context):
+                self.calls.append("starttls")
+
+            def login(self, username, password):
+                self.calls.append(("login", username, password))
+
+            def send_message(self, message):
+                self.calls.append(("send", message["To"], message["Subject"]))
+
+        smtp_env = {
+            "CYD_MONITOR_SMTP_HOST": "smtp.example.invalid",
+            "CYD_MONITOR_SMTP_PORT": "587",
+            "CYD_MONITOR_SMTP_SECURITY": "starttls",
+            "CYD_MONITOR_SMTP_USERNAME": "monitor-user",
+            "CYD_MONITOR_SMTP_PASSWORD": "super-secret-password",
+            "CYD_MONITOR_SMTP_FROM": "monitor@example.invalid",
+            "CYD_MONITOR_ALERT_EMAIL_TO": "operator@example.invalid",
+        }
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, smtp_env, clear=False), \
+                patch.object(collector, "ALERTS_FILE", Path(directory) / "alerts.json"), \
+                patch.object(collector.smtplib, "SMTP", FakeSmtp):
+            delivered, detail = collector.send_email_message("Test subject", "Test body")
+            self.assertTrue(delivered, detail)
+            self.assertEqual(FakeSmtp.instance.calls[:3], [
+                "ehlo", "starttls", "ehlo",
+            ])
+            self.assertIn(("login", "monitor-user", "super-secret-password"), FakeSmtp.instance.calls)
+            persisted = collector.ALERTS_FILE.read_text(encoding="utf-8")
+            self.assertNotIn("super-secret-password", persisted)
+            self.assertNotIn("monitor-user", persisted)
+
+    def test_dashboard_saved_email_secret_is_used_without_environment_smtp(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+            "CYD_MONITOR_SMTP_HOST": "", "CYD_MONITOR_SMTP_USERNAME": "",
+            "CYD_MONITOR_SMTP_PASSWORD": "", "CYD_MONITOR_SMTP_FROM": "",
+            "CYD_MONITOR_ALERT_EMAIL_TO": "",
+        }, clear=False), patch.object(collector, "EMAIL_SECRET_FILE", Path(directory) / "email-secret.json"):
+            collector.write_json(collector.EMAIL_SECRET_FILE, {
+                "provider": "gmail", "host": "smtp.gmail.com", "port": 587,
+                "security": "starttls", "username": "monitor@example.com",
+                "password": "private-app-password", "sender": "monitor@example.com",
+                "recipients": ["operator@example.com"],
+            })
+            settings = collector.email_settings()
+            self.assertEqual(settings["host"], "smtp.gmail.com")
+            self.assertEqual(settings["recipients"], ["operator@example.com"])
+            self.assertTrue(collector.email_fallback_configured(settings))
+
+    def test_codex_update_prompt_responder_is_one_shot(self):
+        responders = [(r"Update now.*?2\.?\s*Skip", "2\r", "Skipping update")]
+        handled = set()
+        transcript = "\x1b[1m1. Update now\x1b[0m (runs npm install)\x1b[4;10H2.Skip"
+        self.assertEqual(collector.matching_pty_responses(transcript, responders, handled), [("2\r", "Skipping update")])
+        self.assertEqual(collector.matching_pty_responses(transcript, responders, handled), [])
 
     def test_whatsapp_waits_for_configured_consecutive_failures(self):
         profile = {"id": "antigravity-test", "provider": "antigravity", "label": "Antigravity account"}

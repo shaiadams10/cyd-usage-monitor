@@ -1,0 +1,35 @@
+{
+  "name": "esp32s3-home-assistant-carrier-board",
+  "version": "1.0.0",
+  "description": "TSCircuit code-defined PCB carrier board for ESP32-S3 Home Assistant voice satellite",
+  "main": "index.circuit.tsx",
+  "keywords": [
+    "tscircuit",
+    "esp32-s3",
+    "pcb",
+    "home-assistant",
+    "voice-satellite",
+    "electronics-as-code"
+  ],
+  "scripts": {
+    "dev": "tsci dev index.circuit.tsx",
+    "build": "tsci build index.circuit.tsx",
+    "snapshot": "tsci snapshot",
+    "export:gerbers": "tsci export -f gerbers -o dist/gerbers.zip index.circuit.tsx",
+    "export:kicad": "tsci export -f kicad_zip -o dist/kicad.zip index.circuit.tsx",
+    "export:svg": "tsci export -f pcb-svg -o dist/pcb.svg index.circuit.tsx && tsci export -f schematic-svg -o dist/schematic.svg index.circuit.tsx",
+    "export:3d": "tsci export -f glb -o dist/carrier_board.glb index.circuit.tsx",
+    "export:all": "powershell -ExecutionPolicy Bypass -File ./scripts/export-artifacts.ps1",
+    "typecheck": "tsc --noEmit",
+    "check:netlist": "tsci check netlist",
+    "check:schematic": "tsci check schematic-placement",
+    "check:placement": "tsci check placement",
+    "check:shorts": "tsci check shorts index.circuit.tsx",
+    "validate": "npm run typecheck && npm run check:netlist && npm run check:schematic && npm run check:placement && npm run build && npm run check:shorts"
+  },
+  "devDependencies": {
+    "@tscircuit/eval": "0.0.1263",
+    "tscircuit": "0.0.2409",
+    "typescript": "5.9.3"
+  }
+}

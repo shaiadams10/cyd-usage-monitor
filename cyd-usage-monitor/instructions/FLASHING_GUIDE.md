@@ -1,6 +1,9 @@
 # Flashing a CYD Device
 
-This guide provisions an ESP32-2432S028R Cheap Yellow Display. Build locally
+This guide provisions the supported Hosyond/LCDWiki E32R40T 4.0-inch
+ESP32-32E display (ST7796S, 320x480, XPT2046 resistive touch). The historical
+PlatformIO environment name remains `esp32-2432S028R` for simulator and script
+compatibility. Build locally
 because Wi-Fi and the device token are compiled from ignored
 `include/secrets.h`. Never publish the configured firmware binary.
 

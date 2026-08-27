@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "author": "Antigravity",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-s3-devkitc-1", "id": "esp", "top": 40, "left": 0, "attrs": {} },
+    { "type": "chip-max98357a", "id": "amp1", "top": 40, "left": 320, "attrs": {} },
+    { "type": "chip-inmp441", "id": "mic1", "top": 240, "left": 320, "attrs": {} }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "esp:5V", "amp1:VIN", "red", [ "v0" ] ],
+    [ "esp:GND.1", "amp1:GND", "black", [ "v0" ] ],
+    [ "esp:3V3", "amp1:SD", "red", [ "v0" ] ],
+    [ "esp:GND.1", "amp1:GAIN", "black", [ "v0" ] ],
+    [ "esp:17", "amp1:BCLK", "orange", [ "v0" ] ],
+    [ "esp:18", "amp1:LRC", "green", [ "v0" ] ],
+    [ "esp:8", "amp1:DIN", "purple", [ "v0" ] ],
+    [ "esp:3V3", "mic1:VDD", "red", [ "v0" ] ],
+    [ "esp:GND.2", "mic1:GND", "black", [ "v0" ] ],
+    [ "esp:GND.2", "mic1:L/R", "black", [ "v0" ] ],
+    [ "esp:15", "mic1:SCK", "orange", [ "v0" ] ],
+    [ "esp:16", "mic1:WS", "green", [ "v0" ] ],
+    [ "esp:7", "mic1:SD", "purple", [ "v0" ] ]
+  ]
+}

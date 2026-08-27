@@ -28,13 +28,147 @@ credentials, and it does not call private provider HTTP APIs. OpenRouter is a
 narrow exception using only its documented credits, key-list, and activity
 read endpoints.
 
-## Hardware
+## Hardware & Pin Mapping
 
-| Peripheral | Pins |
-| --- | --- |
-| ILI9341 display | MOSI 13, MISO 12, SCK 14, CS 15, DC 2, backlight 21 |
-| XPT2046 touch | CS 33, IRQ 36, MOSI 32, MISO 39, CLK 25 |
-| RGB LED | red 4, green 16, blue 17 |
+The physical firmware target is the Hosyond/LCDWiki E32R40T 4.0-inch
+ESP32-32E module: a 320×480 ST7796S SPI TFT, XPT2046 resistive touch sharing
+the TFT SPI bus, and an onboard common-anode RGB LED. Some reseller titles
+incorrectly call this 4.0-inch model an ILI9341 240×320 display; the detailed
+product specification and manufacturer documentation identify ST7796S
+320×480. The historical PlatformIO environment name is retained for tooling
+compatibility.
+
+### Pin Connections
+
+| Peripheral | ESP32 Pin | Function / Line | Bus / Type | Logic Level |
+| :--- | :--- | :--- | :--- | :--- |
+| **ST7796S Display** | `GPIO 15` | `CS` (Chip Select) | Shared SPI | 3.3V Logic |
+| | `GPIO 2` | `DC` (Data / Command) | Control | 3.3V Logic |
+| | `GPIO 13` | `MOSI` / `SDI` | HSPI | 3.3V Logic |
+| | `GPIO 12` | `MISO` / `SDO` | HSPI | 3.3V Logic |
+| | `GPIO 14` | `SCK` / `SCLK` | HSPI | 3.3V Logic |
+| | `GPIO 27` | `LED` (Backlight PWM) | PWM Control | 3.3V Logic |
+| **XPT2046 Touch** | `GPIO 33` | `T_CS` (Touch Select) | Shared SPI | 3.3V Logic |
+| | `GPIO 36` | `T_IRQ` (Touch Interrupt) | Input (Sensor VP) | 3.3V Logic |
+| | `GPIO 14` | `T_CLK` (Touch Clock) | Shared SPI | 3.3V Logic |
+| | `GPIO 13` | `T_DIN` / `MOSI` | Shared SPI | 3.3V Logic |
+| | `GPIO 12` | `T_DO` / `MISO` | Shared SPI | 3.3V Logic |
+| **RGB LED** | `GPIO 22` | `Red` (Active Low) | PWM / Digital | 3.3V Logic |
+| | `GPIO 16` | `Green` (Active Low) | PWM / Digital | 3.3V Logic |
+| | `GPIO 17` | `Blue` (Active Low) | PWM / Digital | 3.3V Logic |
+
+### Connection Flowchart
+
+```mermaid
+flowchart TD
+    subgraph ESP32["ESP32-32E (E32R40T)"]
+        subgraph HSPI["HSPI Display Bus"]
+            G15["GPIO 15 (CS)"]
+            G2["GPIO 2 (DC)"]
+            G13["GPIO 13 (MOSI)"]
+            G12["GPIO 12 (MISO)"]
+            G14["GPIO 14 (SCK)"]
+            G27["GPIO 27 (Backlight)"]
+        end
+        subgraph TouchBus["Touch Controller Bus"]
+            G33["GPIO 33 (T_CS)"]
+            G36["GPIO 36 (T_IRQ)"]
+            T14["GPIO 14 (T_CLK, shared)"]
+            T13["GPIO 13 (T_DIN, shared)"]
+            T12["GPIO 12 (T_DO, shared)"]
+        end
+        subgraph RGBPins["RGB LED"]
+            G22["GPIO 22 (Red)"]
+            G16["GPIO 16 (Green)"]
+            G17["GPIO 17 (Blue)"]
+        end
+    end
+
+    subgraph ST7796S["ST7796S 4.0\" TFT (480x320 landscape)"]
+        TFT_CS["CS"]
+        TFT_DC["D/C"]
+        TFT_MOSI["MOSI"]
+        TFT_MISO["MISO"]
+        TFT_SCK["SCK"]
+        TFT_LED["LED Backlight"]
+    end
+
+    subgraph XPT2046["XPT2046 Resistive Touch"]
+        TP_CS["T_CS"]
+        TP_IRQ["T_IRQ"]
+        TP_CLK["T_CLK"]
+        TP_DIN["T_DIN"]
+        TP_DO["T_DO"]
+    end
+
+    subgraph RGB["On-Board RGB LED"]
+        LED_R["R (Red)"]
+        LED_G["G (Green)"]
+        LED_B["B (Blue)"]
+    end
+
+    %% Display Connections
+    G15 -->|🟡 Yellow| TFT_CS
+    G2 -->|🟢 Green| TFT_DC
+    G13 -->|🔵 Blue| TFT_MOSI
+    G12 -->|🟣 Purple| TFT_MISO
+    G14 -->|🟠 Orange| TFT_SCK
+    G27 -->|⚪ White| TFT_LED
+
+    %% Touch Connections
+    G33 -->|🟡 Yellow| TP_CS
+    G36 -->|🔴 Red| TP_IRQ
+    T14 -->|🟠 Orange| TP_CLK
+    T13 -->|🔵 Blue| TP_DIN
+    TP_DO -->|🟣 Purple| T12
+
+    %% RGB Connections
+    G22 -->|🔴 Red| LED_R
+    G16 -->|🟢 Green| LED_G
+    G17 -->|🔵 Blue| LED_B
+
+    classDef tft fill:#2563eb,stroke:#1d4ed8,color:#ffffff,stroke-width:2px;
+    classDef touch fill:#d97706,stroke:#b45309,color:#ffffff,stroke-width:2px;
+    classDef led fill:#059669,stroke:#047857,color:#ffffff,stroke-width:2px;
+
+    class TFT_CS,TFT_DC,TFT_MOSI,TFT_MISO,TFT_SCK,TFT_LED tft;
+    class TP_CS,TP_IRQ,TP_CLK,TP_DIN,TP_DO touch;
+    class LED_R,LED_G,LED_B led;
+```
+
+### Visual Wiring Schematic
+
+```text
+    ┌───────────────────────────────────────────────────────────┐
+    │                 ESP32-32E E32R40T 4.0"                    │
+    │                                                           │
+    │  ─── HSPI TFT Display ───                                 │
+    │  [IO15] ──(CS)────> [CS]   ┌───────────────────────────┐  │
+    │  [IO2]  ──(DC)────> [D/C]  │  ST7796S 4.0" SPI TFT    │  │
+    │  [IO13] ──(MOSI)──> [MOSI] │  (480x320 landscape)      │  │
+    │  [IO12] ──(MISO)──> [MISO] │                           │  │
+    │  [IO14] ──(SCK)───> [SCK]  │                           │  │
+    │  [IO27] ──(PWM)───> [LED]  └───────────────────────────┘  │
+    │                                                           │
+    │  ─── Touch Controller ───                                 │
+    │  [IO33] ──(CS)────> [T_CS] ┌───────────────────────────┐  │
+    │  [IO36] <─(IRQ)───  [T_IRQ]│  XPT2046 Resistive Touch  │  │
+    │  [IO14] ──(CLK)───> [T_CLK]│  Shared with LCD SPI      │  │
+    │  [IO13] ──(DIN)───> [T_DIN]│                           │  │
+    │  [IO12] <─(DO)────  [T_DO] └───────────────────────────┘  │
+    │                                                           │
+    │  ─── On-Board RGB LED ───                                 │
+    │  [IO22] ──────────> [Red]                                 │
+    │  [IO16] ──────────> [Green]                               │
+    │  [IO17] ──────────> [Blue]                                │
+    └───────────────────────────────────────────────────────────┘
+```
+
+The Wokwi layout is retained for simulator development; physical flashing uses
+the E32R40T pin mapping above.
+
+---
+
 
 ## Security model
 
@@ -63,8 +197,9 @@ read endpoints.
   dashboard. The mode-`0600` runtime secret is never returned to the browser,
   firmware, device API, logs, or CLI subprocesses; removing OpenRouter deletes
   both the key and its normalized snapshot.
-- Optional WAHA alert credentials remain only in `.env`; the dashboard never
-  returns the API key, and provider CLI child processes do not inherit it.
+- Optional WAHA and TLS SMTP alert credentials remain only in `.env`; the
+  dashboard never returns them, and provider CLI child processes do not
+  inherit them.
 - Removing an account queues deletion of its complete isolated CLI credential
   directory in addition to removing monitor telemetry.
 
@@ -89,6 +224,9 @@ Set all of the following in the private `.env` file:
 - `AGY_HOST_PATH`, `CODEX_HOST_DIR`, and `NODE_BIN_HOST_DIR` — absolute paths
   to the host-installed CLI executable/installations.
 - Optional WAHA settings if WhatsApp alerts are required.
+- Optional `CYD_MONITOR_SMTP_*` settings and
+  `CYD_MONITOR_ALERT_EMAIL_TO` for an independent email fallback when WAHA
+  cannot deliver an alert.
 
 `CYD_MONITOR_HOST_DATA_DIR` and `CYD_MONITOR_HOST_PROFILE_DIR` default to
 ignored `./data` and `./profiles` directories. Assign a non-root
@@ -192,13 +330,33 @@ the top model for that seven-day window. Each app polls cached LAN telemetry
 every three seconds only while visible; upstream collection remains on the
 90-second host schedule.
 
+For Codex profiles, Usage Monitor shows the current rolling 5-hour allowance
+and weekly allowance together. Selecting any CLI account with **Show on CYD**,
+or choosing **Show on CYD** on the OpenRouter card, queues a private
+dashboard-to-device command and updates the browser LVGL preview immediately.
+The physical CYD receives that route on its next three-second LAN poll.
+
+The preview rail also includes **Flip physical screen 180°**. This persists the
+setting on the monitor server and in the CYD's nonvolatile storage, so the last
+orientation survives device restarts and temporary network loss. The browser
+preview deliberately remains upright and shows a `0°` or `180°` physical-panel
+indicator instead. Physical touch input is transformed with the panel, so its
+controls remain aligned when the unit is mounted upside down.
+
+The physical resistive panel uses TFT_eSPI's complete five-value calibration,
+including its rotation and inversion flags. Launcher artwork is deliberately
+non-clickable so taps reach the Usage Monitor or OpenRouter tile beneath it;
+the header Home controls use enlarged touch targets for reliable finger input.
+
 ### 5. Optional local UI preview
 
 The dashboard includes an interactive LVGL WebAssembly preview built from the
-shared CYD visual assets and launcher behavior. Click or tap either launcher
-tile and use the simulated Home button. Usage Monitor's Next control selects
-the following saved CLI profile in the dashboard as well as updating the
-preview. Its preview stays in the
+shared CYD visual assets and launcher behavior. It renders Codex's 5-hour and
+weekly limits and synchronizes launcher, Usage Monitor, OpenRouter, Home, and
+account-selection actions with the physical unit. A physical touch reports its
+new route to the monitor, and the next dashboard refresh follows it; clicking
+the browser preview sends the same route back to the CYD. Usage Monitor's Next
+control selects the following saved CLI profile for both displays. The preview stays in the
 right-hand dashboard rail at normal desktop widths and scales the logical
 320×240 display to 340×255 for easier inspection. The WebAssembly-only
 Antigravity grid uses additional edge gutters so all four cards remain fully
@@ -239,7 +397,7 @@ first fetch occurs when Usage Monitor opens or as soon as the background Wi-Fi
 connection becomes ready. A `[NET]` diagnostic indicates a wrong LAN address,
 unreachable server, or closed port.
 
-## Optional WAHA alerts
+## Optional WhatsApp alerts and email fallback
 
 The collector can send one WhatsApp alert when a profile has failed for three
 consecutive collection cycles and one recovery message after the next
@@ -260,6 +418,52 @@ observed parser/CLI symptom, privacy-safe capture counts, a diagnostic ID, the
 poll interval, and the exact automatic action that will occur. Recovery alerts
 report the interruption duration and distinguish a later successful poll from
 an actual reconnect or credential change.
+
+Failed WAHA sends remain pending and are retried on later failed collections.
+If the failure notification was never delivered, the collector suppresses the
+otherwise confusing recovery message. A red **WAHA delivery failing** status
+on the Overview means routing is configured but the WAHA session or endpoint
+is unavailable. Restore the session in WAHA (scan its QR code when the session
+reports `SCAN_QR_CODE`), then use **Alerts → Send test alert** to verify delivery.
+
+For an independent fallback, open **Alerts → Email integration** and choose
+**Gmail / Google Workspace** or **Custom TLS SMTP**. Gmail preconfigures
+`smtp.gmail.com:587` with STARTTLS and expects a dedicated 16-digit app
+password; custom mode supports transactional SMTP providers and implicit TLS.
+The submitted credential is atomically stored as mode `0600` in the private
+runtime data volume and is never returned to the dashboard or status API.
+After saving, use **Send test email** to validate the complete route.
+The dashboard refreshes live telemetry in the background, but an in-progress
+email form remains untouched until Save succeeds so moving between fields does
+not discard the draft.
+
+Operators who prefer configuration-as-code can instead set a dedicated
+TLS-capable SMTP account in the private `.env` with `CYD_MONITOR_SMTP_HOST`,
+`CYD_MONITOR_SMTP_PORT`, `CYD_MONITOR_SMTP_SECURITY` (`starttls` or `tls`),
+`CYD_MONITOR_SMTP_USERNAME`, `CYD_MONITOR_SMTP_PASSWORD`,
+`CYD_MONITOR_SMTP_FROM`, and `CYD_MONITOR_ALERT_EMAIL_TO`. If WAHA rejects or
+cannot reach a notification, the collector sends one deduplicated email with
+the WAHA error and original monitor alert. Environment settings override and
+lock the dashboard form so there is one unambiguous credential source. SMTP
+acceptance cannot guarantee final inbox delivery; use a dedicated
+transactional SMTP credential or app password and monitor the dashboard's
+independent email-delivery health.
+
+Google OAuth is not used for this alert-only integration: it requires a Cloud
+project, consent application, redirect URI, Gmail scopes, verification in some
+cases, and refresh-token lifecycle handling. This monitor needs only outbound
+SMTP, so a revocable app password or provider-specific SMTP key has a smaller
+operational surface.
+
+New Codex CLI releases can display an interactive self-update choice before
+the `/status` panel. Scheduled collection selects **Skip** once for that
+capture, allowing quota parsing to continue without modifying the read-only
+collector container. This responder is in the common Codex profile path, so
+existing and newly added profiles receive the same behavior. After any
+successful capture, the collector records the CLI-visible account identity;
+later failures continue to name that account in the dashboard, device payload,
+incident history, and alerts. Upgrade the host's Codex installation separately
+during a planned maintenance window.
 
 The protected dashboard's **Alerts** view retains the latest 50 structured
 incidents, including repeated failed-poll counts and recovery details. For

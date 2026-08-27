@@ -1,0 +1,6 @@
+{
+  "ssh_host": "operator-ssh-host.example",
+  "remote_project_dir": "/path/to/homeassistant",
+  "openwakeword_data_dir": "/path/to/openwakeword-data",
+  "service": "wyoming-openwakeword"
+}
