@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Improved physical CYD Wi-Fi reliability by disabling modem sleep on the
+  continuously powered LAN display, recording disconnect reasons plus
+  connected RSSI/channel diagnostics, and adding conservative staged recovery:
+  passive auto-reconnect, explicit reconnect, one station-radio
+  reinitialization, then a five-minute last-resort device restart only after a
+  previously healthy connection. The launcher now reports `Recovering` while
+  the fallback sequence is active.
+- Added custom CYD Usage Monitor favicon and high-resolution app branding assets:
+  multi-resolution `favicon.ico`, vector `favicon.svg`, raster `favicon-32x32.png`,
+  `favicon-16x16.png`, `apple-touch-icon.png` (180x180), and master 1024x1024 / 512x512
+  icons with public `/favicon.ico` route and dashboard `<head>` integration.
+  Added complete cycle, cycle-badge, and sync action-icon families for Stream
+  Deck and launcher shortcuts.
+- Added a token-safe Windows Stream Deck helper and windowless WScript launcher
+  for cycling through enabled Codex/Antigravity usage profiles without a
+  console flash. Each press also commands both the physical CYD and browser
+  preview into Usage Monitor.
 - Added a persistent dashboard screen-orientation control that flips only the
   physical CYD by 180 degrees while retaining the 480x320 landscape layout.
   The CYD stores the last orientation in NVS for immediate reboot recovery;

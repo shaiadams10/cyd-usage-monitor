@@ -438,6 +438,34 @@ class ServerApiTests(unittest.TestCase):
         runtime = app.read_json(app.RUNTIME_FILE, {"requests": {}})["requests"][body["request_id"]]
         self.assertEqual(runtime["status"], "completed")
 
+    def test_favicon_and_static_assets_are_served_publicly(self):
+        status, body, headers = self.request("/favicon.ico", basic=False)
+        self.assertEqual(status, 200)
+        self.assertIn("image/x-icon", headers.get("Content-Type", headers.get("content-type", "")))
+        self.assertGreater(len(body), 100)
+
+        for path, mime in [
+            ("/static/favicon.svg", "image/svg+xml"),
+            ("/static/favicon-32x32.png", "image/png"),
+            ("/static/favicon-16x16.png", "image/png"),
+            ("/static/apple-touch-icon.png", "image/png"),
+            ("/static/cyd-monitor-icon-1024.png", "image/png"),
+            ("/static/cyd-monitor-cycle-icon-1024.png", "image/png"),
+            ("/static/cyd-monitor-cycle-badge-icon-1024.png", "image/png"),
+            ("/static/cyd-monitor-sync-icon-1024.png", "image/png"),
+        ]:
+            status, asset_body, asset_headers = self.request(path, basic=False)
+            self.assertEqual(status, 200, f"Failed to serve {path}")
+            self.assertIn(mime, asset_headers.get("Content-Type", asset_headers.get("content-type", "")))
+            self.assertGreater(len(asset_body), 50)
+
+        status, dashboard, _ = self.request("/")
+        self.assertEqual(status, 200)
+        self.assertIn(b'rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=2"', dashboard)
+        self.assertIn(b'rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32x32.png?v=2"', dashboard)
+        self.assertIn(b'rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png?v=2"', dashboard)
+        self.assertIn(b'rel="shortcut icon" href="/favicon.ico?v=2"', dashboard)
+
 
 if __name__ == "__main__":
     unittest.main()

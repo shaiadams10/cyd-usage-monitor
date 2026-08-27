@@ -478,6 +478,19 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if path == "/favicon.ico":
+            target = (STATIC_DIR / "favicon.ico").resolve()
+            if not target.is_file():
+                return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            body = target.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/x-icon")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.security_headers()
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path in {"/api/v1/cyd-status", "/api/v1/next-account", "/api/v1/openrouter-status", "/api/v1/display-command"}:
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         if path == "/api/v1/collector-status":

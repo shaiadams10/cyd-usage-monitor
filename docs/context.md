@@ -12,6 +12,28 @@ schematics, and comprehensive pin mapping documentation.
 Project Brain Protocol v1.1.0 is active and healthy at the repository root.
 
 ## Recent Changes
+### 2026-08-27 — CYD Wi-Fi Prevention & Staged Recovery
+- Reduced avoidable Wi-Fi interruptions on the continuously powered CYD by disabling ESP32 modem sleep, while retaining station-only mode, non-persistent credentials, and the framework's passive auto-reconnect.
+- Added serial disconnect-reason names/numbers plus connected RSSI/channel evidence so future AP, RF, authentication, and driver failures can be distinguished instead of inferred from the screen.
+- Added conservative fallback stages: explicit reconnect after 30 seconds, one station-radio reinitialization after two minutes, and a full ESP restart only after five minutes when that boot previously held a healthy connection. This avoids reboot loops during an AP outage or invalid configuration.
+- Updated the launcher to show `Recovering`, documented the power/reliability tradeoff and recovery timing, and completed a clean PlatformIO firmware build at 37.5% RAM / 63.5% flash.
+- Flashed the verified 1,255,056-byte image to the attached CH340 CYD on COM9. Controlled-reboot serial evidence captured one transient `ASSOC_FAIL` followed by a healthy connection at -53 dBm on channel 1, remote Usage Monitor routing, and synchronized 180-degree display state; the strong signal makes persistent weak RF unlikely at the current placement.
+- Files affected: `docs/{context.md,map.md}` and `cyd-usage-monitor/{CHANGELOG.md,README.md,src/main.cpp}`.
+
+### 2026-08-27 — Dashboard Favicon & High-Res App Icon Assets
+- Generated a high-contrast cybernetic CYD monitor master icon (1024x1024) featuring the dark squircle chassis, glowing emerald-teal quota gauge arc meter, and gold/amber status accents.
+- Created full multi-resolution raster and vector favicon suite: `cyd-monitor-icon-1024.png`, `icon-512.png`, `icon-192.png`, `apple-touch-icon.png` (180x180), `favicon-32x32.png`, `favicon-16x16.png`, multi-size `favicon.ico` (16/32/48/64px), and crisp scalable `favicon.svg`. Added complete cycle, cycle-badge, and sync action-icon families for Stream Deck and launcher shortcuts.
+- Updated `dashboard.html` `<head>` with SVG, PNG, and Apple Touch Icon `<link>` tags, and added direct public `/favicon.ico` routing in `server.py`.
+- Added automated server tests in `test_server.py` covering unauthenticated public favicon, SVG, and raster asset serving (all 47 tests passing).
+- Deployed live to the operator-configured private host, rebuilt production containers, and verified healthy live responses (`200 OK`) across all favicon routes.
+- Files affected: `docs/{context.md,map.md}`, `cyd-usage-monitor/CHANGELOG.md`, `cyd-usage-monitor/server/{dashboard.html,server.py,test_server.py,static/{apple-touch-icon.png,cyd-monitor-*-icon-*.png,cyd-monitor-icon-1024.png,favicon-16x16.png,favicon-32x32.png,favicon.ico,favicon.svg,icon-192.png,icon-512.png}}`.
+
+### 2026-08-27 — Stream Deck Usage-Account Cycling
+- Added a Windows Stream Deck helper that calls the existing private Bearer-protected next-account endpoint without storing its token in Stream Deck arguments or repository files.
+- Added a windowless WScript launcher so Stream Deck can invoke the PowerShell helper without briefly flashing a console window.
+- Configured the operator's Windows user environment from the already-flashed CYD's ignored private endpoint/token values. Each press rotates enabled Codex/Antigravity profiles and forces both the physical CYD and dashboard preview into Usage Monitor; OpenRouter is excluded.
+- Files affected: `docs/{context.md,map.md}` and `cyd-usage-monitor/{CHANGELOG.md,README.md,scripts/stream-deck-next-account.{ps1,vbs}}`.
+
 ### 2026-08-27 — Dashboard-Controlled 180° CYD Rotation
 - Added a persisted dashboard control that switches the physical E32R40T between normal and 180-degree-flipped landscape orientations through the existing private display-command poll. The 480x320 layout is unchanged, and resistive-touch coordinates invert with the panel so controls stay aligned upside down.
 - Kept the browser LVGL preview upright and added a physical `0°`/`180°` indicator. The physical CYD now stores its last orientation in Preferences/NVS, so it restores immediately on reboot before networking is available.
@@ -62,27 +84,14 @@ Project Brain Protocol v1.1.0 is active and healthy at the repository root.
 - Configured local Wi-Fi credentials in `cyd-usage-monitor/include/secrets.h`, compiled the release firmware with PlatformIO, and flashed the two-app CYD Usage Monitor and OpenRouter UI image. Verified boot and touch navigation startup on physical hardware.
 - Files affected: `docs/{context.md,map.md}`, `.gitignore`, and `cyd-usage-monitor/{include/secrets.h,data/factory_backup.bin}`.
 
-### 2026-08-24 — Purchased Module Identification & Round-Microphone Footprint
-- Inspected the operator's five AliExpress listings and mapped them to the HZWDONE round INMP441, WS2812B/SK6812 ring family, MAX98357/MAX98357A amplifier, 25 x 35 mm box speaker, and 0.96-inch SSD1306 OLED. Recorded seller-published outlines, pin labels, and connector facts while distinguishing listing identity from the ordered SKU option that the URLs do not encode.
-- Replaced the carrier's incorrect generic 1x6 microphone header with the purchased 14 mm round 2x3 geometry (`SD VDD GND` / `L/R WS SCK`), added its real outline/courtyard, and moved it to a collision-free edge position with deliberate acoustic overhang. The amplifier and OLED electrical header orders were confirmed, but their complete assembly bodies and the exact ESP32-S3 board still gate fabrication and case CAD.
-- Files affected: `docs/{context.md,hardware.md}` and `esp32s3-home-assistant/{CHANGELOG.md,circuit/{README.md,VoiceSatelliteCarrier.circuit.tsx,components/Inmp441Mic.tsx}}`.
-
-### 2026-08-24 — TSCircuit Code-Defined PCB Carrier Board
-- Audited the newly added tscircuit workspace instead of accepting its earlier successful-export claim. Found the dependencies absent locally while the CLI was global, an incorrect DevKit J1/J3 map that routed 5 V to a physical ground pin, 25.4 mm header-row spacing instead of the official 22.86 mm, an impossible 470 uF 0805 footprint, a floating duplicate speaker connector, source-power backfeed risk, PCB collisions, an effectively unlaid-out schematic, stale exports, and an export script that silently skipped the PCB SVG command.
-- Removed the global tscircuit CLI and installed exact project-local `tscircuit`, evaluator, and TypeScript versions with a lockfile. Corrected the official DevKit pin/mechanical mapping, made external 5 V peripheral-only through a two-position shunt selector, removed the false speaker terminal, used a radial polarized capacitor, added the DevKit body outline and schematic sheet/sections, cleared placement collisions, and widened 5 V/ground routing.
-- Added a single `npm run validate` gate covering TypeScript, netlist, schematic placement, PCB placement, autorouted build, and Gerber-derived shorts. Made the local-only export script fail on native-command errors and regenerated Gerber/drill/BOM/PnP, KiCad, SVG, and GLB artifacts; all required checks pass and the corrected PCB/schematic/3D previews were visually inspected.
-- Documented that fabrication remains gated on caliper measurements and pin-order verification for the operator's exact breakout modules. The current GLB lacks the socketed module bodies and one radial-capacitor STEP body, so it is explicitly unsuitable as the final enclosure reference; KiCad remains the independent fab review and FreeCAD/Fusion the intended enclosure layer.
-- Files affected: `docs/{context.md,map.md}` and `esp32s3-home-assistant/{CHANGELOG.md,README.md,circuit/**}`.
-
-### 2026-08-24 — Reference-Inspired Voice Operations Console
-- Rendered and inspected the supplied React/Vite dashboard sample at desktop and phone sizes, then translated its strongest hierarchy into the embedded ESPHome UI without copying mock data or replacing native controls: persistent desktop status rail, oversized readiness hero, sharp high-contrast surfaces, and compact responsive navigation.
-- Replaced Research Sessions accordions with a master-detail review workspace. The left queue selects exactly one interaction and the right pane preserves the complete conversation, recognition decision, acoustic evidence, decoder candidates, timing, WAV, and human-review workflow; `#overview` and `#sessions` remain refresh-stable.
-- Adapted the layout to ESPHome's actual entity density by making device groups full width and stacking the debug log below them. Added real nested-switch inspection so the hero reports wake audio as Enabled/Disabled, hid redundant native branding, and fixed the grid/hidden interaction that initially left Overview visible on the Research route.
-- Rebuilt and OTA-flashed the final 1,345,819-byte image. JavaScript syntax, ESPHome configuration/compile, live route persistence, one-selected-session behavior, desktop rendering, and a 375 px Research layout with no horizontal overflow all passed on the physical device dashboard.
-- Files affected: `docs/{context.md,map.md}` and `esp32s3-home-assistant/{CHANGELOG.md,README.md,dashboard-bundle.js,dashboard.js}`.
-
 ## History Summary
 <!-- Compressed summaries of older changes go here -->
+
+- Identified the purchased voice-satellite modules and corrected the carrier's INMP441 footprint to the real 14 mm round 2x3 geometry on 2026-08-24; amplifier/OLED bodies and exact ESP32-S3 board dimensions still gate fabrication and case CAD.
+
+- Audited and corrected the code-defined TSCircuit PCB carrier board on 2026-08-24 with official DevKit pinout, peripheral-only power selection, radial capacitor, export scripts, and `npm run validate` gate.
+
+- Reworked the ESPHome operations console into a responsive readiness overview and master-detail Research Sessions workspace on 2026-08-24, then rebuilt and OTA-validated it on the physical device.
 
 - Added report-before-prune voice research retention, private review/report APIs, archive telemetry, and the master-detail Research Sessions redesign on 2026-08-24; validated retention ordering, responsive UI, the live private service, ESPHome compile, and physical OTA deployment.
 

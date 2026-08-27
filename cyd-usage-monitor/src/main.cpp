@@ -30,6 +30,12 @@ const unsigned long FETCH_INTERVAL = 3000;
 const size_t MAX_TELEMETRY_BYTES = 16384;
 const unsigned long TELEMETRY_CONNECT_TIMEOUT_MS = 3000;
 const unsigned long TELEMETRY_READ_TIMEOUT_MS = 5000;
+// Recovery is intentionally staged. Most AP interruptions clear on their own,
+// so do not disrupt a connection attempt until it has had time to settle.
+const unsigned long WIFI_EXPLICIT_RECONNECT_AFTER_MS = 30000;
+const unsigned long WIFI_EXPLICIT_RECONNECT_INTERVAL_MS = 30000;
+const unsigned long WIFI_RADIO_RECOVERY_AFTER_MS = 120000;
+const unsigned long WIFI_RESTART_AFTER_MS = 300000;
 static volatile bool nextAccountRequested = false;
 static volatile bool openUsageRequested = false;
 static volatile bool openRouterRequested = false;
@@ -37,8 +43,13 @@ static volatile bool homeRequested = false;
 static bool usageFetchPending = false;
 static bool touchInputReady = false;
 static unsigned long touchReleasedSince = 0;
-static unsigned long wifiBeginTime = 0;
 static unsigned long lastWifiUiUpdate = 0;
+static unsigned long wifiDisconnectedSince = 0;
+static unsigned long lastWifiReconnectAttempt = 0;
+static bool wifiRadioRecoveryAttempted = false;
+static bool wifiEverConnected = false;
+static volatile uint8_t lastWifiDisconnectReason = 0;
+static volatile bool wifiDisconnectReasonPending = false;
 static unsigned long lastDisplayCommandPoll = 0;
 static wl_status_t previousWifiStatus = WL_NO_SHIELD;
 static String lastDisplayCommandId;
@@ -70,6 +81,15 @@ static const AppDescriptor launcherApps[] = {
     {AppId::UsageMonitor, "Usage Monitor", "AI quota dashboard", 0xC4B5FD},
     {AppId::OpenRouter, "OpenRouter", "Credits & spend", 0xA7F3D0},
 };
+
+void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+    if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+        // The callback runs on the Arduino event task. Keep it non-blocking and
+        // let loop() perform all logging and recovery work.
+        lastWifiDisconnectReason = info.wifi_sta_disconnected.reason;
+        wifiDisconnectReasonPending = true;
+    }
+}
 
 // A compact 56x56 RGB565 canvas (6,272 bytes) provides a custom app icon
 // without paying the roughly 150 KB cost of a full-screen canvas.
@@ -1486,6 +1506,58 @@ void serviceWifiState() {
     const bool becameConnected = status == WL_CONNECTED && previousWifiStatus != WL_CONNECTED;
     const unsigned long now = millis();
 
+    if (wifiDisconnectReasonPending) {
+        const uint8_t reason = lastWifiDisconnectReason;
+        wifiDisconnectReasonPending = false;
+        Serial.printf("[WIFI] Disconnected: reason=%u (%s)\n", reason,
+                      WiFi.disconnectReasonName(static_cast<wifi_err_reason_t>(reason)));
+    }
+
+    if (status == WL_CONNECTED) {
+        if (becameConnected) {
+            Serial.printf("[WIFI] Connected: RSSI=%d dBm, channel=%d\n", WiFi.RSSI(), WiFi.channel());
+        }
+        wifiEverConnected = true;
+        wifiDisconnectedSince = 0;
+        lastWifiReconnectAttempt = 0;
+        wifiRadioRecoveryAttempted = false;
+    } else {
+        if (wifiDisconnectedSince == 0) {
+            // Zero is the sentinel, so preserve elapsed-time arithmetic even if
+            // the first sample happens during the initial millisecond of boot.
+            wifiDisconnectedSince = now == 0 ? 1 : now;
+            Serial.printf("[WIFI] Connection unavailable: status=%d\n", static_cast<int>(status));
+        }
+
+        const unsigned long disconnectedFor = now - wifiDisconnectedSince;
+        if (disconnectedFor >= WIFI_RADIO_RECOVERY_AFTER_MS && !wifiRadioRecoveryAttempted) {
+            wifiRadioRecoveryAttempted = true;
+            lastWifiReconnectAttempt = now;
+            Serial.println("[WIFI] Recovery stage 2: reinitializing station radio");
+            WiFi.disconnect(true, false);
+            WiFi.mode(WIFI_STA);
+            WiFi.setSleep(false);
+            WiFi.setAutoReconnect(true);
+            WiFi.begin(WIFI_SSID, WIFI_PASS);
+        } else if (disconnectedFor >= WIFI_EXPLICIT_RECONNECT_AFTER_MS &&
+                   (lastWifiReconnectAttempt == 0 ||
+                    now - lastWifiReconnectAttempt >= WIFI_EXPLICIT_RECONNECT_INTERVAL_MS)) {
+            lastWifiReconnectAttempt = now;
+            Serial.printf("[WIFI] Recovery stage 1: explicit reconnect (%s)\n",
+                          WiFi.reconnect() ? "started" : "not started");
+        }
+
+        // A full reboot is the last resort and is only allowed after this boot
+        // has held a valid connection. That prevents reboot loops when the AP is
+        // intentionally down or credentials are wrong.
+        if (wifiEverConnected && disconnectedFor >= WIFI_RESTART_AFTER_MS) {
+            Serial.println("[WIFI] Recovery stage 3: prolonged outage, restarting device");
+            Serial.flush();
+            delay(50);
+            ESP.restart();
+        }
+    }
+
     if (becameConnected && (activeScreen == AppScreen::UsageMonitor || activeScreen == AppScreen::OpenRouter)) {
         usageFetchPending = true;
     }
@@ -1495,11 +1567,11 @@ void serviceWifiState() {
         if (status == WL_CONNECTED) {
             setLauncherWifiState("Online", 0xA7F3D0);
             digitalWrite(LED_BLUE, HIGH);
-        } else if (now - wifiBeginTime < 15000) {
+        } else if (wifiDisconnectedSince != 0 && now - wifiDisconnectedSince < 15000) {
             setLauncherWifiState("Connecting", 0xFDE68A);
             digitalWrite(LED_BLUE, ((now / 500) % 2) ? HIGH : LOW);
         } else {
-            setLauncherWifiState("Offline", 0xFBCFE8);
+            setLauncherWifiState("Recovering", 0xFBCFE8);
             digitalWrite(LED_BLUE, HIGH);
         }
     }
@@ -1566,10 +1638,15 @@ void setup() {
 
     // Start Wi-Fi without blocking the launcher. Connection state, recovery,
     // and the first app fetch are serviced from loop().
+    WiFi.onEvent(onWifiEvent, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
     WiFi.persistent(false);
+    WiFi.mode(WIFI_STA);
+    // This display is continuously USB-powered. Disabling the default modem
+    // sleep removes DTIM/listen timing from the always-on LAN telemetry path,
+    // trading a small power increase for lower latency and fewer missed frames.
+    WiFi.setSleep(false);
     WiFi.setAutoReconnect(true);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
-    wifiBeginTime = millis();
     previousWifiStatus = WiFi.status();
     serviceWifiState();
     printSimulatorKeybinds();

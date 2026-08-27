@@ -330,6 +330,19 @@ the top model for that seven-day window. Each app polls cached LAN telemetry
 every three seconds only while visible; upstream collection remains on the
 90-second host schedule.
 
+Because the CYD is an always-powered, latency-sensitive LAN display, its Wi-Fi
+station runs with ESP32 modem sleep disabled. This avoids DTIM/listen-cycle
+delays and removes a common source of missed traffic at the cost of a small
+increase in power consumption. Disconnect events record their numeric ESP-IDF
+reason, readable name, connected RSSI, and channel on the private serial log so
+an RF, access-point, authentication, or driver issue can be distinguished.
+Recovery is staged to avoid turning a brief AP interruption into a reboot: the
+framework first gets 30 seconds to recover normally, explicit reconnects then
+run every 30 seconds, the station radio is reinitialized once after two
+minutes, and a full device restart is used only after five minutes. The final
+restart is allowed only when the current boot previously held a valid
+connection, preventing reboot loops during an AP outage or bad configuration.
+
 For Codex profiles, Usage Monitor shows the current rolling 5-hour allowance
 and weekly allowance together. Selecting any CLI account with **Show on CYD**,
 or choosing **Show on CYD** on the OpenRouter card, queues a private
@@ -396,6 +409,36 @@ cheat sheet is available in the protected dashboard's **Utilities** tab. The
 first fetch occurs when Usage Monitor opens or as soon as the background Wi-Fi
 connection becomes ready. A `[NET]` diagnostic indicates a wrong LAN address,
 unreachable server, or closed port.
+
+### Stream Deck account cycling
+
+`scripts/stream-deck-next-account.vbs` provides a windowless Stream Deck entry
+point for the PowerShell account-cycling helper. It cycles to the next enabled
+Codex or Antigravity profile without flashing a console or placing the private
+device token in the button configuration. Configure these Windows **user**
+environment variables outside the repository:
+
+- `CYD_API_TOKEN` — the same private token used by the monitor and firmware.
+- `CYD_USAGE_MONITOR_NEXT_ACCOUNT_URL` — the private LAN URL ending in
+  `/api/v1/next-account`.
+
+In Stream Deck's **Open / Run Application** action, select
+`C:\Windows\System32\wscript.exe` as the application and use these arguments
+(adjust the checkout path if needed):
+
+```text
+//B //NoLogo "<checkout>\cyd-usage-monitor\scripts\stream-deck-next-account.vbs"
+```
+
+Each press rotates only through enabled CLI usage profiles, makes the selected
+profile active, and commands the CYD and browser preview to open Usage Monitor.
+The `server/static/cyd-monitor-cycle-icon-*` and
+`cyd-monitor-cycle-badge-icon-*` families provide 32, 180/192, 512, and 1024 px
+button artwork for this action. The matching `cyd-monitor-sync-icon-*` family
+is available for dashboard/device synchronization shortcuts.
+The endpoint is available only through the private Bearer-protected device
+listener; never substitute the public dashboard hostname or expose that
+listener through Cloudflare Tunnel, port forwarding, or a public proxy.
 
 ## Optional WhatsApp alerts and email fallback
 

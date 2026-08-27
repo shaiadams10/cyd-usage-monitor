@@ -32,20 +32,44 @@
 | `cyd-usage-monitor/instructions/TOKEN_GUIDE.md` | CLI provider, OpenRouter, Cloudflare, device, and dashboard/host SMTP secret-boundary guide | 2026-08-26 |
 | `cyd-usage-monitor/platformio.ini` | Shared physical-CYD/Wokwi firmware target with pinned dependencies, E32R40T ST7796S flags, and conservative CH340C upload speed | 2026-08-26 |
 | `cyd-usage-monitor/README.md` | Project architecture, bidirectional CYD/preview sync, persistent physical rotation, dual Codex quotas, and setup guide | 2026-08-27 |
+| `cyd-usage-monitor/scripts/stream-deck-next-account.ps1` | Token-safe Windows Stream Deck helper that cycles enabled usage profiles through the private device API | 2026-08-27 |
+| `cyd-usage-monitor/scripts/stream-deck-next-account.vbs` | Windowless WScript launcher for the Stream Deck account-cycling PowerShell helper | 2026-08-27 |
 | `cyd-usage-monitor/server/collector.py` | CLI/OpenRouter collector with dual Codex quotas, durable identity, incidents, WAHA retry, and environment/dashboard TLS SMTP fallback | 2026-08-26 |
-| `cyd-usage-monitor/server/dashboard.html` | Upright synchronized LVGL preview, physical-orientation indicator, protected display controls, email setup, alert health, and incidents | 2026-08-27 |
-| `cyd-usage-monitor/server/server.py` | Route-isolated listeners with bidirectional private display state/commands, identity telemetry, and credential-safe setup endpoints | 2026-08-27 |
+| `cyd-usage-monitor/server/dashboard.html` | Upright synchronized LVGL preview, physical-orientation indicator, protected display controls, email setup, alert health, and favicon/touch icons | 2026-08-27 |
+| `cyd-usage-monitor/server/server.py` | Route-isolated listeners with bidirectional private display state/commands, public favicon handler, identity telemetry, and setup endpoints | 2026-08-27 |
+| `cyd-usage-monitor/server/static/apple-touch-icon.png` | 180x180 high-DPI iOS/mobile touch icon asset | 2026-08-27 |
+| `cyd-usage-monitor/server/static/cyd-monitor-cycle-badge-icon-32.png` | 32x32 compact Stream Deck cycle-action badge icon | 2026-08-27 |
+| `cyd-usage-monitor/server/static/cyd-monitor-cycle-badge-icon-192.png` | 192x192 Stream Deck cycle-action badge icon | 2026-08-27 |
+| `cyd-usage-monitor/server/static/cyd-monitor-cycle-badge-icon-512.png` | 512x512 high-resolution cycle-action badge icon | 2026-08-27 |
+| `cyd-usage-monitor/server/static/cyd-monitor-cycle-badge-icon-1024.png` | 1024x1024 master cycle-action badge icon | 2026-08-27 |
+| `cyd-usage-monitor/server/static/cyd-monitor-cycle-icon-32.png` | 32x32 compact account-cycle action icon | 2026-08-27 |
+| `cyd-usage-monitor/server/static/cyd-monitor-cycle-icon-180.png` | 180x180 account-cycle touch/launcher icon | 2026-08-27 |
+| `cyd-usage-monitor/server/static/cyd-monitor-cycle-icon-192.png` | 192x192 account-cycle action icon | 2026-08-27 |
+| `cyd-usage-monitor/server/static/cyd-monitor-cycle-icon-512.png` | 512x512 high-resolution account-cycle action icon | 2026-08-27 |
+| `cyd-usage-monitor/server/static/cyd-monitor-cycle-icon-1024.png` | 1024x1024 master pixel-art CYD Usage Monitor icon with integrated cycle indicator | 2026-08-27 |
+| `cyd-usage-monitor/server/static/cyd-monitor-icon-1024.png` | 1024x1024 master high-resolution CYD Usage Monitor app branding icon | 2026-08-27 |
+| `cyd-usage-monitor/server/static/cyd-monitor-sync-icon-32.png` | 32x32 compact dashboard/device synchronization action icon | 2026-08-27 |
+| `cyd-usage-monitor/server/static/cyd-monitor-sync-icon-180.png` | 180x180 dashboard/device synchronization touch/launcher icon | 2026-08-27 |
+| `cyd-usage-monitor/server/static/cyd-monitor-sync-icon-192.png` | 192x192 dashboard/device synchronization action icon | 2026-08-27 |
+| `cyd-usage-monitor/server/static/cyd-monitor-sync-icon-512.png` | 512x512 high-resolution dashboard/device synchronization action icon | 2026-08-27 |
+| `cyd-usage-monitor/server/static/cyd-monitor-sync-icon-1024.png` | 1024x1024 master dashboard/device synchronization action icon | 2026-08-27 |
+| `cyd-usage-monitor/server/static/favicon-16x16.png` | 16x16 crisp raster favicon asset | 2026-08-27 |
+| `cyd-usage-monitor/server/static/favicon-32x32.png` | 32x32 standard browser tab raster favicon asset | 2026-08-27 |
+| `cyd-usage-monitor/server/static/favicon.ico` | Multi-resolution 16/32/48/64px Windows and browser ICO favicon asset | 2026-08-27 |
+| `cyd-usage-monitor/server/static/favicon.svg` | Scalable vector SVG favicon with dark theme, glowing arc meter, and CYD monogram | 2026-08-27 |
+| `cyd-usage-monitor/server/static/icon-192.png` | 192x192 PWA web app manifest icon asset | 2026-08-27 |
+| `cyd-usage-monitor/server/static/icon-512.png` | 512x512 high-resolution app icon asset | 2026-08-27 |
 | `cyd-usage-monitor/server/static/lvgl/cyd_lvgl.js` | Generated Emscripten loader exporting interactive launcher, Usage, and OpenRouter route controls | 2026-08-26 |
 | `cyd-usage-monitor/server/static/lvgl/cyd_lvgl.wasm` | Generated synchronized WebAssembly preview with launcher, Usage Monitor, OpenRouter, Home, and account routing | 2026-08-27 |
 | `cyd-usage-monitor/server/storage.py` | Python module | 2026-08-09 |
 | `cyd-usage-monitor/server/test_collector.py` | Dual Codex quota, account persistence, dashboard/host SMTP selection, secrecy, deduplication, incident, and WAHA tests | 2026-08-26 |
-| `cyd-usage-monitor/server/test_server.py` | Server security, bidirectional display state, persistent orientation, private email, dashboard, and LVGL contract tests | 2026-08-27 |
+| `cyd-usage-monitor/server/test_server.py` | Server security, bidirectional display state, persistent orientation, private email, dashboard, favicon, and LVGL contract tests | 2026-08-27 |
 | `cyd-usage-monitor/server/test_storage.py` | Python module | 2026-08-09 |
 | `cyd-usage-monitor/server/__init__.py` | Python module | 2026-08-09 |
 | `cyd-usage-monitor/simulator/build-wasm.ps1` | Reproducible Emscripten 3.1.74 build exporting pointer plus launcher, Usage, and OpenRouter routes | 2026-08-27 |
 | `cyd-usage-monitor/simulator/lvgl_cyd_sim.c` | WebAssembly launcher/apps with bidirectional dashboard callbacks, Home navigation, and account rotation | 2026-08-27 |
 | `cyd-usage-monitor/simulator/lv_conf.h` | WebAssembly LVGL 8.4 Canvas, Arc, Chart, layout, memory, font, and theme configuration | 2026-08-09 |
-| `cyd-usage-monitor/src/main.cpp` | E32R40T launcher with NVS-backed 0/180-degree rotation, calibrated touch, bidirectional route reporting, and private command polling | 2026-08-27 |
+| `cyd-usage-monitor/src/main.cpp` | E32R40T launcher with calibrated touch, NVS-backed rotation, private route synchronization, Wi-Fi sleep prevention/diagnostics, and staged reconnect-radio-restart recovery | 2026-08-27 |
 | `cyd-usage-monitor/src/mascot_img.h` | Project file | 2026-08-09 |
 | `cyd-usage-monitor/wokwi.toml` | Wokwi simulator mapping to the shared LAN-only firmware target | 2026-08-09 |
 | `assistant/.gitignore` | Git ignore patterns for assistant build artifacts | 2026-08-17 |
