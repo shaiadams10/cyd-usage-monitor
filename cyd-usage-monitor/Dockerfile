@@ -1,4 +1,4 @@
-FROM python:3.14.0-slim-bookworm
+FROM python:3.14.7-slim-bookworm
 WORKDIR /app
 COPY server/server.py server/collector.py server/storage.py server/dashboard.html /app/
 COPY server/static /app/static
