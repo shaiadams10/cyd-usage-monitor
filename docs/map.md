@@ -79,7 +79,7 @@
 | `docs/context.md` | Living project state, recent changes, and short-lived follow-ups | 2026-08-11|
 | `LICENSE` | Project file | 2026-08-09 |
 | `NOTICE.md` | Documentation | 2026-08-09 |
-| `README.md` | Project documentation | 2026-08-09 |
+| `README.md` | Repository homepage with current CYD features, setup/recovery links and deployment overview | 2026-09-06 |
 | `SECURITY.md` | Documentation | 2026-08-09 |
 
 ## Architecture Overview

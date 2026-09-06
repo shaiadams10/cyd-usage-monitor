@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-06 — Refresh GitHub homepage documentation
+
+- Summarize desktop message selection, recovery, Stream Deck, animations,
+  OpenRouter and alerts in the repository homepage. Correct outdated firmware
+  HTTPS and display-hardware instructions to match the current implementation.
+
+
 ## 2026-09-06 — Isolate collector test runtime
 
 - Place every collector runtime path, including optional SMTP secrets, in

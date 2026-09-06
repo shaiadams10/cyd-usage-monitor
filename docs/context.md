@@ -20,6 +20,15 @@ authoritative outside the managed Brain Protocol block.
 
 ## Recent Changes
 
+### 2026-09-06 — GitHub Homepage Refresh
+- Updated the public root README to cover recent CYD features and link directly
+  to desktop recovery, Stream Deck controls, detailed setup, and the changelog.
+- Corrected obsolete HTTPS firmware setup and ILI9341 hardware statements using
+  the current private-LAN implementation and E32R40T configuration.
+- Checked local link targets and source consistency; no runtime changes.
+- Files: README.md, cyd-usage-monitor/CHANGELOG.md, docs/{context.md,map.md}.
+
+
 ### 2026-09-06 — CYD Desktop Switching and Public Release
 - CI follow-up: isolated all collector test paths and inherited notification
   credentials after clean Linux exposed two accidental production-path reads.
@@ -175,32 +184,9 @@ authoritative outside the managed Brain Protocol block.
   `server/static/lvgl/cyd_lvgl.js,server/static/lvgl/cyd_lvgl.wasm,server/test_server.py,`
   `simulator/build-wasm.ps1,simulator/lv_conf.h,simulator/lvgl_cyd_sim.c,src/main.cpp}`.
 
-### 2026-08-09 — Restored LAN-only CYD and Wokwi Telemetry
-- Replaced device-side Cloudflare HTTPS with short-timeout local HTTP to the
-  monitor server's private RFC1918 address, removing CA, NTP, TLS, Access
-  Service Auth, and the separate Wokwi build from the interaction path.
-- Split the Python service into a Tunnel-only dashboard listener and a
-  Bearer-protected device listener published only on the configured LAN
-  interface; each listener returns `404` for the other surface's routes.
-- Deployed the change to the operator-configured monitor server, retained a
-  timestamped rollback copy, and measured warm LAN API responses around 20 ms.
-- Removed the obsolete Cloudflare device ingress, DNS record, Access app, and
-  dedicated service token while preserving the owner-only public dashboard.
-- Updated the dashboard Flash tab and all setup, token, deployment, flashing,
-  configuration, changelog, and architecture documentation. Cleaned revoked
-  device/Tunnel credentials from ignored workstation configuration.
-- Refreshed the curated dependency-free Graphify graph at 182 nodes, 392
-  edges, and 14 communities across its 12-source-file scope.
-- Files affected: `docs/context.md`, `docs/map.md`, and
-  `cyd-usage-monitor/{.env.example,AGENTS.md,CHANGELOG.md,README.md,docker-compose.yml,`
-  `include/secrets.h.example,instructions/DEPLOYMENT_RUNBOOK.md,`
-  `instructions/FLASHING_GUIDE.md,instructions/TOKEN_GUIDE.md,platformio.ini,`
-  `server/dashboard.html,server/server.py,server/test_server.py,src/main.cpp,`
-  `wokwi.toml}`; deleted obsolete CA headers and TLS verification helper;
-  ignored `.env` and `include/secrets.h` now contain only required local
-  deployment/device values.
-
 ## History Summary
+
+- 2026-08-09 — Restored LAN-only CYD and Wokwi Telemetry (details retained in prior history and project changelogs).
 
 - 2026-08-09 — Persistent Wokwi HTTPS and Deliberate Touch Control (details retained in earlier Git history).
 <!-- Compressed summaries of older changes go here -->
