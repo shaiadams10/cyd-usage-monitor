@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-06 — Isolate collector test runtime
+
+- Place every collector runtime path, including optional SMTP secrets, in
+  temporary test storage and clear inherited notification credentials. This
+  fixes clean Linux CI permissions and keeps tests out of operator data.
+
+
 ## 2026-09-06 — Public release security review
 
 - Harden both Windows Stream Deck helpers with canonical private IPv4 validation,

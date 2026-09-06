@@ -19,7 +19,11 @@ repository root. Existing workspace and project-specific instructions remain
 authoritative outside the managed Brain Protocol block.
 
 ## Recent Changes
+
 ### 2026-09-06 — CYD Desktop Switching and Public Release
+- CI follow-up: isolated all collector test paths and inherited notification
+  credentials after clean Linux exposed two accidental production-path reads.
+  Files: cyd-usage-monitor/{server/test_collector.py,README.md,CHANGELOG.md}.
 - Added per-submission managed Codex identity mapping, an event-driven Antigravity
   primary-profile selector, recovery instructions, and private diagnostics.
 - Added stable account selection/discovery, timezone propagation, email fallback,

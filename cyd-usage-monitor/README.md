@@ -753,3 +753,6 @@ When the monitor server LAN address changes, also update the Windows user
 setting `CYD_USAGE_MONITOR_NEXT_ACCOUNT_URL`. Stream Deck and desktop-message
 helpers read this shared setting on each invocation; firmware configuration
 alone does not update it. No Stream Deck restart is needed for these helpers.
+
+Collector tests isolate runtime storage and inherited notification credentials;
+they do not require a writable production `/app/data` directory.

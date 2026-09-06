@@ -58,7 +58,7 @@
 | `cyd-usage-monitor/server/static/lvgl/cyd_lvgl.js` | Generated loader for animated shared LVGL preview | 2026-09-06 |
 | `cyd-usage-monitor/server/static/lvgl/cyd_lvgl.wasm` | Generated animated launcher, ChatGPT, Antigravity and OpenRouter LVGL runtime | 2026-09-06 |
 | `cyd-usage-monitor/server/storage.py` | Python module | 2026-08-09 |
-| `cyd-usage-monitor/server/test_collector.py` | Timezone propagation, dual Codex quota, account persistence, dashboard/host SMTP selection, secrecy, deduplication, incident, and WAHA tests | 2026-09-05 |
+| `cyd-usage-monitor/server/test_collector.py` | Isolated collector runtime, credential boundaries, timezone, quota, incident and notification regression tests | 2026-09-06 |
 | `cyd-usage-monitor/server/test_server.py` | Server security, account selection, profile-bound inline/new-only and legacy command contracts, and display tests | 2026-09-05 |
 | `cyd-usage-monitor/server/test_storage.py` | Python module | 2026-08-09 |
 | `cyd-usage-monitor/server/__init__.py` | Python module | 2026-08-09 |

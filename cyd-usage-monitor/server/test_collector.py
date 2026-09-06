@@ -15,6 +15,29 @@ except ImportError:
 
 
 class CollectorParserTests(unittest.TestCase):
+    def setUp(self):
+        # Every test must isolate all runtime paths, including optional SMTP
+        # secrets. Otherwise a read acquires a lock under the production path.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        data_dir = Path(directory.name)
+        paths = {
+            name: data_dir / value.relative_to(collector.DATA_DIR)
+            for name, value in vars(collector).items()
+            if isinstance(value, Path) and value.is_relative_to(collector.DATA_DIR)
+        }
+        patcher = patch.multiple(collector, **paths)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # Never use operator notification credentials during offline tests.
+        environment = patch.dict(os.environ, {
+            name: "" for name in os.environ
+            if name.startswith(("WAHA_", "CYD_MONITOR_SMTP_"))
+            or name == "CYD_MONITOR_ALERT_EMAIL_TO"
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def test_normalizes_openrouter_account_usage_and_completed_days(self):
         now = dt.datetime(2026, 8, 9, 12, tzinfo=dt.timezone.utc)
         snapshot = collector.normalize_openrouter(
