@@ -18,8 +18,8 @@ only in ignored `.env` and `include/secrets.h` files.
 - Never route, NAT-forward, or Tunnel the device listener to the Internet.
 
 The two HTTP surfaces are route-isolated: dashboard/admin paths exist only on
-8000, while `/api/v1/cyd-status` and `/api/v1/next-account` exist only on 8001
-and require `CYD_API_TOKEN`.
+8000, while `/api/v1/cyd-status`, `/api/v1/next-account`, and
+`/api/v1/display-command` exist only on 8001 and require `CYD_API_TOKEN`.
 
 ## Dashboard login
 
@@ -60,6 +60,16 @@ Verify:
   with it;
 - dashboard/admin paths on private port 8001 return `404`;
 - telemetry and CLI profiles survived deployment.
+- if SMTP fallback is configured, **Alerts → Test fallback email** is accepted
+  by the SMTP server and arrives at the intended operator mailbox;
+- **Show on CYD** switches both the browser LVGL preview and physical display
+  to OpenRouter, then a CLI profile selection switches both back to Usage.
+
+Email can be configured after deployment under **Alerts → Email integration**.
+Use Gmail/Google Workspace with an app password or a dedicated transactional
+TLS SMTP credential. The dashboard writes `email-secret.json` only to the
+private data volume. If `CYD_MONITOR_SMTP_*` environment variables are set,
+they override this file and the dashboard correctly shows host-managed mode.
 
 Keep a timestamped rollback copy until the operator approves the deployment.
 Before any commit or push, run tests, the firmware build, Compose validation,

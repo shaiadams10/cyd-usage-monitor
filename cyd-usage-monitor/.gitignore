@@ -12,3 +12,11 @@ server/__pycache__/
 *.log
 *.pem
 *.key
+
+# Optional desktop integration runtime and backups (normally outside checkout)
+chat-switch*.json
+chat-switch*.sqlite*
+antigravity-watcher-status.json
+hooks.json
+*.cyd-backup-*
+*.backup-*

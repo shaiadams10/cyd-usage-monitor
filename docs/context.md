@@ -19,6 +19,23 @@ repository root. Existing workspace and project-specific instructions remain
 authoritative outside the managed Brain Protocol block.
 
 ## Recent Changes
+### 2026-09-06 — CYD Desktop Switching and Public Release
+- Added per-submission managed Codex identity mapping, an event-driven Antigravity
+  primary-profile selector, recovery instructions, and private diagnostics.
+- Added stable account selection/discovery, timezone propagation, email fallback,
+  persisted display controls, shared animated LVGL and responsive firmware I/O.
+- Hardened Windows helper transport against redirects, proxies, malformed endpoints
+  and automatic Windows authentication; private configuration stays outside Git.
+- Release is based directly on upstream main and excludes unrelated local projects
+  and unpublished mixed-project commits. No provider credentials are included.
+- Validation: 51 server and 15 Windows helper tests passed; firmware build,
+  real LVGL motion tests, production WASM and dashboard syntax passed.
+  Gitleaks history/release scans and private-value/binary checks found no leaks.
+- CI now runs Windows helper and real LVGL motion checks; affected workflow:
+  .github/workflows/ci.yml.
+- Files: cyd-usage-monitor source, tests, configuration examples, generated WASM,
+  scripts and documentation; docs/{context.md,map.md}.
+
 <!-- Newest first. Max 10 entries. Oldest auto-compress to History Summary. -->
 
 ### 2026-08-11 — Debounced Transient CLI Failure Alerts
@@ -179,30 +196,9 @@ authoritative outside the managed Brain Protocol block.
   ignored `.env` and `include/secrets.h` now contain only required local
   deployment/device values.
 
-### 2026-08-09 — Persistent Wokwi HTTPS and Deliberate Touch Control
-- Replaced the simulator's rotating leaf-certificate fingerprint with normal
-  leaf signature, hostname, and validity checks against the narrower GTS WE1
-  issuing CA. Physical firmware continues to trust GTS Root R4.
-- Enabled HTTP/1.1 keep-alive end to end and retained the ESP32 secure client
-  across polls, eliminating repeated TLS handshakes during normal operation.
-- Changed the account-rotation API to return the newly selected CYD payload,
-  so switching consumes one response without an immediate second request.
-- Replaced whole-screen account switching with a visible top-right arrow
-  button while preserving `n` and space as Wokwi serial shortcuts; updated the
-  WebAssembly preview to match.
-- Removed the obsolete pin-refresh helper and all certificate-rotation steps.
-- Refreshed the curated dependency-free Graphify graph to 182 nodes, 392
-  edges, and 14 communities across the same 12-source-file scope.
-- Files affected: `docs/context.md`, `docs/map.md`, and
-  `cyd-usage-monitor/{CHANGELOG.md,README.md,include/gts_we1.h,`
-  `include/secrets.h.example,instructions/FLASHING_GUIDE.md,platformio.ini,`
-  `scripts/verify-tls-chain.ps1,server/dashboard.html,server/server.py,server/test_server.py,`
-  `simulator/lvgl_cyd_sim.c,src/main.cpp}`; deleted
-  `cyd-usage-monitor/scripts/update-wokwi-tls-pin.ps1`; ignored
-  `include/secrets.h` now selects the WE1 CA for Wokwi without changing private
-  credentials.
-
 ## History Summary
+
+- 2026-08-09 — Persistent Wokwi HTTPS and Deliberate Touch Control (details retained in earlier Git history).
 <!-- Compressed summaries of older changes go here -->
 
 - Project Brain Protocol was upgraded to v1.1.0 while preserving all

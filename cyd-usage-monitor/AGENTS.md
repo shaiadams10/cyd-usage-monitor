@@ -27,6 +27,19 @@ Read this file and the workspace `AGENTS.md` before changing this project.
 8. Cloudflare Tunnel exposes only the dashboard listener. Device telemetry
    must use the separate Bearer-protected listener bound to the monitor
    server's private RFC1918 address; never add a public device ingress.
+9. Optional Windows message hooks may use documented local Codex `account/read`
+   solely for account identity; they must not read provider credentials or
+   collect quota. Keep mappings outside Git, skip ambiguous identities, and
+   preserve app hook trust review. Run `python -m unittest discover -s
+   cyd-usage-monitor/scripts -p test_chat_account_switch.py` from the workspace
+   root for message-hook changes.
+
+## Shared UI motion
+
+`src/ui_motion.h` is the C-compatible motion implementation for firmware and
+WASM. Keep LVGL access on the UI task; the HTTP worker must never touch widgets.
+For motion changes also run `simulator/build-wasm.ps1 -TestMotion` from this
+project (or its full project-relative path from the workspace root).
 
 ## Deployment
 

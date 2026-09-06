@@ -54,6 +54,25 @@ class ServerApiTests(unittest.TestCase):
         cls.device_thread.join(timeout=5)
         _TEMP.cleanup()
 
+    def test_command_inline_payload_is_new_only_and_profile_bound(self):
+        second = {**self.profile, "id": "codex-abcdef0123", "label": "Second"}
+        app.write_json(app.PROFILES_FILE, {"profiles": [self.profile, second], "active_profile_id": second["id"]})
+        app.update_json(app.SETTINGS_FILE, {}, lambda settings: app.set_display_control(
+            settings, "usage", profile_id=self.profile["id"],
+        ))
+        status, first, _ = self.request("/api/v1/display-command?after=", basic=False, bearer=True, device=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(first["telemetry"]["account_name"], self.profile["label"])
+        self.assertEqual(first["telemetry"]["status"], "error")
+        unchanged = self.request("/api/v1/display-command?after=" + first["id"], basic=False, bearer=True, device=True)[1]
+        self.assertNotIn("telemetry", unchanged)
+        legacy = self.request("/api/v1/display-command", basic=False, bearer=True, device=True)[1]
+        self.assertNotIn("telemetry", legacy)
+        self.assertEqual(self.request("/api/v1/display-command?after=", device=True)[0], 401)
+        self.assertEqual(self.request("/api/v1/display-command?after=", basic=False, bearer=True)[0], 404)
+        app.update_json(app.SETTINGS_FILE, {}, lambda settings: app.set_display_control(settings, "launcher"))
+        self.assertNotIn("telemetry", app.display_command_response(first["id"]))
+
     def setUp(self):
         self.profile = {
             "id": "codex-0123456789", "provider": "codex", "label": "Demo account",
@@ -63,7 +82,7 @@ class ServerApiTests(unittest.TestCase):
         app.write_json(app.CONTROL_FILE, {"requests": []})
         app.write_json(app.RUNTIME_FILE, {"requests": {}})
         app.write_json(app.STATE_FILE, {"profiles": {}})
-        for target in (app.OPENROUTER_SECRET_FILE, app.OPENROUTER_STATE_FILE, app.INCIDENTS_FILE):
+        for target in (app.OPENROUTER_SECRET_FILE, app.OPENROUTER_STATE_FILE, app.EMAIL_SECRET_FILE, app.INCIDENTS_FILE, app.SETTINGS_FILE, app.ALERTS_FILE):
             try:
                 target.unlink()
             except FileNotFoundError:
@@ -93,6 +112,53 @@ class ServerApiTests(unittest.TestCase):
         finally:
             response.close()
 
+    def test_account_labels_use_collected_names_without_overwriting_custom_labels(self):
+        profiles = [
+            dict(self.profile, id="custom", label="My label", last_account_name="Collected name"),
+            dict(self.profile, id="remembered", label="", last_account_name="Remembered name"),
+            dict(self.profile, id="snapshot", label=""),
+            dict(self.profile, id="new", label=""),
+        ]
+        app.write_json(app.PROFILES_FILE, {"profiles": profiles})
+        app.write_json(app.STATE_FILE, {"profiles": {
+            "snapshot": {"account_name": "Snapshot name"},
+            "remembered": {"status": "error", "account_name": ""},
+        }})
+        status, body, _ = self.request("/api/v1/accounts", device=True, bearer=True)
+        self.assertEqual(status, 200)
+        self.assertEqual([p["label"] for p in body["accounts"]],
+                         ["My label", "Remembered name", "Snapshot name", "codex"])
+        self.assertEqual(app.profiles_config()["profiles"], profiles)
+
+    def test_device_account_discovery_and_selection(self):
+        second = dict(self.profile, id="antigravity-0123456789", provider="antigravity", label="Second")
+        disabled = dict(self.profile, id="codex-aaaaaaaaaa", enabled=False)
+        app.write_json(app.PROFILES_FILE, {"profiles": [self.profile, second, disabled],
+                                          "active_profile_id": self.profile["id"]})
+        status, body, _ = self.request("/api/v1/accounts", device=True, bearer=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(body["accounts"]), 3)
+        self.assertEqual(set(body["accounts"][0]), {"id", "provider", "label", "enabled", "active"})
+        self.assertTrue(body["accounts"][0]["active"])
+        self.assertFalse(body["accounts"][2]["enabled"])
+        for path, method, payload in [("/api/v1/accounts", "GET", None),
+                                      ("/api/v1/select-account", "POST", {"profile_id": second["id"]})]:
+            self.assertEqual(self.request(path, method=method, payload=payload, device=True)[0], 401)
+            self.assertNotEqual(self.request(path, method=method, payload=payload, bearer=True, basic=False)[0], 200)
+        for profile_id, expected in [(None, 400), ([], 400), ("missing", 404), (disabled["id"], 404)]:
+            status, _, _ = self.request("/api/v1/select-account", method="POST", device=True,
+                                        bearer=True, payload={"profile_id": profile_id})
+            self.assertEqual(status, expected)
+            self.assertEqual(app.profiles_config()["active_profile_id"], self.profile["id"])
+        for _ in range(2):
+            status, body, _ = self.request("/api/v1/select-account", method="POST", device=True,
+                                           bearer=True, payload={"profile_id": second["id"]})
+            self.assertEqual(status, 200)
+            self.assertEqual(body["profile_id"], second["id"])
+            self.assertEqual(app.profiles_config()["active_profile_id"], second["id"])
+            self.assertEqual(app.display_command()["app"], "usage")
+            self.assertEqual(app.display_command()["profile_id"], second["id"])
+
     def test_dashboard_and_admin_preview_use_basic_auth(self):
         status, dashboard, headers = self.request("/")
         self.assertEqual(status, 200)
@@ -101,12 +167,28 @@ class ServerApiTests(unittest.TestCase):
         self.assertIn(b"Usage Monitor", dashboard)
         self.assertIn(b"OpenRouter account", dashboard)
         self.assertIn(b"cyd_set_openrouter", dashboard)
+        self.assertIn(b"cyd_show_openrouter", dashboard)
+        self.assertIn(b"Send test email", dashboard)
+        self.assertIn(b"Gmail / Google Workspace", dashboard)
+        self.assertIn(b"Custom TLS SMTP", dashboard)
+        self.assertIn(b"emailForm", dashboard)
+        self.assertIn(b"emailFormDirty", dashboard)
+        self.assertIn(b"version!==emailConfigVersion", dashboard)
+        self.assertIn(b"addEventListener('focusin'", dashboard)
+        self.assertIn(b"codex_weekly_pct", dashboard)
         self.assertIn(b"openrouterForm", dashboard)
         self.assertIn(b"OpenRouter key saved privately", dashboard)
         self.assertIn(b"Next account", dashboard)
         self.assertIn(b"pio run -e esp32-2432S028R", dashboard)
         self.assertNotIn(b"esp32-2432S028R-wokwi", dashboard)
         self.assertIn(b"Interactive simulated CYD screen", dashboard)
+        self.assertIn(b"Flip physical screen", dashboard)
+        self.assertIn(b"display-orientation", dashboard)
+        self.assertIn(b"displayRotation===180", dashboard)
+        self.assertIn(b"orientation-indicator", dashboard)
+        self.assertNotIn(b"lvgl-canvas flipped", dashboard)
+        self.assertIn(b"window.cydPreviewDisplayApp", dashboard)
+        self.assertIn(b"cyd_show_launcher", dashboard)
         self.assertIn(b'class="preview-device"', dashboard)
         self.assertIn(b'class="preview-details"', dashboard)
         self.assertIn(b"width:340px; height:255px", dashboard)
@@ -140,6 +222,8 @@ class ServerApiTests(unittest.TestCase):
         self.assertIn("lv_obj_add_event_cb(next_button, next_account_event", source)
         self.assertIn("lv_obj_clear_flag(grid, LV_OBJ_FLAG_CLICKABLE)", source)
         self.assertIn("lv_obj_move_background(grid)", source)
+        self.assertIn("window.cydPreviewDisplayApp", source)
+        self.assertIn("void cyd_show_launcher(void)", source)
 
     def test_flashing_guide_is_admin_protected_and_available(self):
         self.assertEqual(self.request("/docs/flashing-guide", basic=False)[0], 401)
@@ -159,6 +243,14 @@ class ServerApiTests(unittest.TestCase):
         status, body, _ = self.request("/api/v1/openrouter-status", basic=False, bearer=True, device=True)
         self.assertEqual(status, 200)
         self.assertEqual(body["status"], "unconfigured")
+        self.assertEqual(self.request("/api/v1/display-command", device=True)[0], 401)
+        status, body, _ = self.request("/api/v1/display-command", basic=False, bearer=True, device=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {"id": "", "app": "", "rotation": 0})
+        self.assertEqual(self.request(
+            "/api/v1/display-state", method="POST", payload={"app": "launcher", "rotation": 0},
+            basic=False, device=True,
+        )[0], 401)
 
     def test_public_and_device_surfaces_are_isolated(self):
         self.assertEqual(self.request("/api/v1/cyd-status", basic=False, bearer=True)[0], 404)
@@ -166,6 +258,93 @@ class ServerApiTests(unittest.TestCase):
         self.assertEqual(self.request("/api/v1/collector-status", device=True)[0], 404)
         self.assertEqual(self.request("/api/v1/openrouter-status", basic=False, bearer=True)[0], 404)
         self.assertEqual(self.request("/api/admin/openrouter-status", device=True)[0], 404)
+        self.assertEqual(self.request("/api/v1/display-command", basic=False, bearer=True)[0], 404)
+
+    def test_dashboard_can_command_usage_and_openrouter_on_the_physical_cyd(self):
+        status, _, _ = self.request(
+            "/api/admin/active-profile", method="POST", payload={"profile_id": self.profile["id"]}, csrf=True,
+        )
+        self.assertEqual(status, 200)
+        usage = self.request("/api/v1/display-command", basic=False, bearer=True, device=True)[1]
+        self.assertEqual(usage["app"], "usage")
+        self.assertEqual(usage["profile_id"], self.profile["id"])
+
+        app.write_json(app.OPENROUTER_SECRET_FILE, {"key": "private", "label": "Router"})
+        status, body, _ = self.request(
+            "/api/admin/display-app", method="POST", payload={"app": "openrouter"}, csrf=True,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["app"], "openrouter")
+        router = self.request("/api/v1/display-command", basic=False, bearer=True, device=True)[1]
+        self.assertEqual(router["app"], "openrouter")
+
+        status, body, _ = self.request(
+            "/api/v1/display-state", method="POST", payload={"app": "launcher", "rotation": 0},
+            basic=False, bearer=True, device=True,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["display_state"]["app"], "launcher")
+        self.assertEqual(body["display_state"]["source"], "device")
+        self.assertEqual(
+            self.request("/api/v1/display-command", basic=False, bearer=True, device=True)[1]["app"], "launcher",
+        )
+
+    def test_dashboard_can_persist_and_command_a_180_degree_display_rotation(self):
+        self.assertEqual(self.request(
+            "/api/admin/display-orientation", method="POST", payload={"rotation": 90}, csrf=True,
+        )[0], 400)
+        status, body, _ = self.request(
+            "/api/admin/display-orientation", method="POST", payload={"rotation": 180}, csrf=True,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["rotation"], 180)
+        collector_status = self.request("/api/v1/collector-status")[1]
+        self.assertEqual(collector_status["display_settings"], {"rotation": 180})
+        command = self.request("/api/v1/display-command", basic=False, bearer=True, device=True)[1]
+        self.assertEqual(command["rotation"], 180)
+        self.assertTrue(command["id"])
+        self.assertEqual(command["app"], "launcher")
+
+        status, body, _ = self.request(
+            "/api/admin/display-orientation", method="POST", payload={"rotation": 0}, csrf=True,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["rotation"], 0)
+        self.assertEqual(
+            self.request("/api/v1/display-command", basic=False, bearer=True, device=True)[1]["rotation"], 0,
+        )
+
+    def test_physical_firmware_keeps_landscape_dimensions_when_flipped(self):
+        source = (Path(__file__).resolve().parents[1] / "src" / "main.cpp").read_text(encoding="utf-8")
+        self.assertIn("tft.setRotation(flipped ? 3 : 1)", source)
+        self.assertIn('doc["rotation"]', source)
+        self.assertIn("applyDisplayRotation", source)
+        self.assertIn("touch_x = 479 - constrain(touch_x, 0, 479)", source)
+        self.assertIn('displayPreferences.getUShort("rotation", 0)', source)
+        self.assertIn('displayPreferences.putUShort("rotation", displayRotationDegrees)', source)
+        self.assertIn('url.replace("/api/v1/cyd-status", "/api/v1/display-state")', source)
+
+    def test_codex_error_and_dual_limits_keep_the_configured_account_identity(self):
+        self.profile["last_account_name"] = "actual-account@example.com"
+        app.write_json(app.PROFILES_FILE, {"profiles": [self.profile], "active_profile_id": self.profile["id"]})
+        app.write_json(app.STATE_FILE, {"profiles": {self.profile["id"]: {
+            "profile_id": self.profile["id"], "provider": "codex", "status": "error",
+            "error": "quota panel incomplete", "collected_at": app.utcnow(),
+        }}})
+        failed = self.request("/api/admin/cyd-status")[1]
+        self.assertEqual(failed["account_name"], "actual-account@example.com")
+
+        app.write_json(app.STATE_FILE, {"profiles": {self.profile["id"]: {
+            "profile_id": self.profile["id"], "provider": "codex", "status": "ok",
+            "account_name": "actual-account@example.com", "plan_type": "Plus", "credits": "None",
+            "metrics": {
+                "five_hour": {"remaining_pct": 44, "reset": "05:03"},
+                "weekly": {"remaining_pct": 91, "reset": "00:03 on 3 Sep"},
+            }, "collected_at": app.utcnow(),
+        }}})
+        healthy = self.request("/api/admin/cyd-status")[1]
+        self.assertEqual(healthy["codex_5h_pct"], 44)
+        self.assertEqual(healthy["codex_weekly_pct"], 91)
 
     def test_openrouter_secret_setup_is_private_and_removable(self):
         secret = "management-secret-that-must-never-be-returned"
@@ -189,6 +368,33 @@ class ServerApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertFalse(removed["configured"])
         self.assertFalse(app.OPENROUTER_SECRET_FILE.exists())
+
+    def test_dashboard_email_setup_is_private_validated_and_removable(self):
+        secret = "sixteen-character-app-password"
+        payload = {
+            "provider": "gmail", "sender": "monitor@example.com",
+            "recipient": "operator@example.com", "username": "monitor@example.com",
+            "password": secret, "host": "ignored.invalid", "port": 2525, "security": "tls",
+        }
+        self.assertEqual(self.request("/api/admin/email-config", method="POST", payload=payload)[0], 403)
+        status, body, _ = self.request("/api/admin/email-config", method="POST", payload=payload, csrf=True)
+        self.assertEqual(status, 200)
+        self.assertTrue(body["configured"])
+        saved = app.read_json(app.EMAIL_SECRET_FILE, {})
+        self.assertEqual(saved["host"], "smtp.gmail.com")
+        self.assertEqual(saved["port"], 587)
+        self.assertEqual(saved["security"], "starttls")
+        self.assertEqual(saved["password"], secret)
+        public = self.request("/api/v1/collector-status")[1]
+        self.assertTrue(public["email_config"]["configured"])
+        self.assertNotIn(secret, json.dumps(public))
+        self.assertNotIn("username", public["email_config"])
+        invalid = dict(payload, sender="not-an-email")
+        self.assertEqual(self.request("/api/admin/email-config", method="POST", payload=invalid, csrf=True)[0], 400)
+        status, removed, _ = self.request("/api/admin/remove-email-config", method="POST", payload={}, csrf=True)
+        self.assertEqual(status, 200)
+        self.assertFalse(removed["configured"])
+        self.assertFalse(app.EMAIL_SECRET_FILE.exists())
 
     def test_openrouter_payload_sanitizes_stale_and_error_state(self):
         app.write_json(app.OPENROUTER_SECRET_FILE, {"key": "private", "label": "Router"})
@@ -297,6 +503,34 @@ class ServerApiTests(unittest.TestCase):
         self.assertFalse(profile_dir.exists())
         runtime = app.read_json(app.RUNTIME_FILE, {"requests": {}})["requests"][body["request_id"]]
         self.assertEqual(runtime["status"], "completed")
+
+    def test_favicon_and_static_assets_are_served_publicly(self):
+        status, body, headers = self.request("/favicon.ico", basic=False)
+        self.assertEqual(status, 200)
+        self.assertIn("image/x-icon", headers.get("Content-Type", headers.get("content-type", "")))
+        self.assertGreater(len(body), 100)
+
+        for path, mime in [
+            ("/static/favicon.svg", "image/svg+xml"),
+            ("/static/favicon-32x32.png", "image/png"),
+            ("/static/favicon-16x16.png", "image/png"),
+            ("/static/apple-touch-icon.png", "image/png"),
+            ("/static/cyd-monitor-icon-1024.png", "image/png"),
+            ("/static/cyd-monitor-cycle-icon-1024.png", "image/png"),
+            ("/static/cyd-monitor-cycle-badge-icon-1024.png", "image/png"),
+            ("/static/cyd-monitor-sync-icon-1024.png", "image/png"),
+        ]:
+            status, asset_body, asset_headers = self.request(path, basic=False)
+            self.assertEqual(status, 200, f"Failed to serve {path}")
+            self.assertIn(mime, asset_headers.get("Content-Type", asset_headers.get("content-type", "")))
+            self.assertGreater(len(asset_body), 50)
+
+        status, dashboard, _ = self.request("/")
+        self.assertEqual(status, 200)
+        self.assertIn(b'rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=2"', dashboard)
+        self.assertIn(b'rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32x32.png?v=2"', dashboard)
+        self.assertIn(b'rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png?v=2"', dashboard)
+        self.assertIn(b'rel="shortcut icon" href="/favicon.ico?v=2"', dashboard)
 
 
 if __name__ == "__main__":

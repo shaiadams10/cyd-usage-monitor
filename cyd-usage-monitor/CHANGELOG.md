@@ -1,7 +1,183 @@
 # Changelog
 
+## 2026-09-06 — Public release security review
+
+- Harden both Windows Stream Deck helpers with canonical private IPv4 validation,
+  direct connections, redirect rejection, no automatic Windows authentication,
+  bounded requests, and generic network errors. Reject malformed profile IDs.
+- Include desktop account-switching helpers and the fresh-computer recovery guide.
+- Run Windows helper regression tests and real LVGL motion checks in CI.
+
+
+## 2026-09-06 — Desktop switching recovery documentation
+
+- Add a source-audited fresh Windows runbook covering prerequisites, private
+  settings, custom-label identity mappings, installer limitations, hook trust,
+  startup recovery, diagnostics, and changed-login/steering/reboot acceptance.
+- Explicitly distinguish supported local Codex Desktop selection from browser
+  ChatGPT and Antigravity primary-profile selection; record validation limits.
+
+## 2026-09-06 — Stream Deck endpoint repair
+
+- Correct the private Windows helper endpoint left on the former server LAN
+  address. Verify account discovery and VBS selection without changing accounts.
+- Document updating the shared Windows setting when the server address changes.
+
+## 2026-09-06 — Stable transitions and connection diagnostics
+
+- Replace costly full-screen movement with narrow-strip directional reveals.
+  Coalesce navigation and preserve values on arrival/account changes.
+- Remove post-arrival card jumps and pressed-control zoom allocations.
+- Add reset, Wi-Fi, heap/stack, HTTP and redraw diagnostics plus failed telemetry
+  backoff and clearer Wi-Fi-connected/server-unreachable messages.
+- Repair private deployment binding/firmware endpoint after the server LAN
+  address changed; no addresses or credentials are stored in tracked files.
+
+## 2026-09-05 — Animated CYD screens
+
+- Share bounded LVGL motion across the device and browser: launcher equalizer
+  and node motion, ChatGPT drains, staggered Antigravity bars/cards, OpenRouter
+  arc sweeps, exact-cent counters and seven-column chart growth.
+- Throttle highlights on unchanged cached readings; preserve exact targets and
+  immediately cancel unavailable OpenRouter readings.
+- Keep LVGL drawing/touch sampling active during serialized HTTP worker waits;
+  replace the blocking update LED delay and remove small container scrollbars.
+- Add real LVGL/WASM motion checks and propagate compiler failures.
+
+## 2026-09-05 — Steering-message selection and event ordering
+
+- Select on every Codex UserPromptSubmit invocation: steering messages reuse
+  turn IDs and were incorrectly discarded as duplicates.
+- Order Antigravity events by message timestamp rather than transcript detection
+  time, preventing delayed writes from overriding newer Codex submissions.
+- Twelve helper tests pass, including same-turn account changes and delayed events.
+
+## 2026-09-05 — Antigravity file-event fallback
+
+- Replace the non-invoking Antigravity hook on this desktop with a windowless
+  Windows directory-notification helper, automatically started at sign-in.
+  No polling, screen access, or model requests; Codex hooks remain unchanged.
+- Ignore historical messages at startup and deduplicate assistant continuations.
+  Native file-event/live selection and continuation-isolation smoke checks pass.
+- Retain only fixed diagnostic codes and hashed event markers. Disable only
+  the old CYD Antigravity hook; preserve other customizations and the launcher.
+
+## 2026-09-05 — Separate message-hook diagnostics
+
+- Preserve each platform's latest fixed-code result independently, so a Codex
+  reply cannot overwrite Antigravity troubleshooting evidence. Document a full
+  Antigravity restart after initial hook installation.
+- Use quoted forward-slash Windows paths for Antigravity hook command parsing;
+  actual app invocation remains under verification.
+
+## 2026-09-05 — Desktop message account selection
+
+- Added optional Windows hooks that select an existing CYD profile on message
+  submission, without a resident watcher, model call, or firmware change.
+- Resolve managed local ChatGPT/Codex identity through official `account/read`
+  on each submission; skip unknown or ambiguous mappings and non-desktop hooks.
+- Select a configured Antigravity primary account on new explicit user-message
+  metadata, deduplicating subsequent model invocations and stale activity.
+- Added a private installer with configuration backups, preserved unrelated
+  hooks, LAN-only requests, bounded failures, and tests for identity changes,
+  ordering, deduplication, and network boundaries. Codex hook trust requires
+  app review; actual cross-login desktop behavior needs a live switched-account test.
+
+## 2026-09-05 — Faster Stream Deck account switching
+
+- Send button requests directly with WinHTTP, preserving windowless launch, stable IDs, and private settings. Keep PowerShell discovery.
+- Poll CYD commands at 400 ms with persistent TCP ownership, bounded LAN timeouts, and failure backoff; keep quota refresh at 3 seconds.
+- Inline cached usage only for unseen commands, serialize selection writes, and fetch/render after route transitions before reporting state.
+- Preserve legacy API clients and firmware fallback. Browser refresh remains independent; no measured end-to-end latency guarantee.
+
 ## Unreleased
 
+- Propagated `CYD_MONITOR_TIMEZONE` into CLI profile execution environments (`TZ`)
+  and Docker Compose service containers, ensuring OpenAI Codex 5-hour and
+  weekly quota reset times render in the operator's configured local timezone
+  rather than defaulting to container UTC.
+
+- Account discovery now falls back to collected/remembered account names when
+  no custom label is configured, so Stream Deck listings identify each account
+  without manual labels. Custom labels retain priority.
+
+- Added private authenticated account discovery and selection by stable profile
+  ID for individual Stream Deck buttons. The existing windowless helper accepts
+  an optional account ID, and its PowerShell companion lists current accounts.
+  Existing cycling buttons retain their behavior; disabled/deleted accounts
+  cannot be selected through the new route.
+
+- Fixed ChatGPT usage quota bar length mismatch on the physical CYD: corrected
+  `updateDashboard()` overwriting the 5-hour primary quota bar (`bar_primary`)
+  with stale 296 px dimensions, restoring identical 440 px lengths and aligned
+  bounds (x=8) for both 5-hour and weekly progress bars. Cleared scrollable
+  flags on quota cards and added matching track border styling to the weekly bar.
+- Improved physical CYD Wi-Fi reliability by disabling modem sleep on the
+  continuously powered LAN display, recording disconnect reasons plus
+  connected RSSI/channel diagnostics, and adding conservative staged recovery:
+  passive auto-reconnect, explicit reconnect, one station-radio
+  reinitialization, then a five-minute last-resort device restart only after a
+  previously healthy connection. The launcher now reports `Recovering` while
+  the fallback sequence is active.
+- Added custom CYD Usage Monitor favicon and high-resolution app branding assets:
+  multi-resolution `favicon.ico`, vector `favicon.svg`, raster `favicon-32x32.png`,
+  `favicon-16x16.png`, `apple-touch-icon.png` (180x180), and master 1024x1024 / 512x512
+  icons with public `/favicon.ico` route and dashboard `<head>` integration.
+  Added complete cycle, cycle-badge, and sync action-icon families for Stream
+  Deck and launcher shortcuts.
+- Added a token-safe Windows Stream Deck helper and windowless WScript launcher
+  for cycling through enabled Codex/Antigravity usage profiles without a
+  console flash. Each press also commands both the physical CYD and browser
+  preview into Usage Monitor.
+- Added a persistent dashboard screen-orientation control that flips only the
+  physical CYD by 180 degrees while retaining the 480x320 landscape layout.
+  The CYD stores the last orientation in NVS for immediate reboot recovery;
+  the upright browser preview uses a clear physical-orientation indicator.
+- Added bidirectional screen-state synchronization for the launcher, Usage
+  Monitor, OpenRouter, Home, and account selection. Browser LVGL interactions
+  now command the physical CYD, while physical navigation reports through a
+  private Bearer-protected endpoint so the preview follows on refresh.
+- Fixed the email integration form losing previously entered values during the
+  dashboard's 1.2-second status refresh. Once any email field is edited, the
+  complete draft now remains browser-owned until a successful save or removal.
+- Added protected dashboard email integration setup with Gmail/Google
+  Workspace app-password and custom STARTTLS/implicit-TLS SMTP modes. SMTP
+  credentials are written atomically as mode-`0600` private runtime data,
+  never returned by the status API, and can be tested or removed from Alerts.
+  Host environment configuration remains an explicit read-only override.
+- Added current Codex quota support for both the rolling 5-hour window and the
+  weekly window across normalized telemetry, the dashboard, physical CYD, and
+  WebAssembly LVGL preview. The shared update-prompt responder remains part of
+  the generic Codex collector path, so it applies automatically to every new
+  isolated Codex profile.
+- Persisted the last CLI-visible account identity in each profile after a
+  successful capture. Later collection failures, incidents, alerts, the
+  dashboard, and the device API now identify the affected account instead of
+  falling back to a generic provider label.
+- Added dashboard-to-device app commands and an OpenRouter **Show on CYD**
+  control. The physical display polls the private Bearer-protected command
+  endpoint, while the same action switches the live LVGL preview immediately.
+- Added an independent TLS SMTP fallback when a WAHA delivery fails, including
+  per-alert deduplication, protected dashboard health, and an explicit test
+  action. SMTP credentials remain host-only and are never persisted in monitor
+  state or inherited by provider CLI processes.
+- Fixed Codex usage collection with newer CLI releases that show an
+  interactive self-update prompt before `/status`: the collector now selects
+  **Skip** once per capture and leaves CLI upgrades under operator control.
+  Failed WAHA deliveries remain pending for retry, undelivered outages no
+  longer produce misleading recovery messages, and the dashboard overview
+  turns red when alert delivery itself is failing.
+- Fixed physical and simulated launcher navigation by making decorative tile
+  children click-through, using TFT_eSPI's full resistive-touch calibration
+  transform, clearing competing route requests, and enlarging the Home targets.
+  OpenRouter taps now open OpenRouter, and Home reliably returns to the
+  launcher on the Hosyond 4.0-inch display.
+- Corrected the physical firmware target for the Hosyond/LCDWiki E32R40T
+  4.0-inch board: ST7796S at 320x480, backlight on GPIO27, red status LED on
+  GPIO22, and XPT2046 resistive touch sharing the LCD SPI bus. Removed the
+  incompatible GT911/ESP32-3248S035 probing path that could interfere with
+  touch chip select during startup, and lowered the upload speed from 921600
+  to a more reliable 460800 baud for the onboard CH340C bridge.
 - Debounced CLI outage notifications until three consecutive collection cycles
   fail (configurable from 1–10), while retaining first-failure diagnostics in
   incident history. One-cycle Antigravity authentication/eligibility glitches

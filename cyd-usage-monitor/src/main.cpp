@@ -4,52 +4,71 @@
 #include <ArduinoJson.h>
 #include <SPI.h>
 #include <TFT_eSPI.h>
-#include <XPT2046_Touchscreen.h>
 #include <lvgl.h>
+#include <Preferences.h>
+#include <esp_system.h>
+#include <esp_heap_caps.h>
 #include "secrets.h"
 #include "mascot_img.h"
+#include "ui_motion.h"
 
-// Touch controller pins for CYD (ESP32-2432S028R)
-#define XPT2046_IRQ 36
-#define XPT2046_MOSI 32
-#define XPT2046_MISO 39
-#define XPT2046_CLK 25
-#define XPT2046_CS 33
-
-// Onboard RGB LED
-#define LED_RED 4
+// Hosyond/LCDWiki E32R40T onboard common-anode RGB LED.
+#define LED_RED 22
 #define LED_GREEN 16
 #define LED_BLUE 17
 
 TFT_eSPI tft = TFT_eSPI();
-// TFT_eSPI uses VSPI by default. The touch controller has its own CYD pins,
-// so place it on HSPI to avoid registering the same ESP32 APB callback twice.
-SPIClass touchSPI = SPIClass(HSPI);
-XPT2046_Touchscreen touch(XPT2046_CS, XPT2046_IRQ);
 WiFiClient telemetryPlainClient;
+HTTPClient telemetryHttp; // Persistent owner preserves TCP reuse across requests.
+Preferences displayPreferences;
 
-// LVGL buffer
+// LVGL buffer (sized for 480x320 landscape)
 static lv_disp_draw_buf_t draw_buf;
-static lv_color_t buf[320 * 30];
+static lv_color_t buf[480 * 20];
 
 unsigned long lastFetchTime = 0;
 // The host collector refreshes CLI data every few minutes.  A short local-LAN
-// poll makes a dashboard "Show" selection visible on the physical CYD within
-// three seconds, without triggering another provider CLI invocation.
+// quota refresh reads cached data without another provider CLI invocation.
+// Display commands use their own faster interval below.
 const unsigned long FETCH_INTERVAL = 3000;
+static unsigned long fetchRetryInterval = FETCH_INTERVAL;
+const unsigned long COMMAND_POLL_INTERVAL = 400;
+static unsigned long commandPollInterval = COMMAND_POLL_INTERVAL;
 const size_t MAX_TELEMETRY_BYTES = 16384;
-const unsigned long TELEMETRY_CONNECT_TIMEOUT_MS = 3000;
-const unsigned long TELEMETRY_READ_TIMEOUT_MS = 5000;
+const unsigned long TELEMETRY_CONNECT_TIMEOUT_MS = 500;
+const unsigned long TELEMETRY_READ_TIMEOUT_MS = 750;
+// Recovery is intentionally staged. Most AP interruptions clear on their own,
+// so do not disrupt a connection attempt until it has had time to settle.
+const unsigned long WIFI_EXPLICIT_RECONNECT_AFTER_MS = 30000;
+const unsigned long WIFI_EXPLICIT_RECONNECT_INTERVAL_MS = 30000;
+const unsigned long WIFI_RADIO_RECOVERY_AFTER_MS = 120000;
+const unsigned long WIFI_RESTART_AFTER_MS = 300000;
 static volatile bool nextAccountRequested = false;
 static volatile bool openUsageRequested = false;
 static volatile bool openRouterRequested = false;
 static volatile bool homeRequested = false;
 static bool usageFetchPending = false;
+static String motionAccount;
+static unsigned long greenLedUntil;
 static bool touchInputReady = false;
 static unsigned long touchReleasedSince = 0;
-static unsigned long wifiBeginTime = 0;
 static unsigned long lastWifiUiUpdate = 0;
+static unsigned long wifiDisconnectedSince = 0;
+static unsigned long lastWifiReconnectAttempt = 0;
+static bool wifiRadioRecoveryAttempted = false;
+static bool wifiEverConnected = false;
+static volatile uint8_t lastWifiDisconnectReason = 0;
+static volatile bool wifiDisconnectReasonPending = false;
+static volatile uint32_t wifiDisconnectCount = 0;
+static uint32_t httpRequestCount, httpTransportFailures, httpMaxMs;
+static uint32_t renderedFrames, renderTotalMs, renderMaxMs;
+static unsigned long lastDisplayCommandPoll = 0;
 static wl_status_t previousWifiStatus = WL_NO_SHIELD;
+static String lastDisplayCommandId;
+static uint16_t displayRotationDegrees = 0;
+static bool displayCommandSeen = false;
+static bool displayStateReportPending = false;
+static unsigned long lastDisplayStateReportAttempt = 0;
 
 enum class AppScreen : uint8_t {
     MainMenu,
@@ -74,6 +93,16 @@ static const AppDescriptor launcherApps[] = {
     {AppId::UsageMonitor, "Usage Monitor", "AI quota dashboard", 0xC4B5FD},
     {AppId::OpenRouter, "OpenRouter", "Credits & spend", 0xA7F3D0},
 };
+
+void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+    if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+        ++wifiDisconnectCount;
+        // The callback runs on the Arduino event task. Keep it non-blocking and
+        // let loop() perform all logging and recovery work.
+        lastWifiDisconnectReason = info.wifi_sta_disconnected.reason;
+        wifiDisconnectReasonPending = true;
+    }
+}
 
 // A compact 56x56 RGB565 canvas (6,272 bytes) provides a custom app icon
 // without paying the roughly 150 KB cost of a full-screen canvas.
@@ -118,6 +147,10 @@ static lv_obj_t *lbl_primary_sub;
 
 // Card 2: Extra Credits & Server Details
 static lv_obj_t *card_details;
+static lv_obj_t *lbl_weekly_val;
+static lv_obj_t *lbl_weekly_tag;
+static lv_obj_t *bar_weekly;
+static lv_obj_t *lbl_weekly_sub;
 static lv_obj_t *lbl_extra_credits;
 static lv_obj_t *lbl_server_status;
 
@@ -160,10 +193,92 @@ String prefetchedTelemetryPayload;
 
 void fetchQuotaData();
 void fetchOpenRouterData();
+void pollDisplayCommand();
+void reportDisplayState();
+void applyDisplayRotation(uint16_t rotationDegrees);
 void showTelemetryError(const String &detail);
 void showLauncherScreen();
 void showUsageMonitorScreen();
 void showOpenRouterScreen();
+
+
+// The worker only touches HTTP while loop() waits for its completion semaphore.
+// LVGL stays exclusively on loop(); requests remain serialized on one client.
+static TaskHandle_t telemetryWorkerTask;
+static SemaphoreHandle_t telemetryDone;
+static HTTPClient *workerHttp;
+static int workerOperation, workerCode;
+static String workerBody, workerResult;
+static void recordHttpResult(int code, uint32_t started) {
+    ++httpRequestCount;
+    httpMaxMs = max(httpMaxMs, static_cast<uint32_t>(millis() - started));
+    if (code < 0) ++httpTransportFailures;
+}
+static void displayMonitor(lv_disp_drv_t *, uint32_t time, uint32_t pixels) {
+    (void)pixels;
+    ++renderedFrames; renderTotalMs += time; renderMaxMs = max(renderMaxMs, time);
+}
+static void printDeviceDiagnostics() {
+    lv_mem_monitor_t memory;
+    lv_mem_monitor(&memory);
+    Serial.printf("[DIAG] uptime=%lu wifi=%d rssi=%d disconnects=%lu heap=%u minheap=%u largest=%u http_stack=%u lv_free=%u lv_largest=%u requests=%lu failures=%lu http_max_ms=%lu frames=%lu draw_avg_ms=%lu draw_max_ms=%lu\n",
+        millis(), (int)WiFi.status(), WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
+        (unsigned long)wifiDisconnectCount, ESP.getFreeHeap(), ESP.getMinFreeHeap(),
+        heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+        telemetryWorkerTask ? (unsigned)uxTaskGetStackHighWaterMark(telemetryWorkerTask) : 0,
+        (unsigned)memory.free_size, (unsigned)memory.free_biggest_size,
+        (unsigned long)httpRequestCount, (unsigned long)httpTransportFailures,
+        (unsigned long)httpMaxMs, (unsigned long)renderedFrames,
+        (unsigned long)(renderedFrames ? renderTotalMs / renderedFrames : 0), (unsigned long)renderMaxMs);
+    renderedFrames = renderTotalMs = renderMaxMs = httpMaxMs = 0;
+}
+static void telemetryWorker(void *) {
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (workerOperation == 0) workerCode = workerHttp->GET();
+        else if (workerOperation == 1) workerResult = workerHttp->getString();
+        else workerCode = workerHttp->POST(workerBody);
+        xSemaphoreGive(telemetryDone);
+    }
+}
+static void serviceUpdateLed() {
+    if (greenLedUntil && (int32_t)(millis() - greenLedUntil) >= 0) {
+        digitalWrite(LED_GREEN, HIGH); greenLedUntil = 0;
+    }
+}
+static void runTelemetryOperation(HTTPClient &http, int operation) {
+    workerHttp = &http; workerOperation = operation;
+    xTaskNotifyGive(telemetryWorkerTask);
+    while (xSemaphoreTake(telemetryDone, 0) != pdTRUE) {
+        lv_timer_handler();
+        serviceUpdateLed();
+        delay(5);
+    }
+}
+static int animatedGet(HTTPClient &http) {
+    uint32_t started = millis();
+    int code;
+    if (!telemetryWorkerTask) code = http.GET();
+    else { runTelemetryOperation(http, 0); code = workerCode; }
+    recordHttpResult(code, started);
+    return code;
+}
+static String animatedBody(HTTPClient &http) {
+    if (!telemetryWorkerTask) return http.getString();
+    runTelemetryOperation(http, 1);
+    String result = workerResult; workerResult = ""; return result;
+}
+static int animatedPost(HTTPClient &http, const String &body) {
+    uint32_t started = millis();
+    int code;
+    if (!telemetryWorkerTask) code = http.POST(body);
+    else {
+        workerBody = body; runTelemetryOperation(http, 2);
+        workerBody = ""; code = workerCode;
+    }
+    recordHttpResult(code, started);
+    return code;
+}
 
 void printSimulatorKeybinds() {
     Serial.println();
@@ -173,6 +288,7 @@ void printSimulatorKeybinds() {
     Serial.println("[KEYS] H  Return Home");
     Serial.println("[KEYS] N  Next account");
     Serial.println("[KEYS] ?  Show this help");
+    Serial.println("[KEYS] D  Print device/network/render diagnostics");
     Serial.println();
 }
 
@@ -220,7 +336,7 @@ void triggerNextAccount() {
     digitalWrite(LED_BLUE, LOW);
 
     if (WiFi.status() == WL_CONNECTED) {
-        HTTPClient http;
+        HTTPClient &http = telemetryHttp;
         String nextUrl = String(TELEMETRY_SERVER_URL);
         nextUrl.replace("/api/v1/cyd-status", "/api/v1/next-account");
         if (!beginTelemetryRequest(http, telemetryPlainClient, nextUrl)) {
@@ -231,11 +347,11 @@ void triggerNextAccount() {
         http.setConnectTimeout(TELEMETRY_CONNECT_TIMEOUT_MS);
         http.setTimeout(TELEMETRY_READ_TIMEOUT_MS);
         addTelemetryAuth(http);
-        int response = http.GET();
+        int response = animatedGet(http);
         if (response >= 200 && response < 300) {
             // The server returns the newly selected display state. Reuse that
             // payload directly instead of issuing a second HTTP request.
-            prefetchedTelemetryPayload = http.getString();
+            prefetchedTelemetryPayload = animatedBody(http);
             http.end();
             fetchQuotaData();
         } else if (response == HTTP_CODE_UNAUTHORIZED) {
@@ -245,7 +361,7 @@ void triggerNextAccount() {
             Serial.printf("[NET] LAN request failed: HTTPClient=%d (%s)\n",
                           response, HTTPClient::errorToString(response).c_str());
             http.end();
-            showTelemetryError("Local monitor connection failed. Check LAN address and server.");
+            showTelemetryError(WiFi.status() == WL_CONNECTED ? "Wi-Fi connected; monitor server unreachable. Retrying." : "Wi-Fi disconnected. Reconnecting automatically.");
         } else {
             http.end();
             showTelemetryError("Account switch failed with HTTP " + String(response) + ".");
@@ -271,15 +387,17 @@ void my_disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *c
 /* Touch Input Callback */
 void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
     bool pressed = false;
-    TS_Point point;
-    if (touch.touched()) {
-        point = touch.getPoint();
-        pressed = point.z > 200;
+    uint16_t touch_x = 0, touch_y = 0;
+
+    if (tft.getTouch(&touch_x, &touch_y, 200)) {
+        pressed = true;
+        if (displayRotationDegrees == 180) {
+            touch_x = 479 - constrain(touch_x, 0, 479);
+            touch_y = 319 - constrain(touch_y, 0, 319);
+        }
+        Serial.printf("[TOUCH] calibrated screen=(%d, %d)\n", touch_x, touch_y);
     }
 
-    // Startup samples can look pressed on the XPT2046. Arm input only after
-    // a stable release, which suppresses phantom launches without imposing a
-    // fixed multi-second lockout on a legitimately ready touchscreen.
     if (!touchInputReady) {
         if (pressed) {
             touchReleasedSince = 0;
@@ -294,12 +412,31 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
 
     if (pressed) {
         data->state = LV_INDEV_STATE_PR;
-        data->point.x = constrain(map(point.x, 200, 3700, 0, 319), 0, 319);
-        data->point.y = constrain(map(point.y, 240, 3800, 0, 239), 0, 239);
+        data->point.x = constrain(touch_x, 0, 479);
+        data->point.y = constrain(touch_y, 0, 319);
         return;
     }
 
     data->state = LV_INDEV_STATE_REL;
+}
+
+void applyDisplayRotation(uint16_t rotationDegrees) {
+    const bool flipped = rotationDegrees == 180;
+    const uint16_t normalized = flipped ? 180 : 0;
+    if (displayRotationDegrees == normalized) return;
+
+    displayRotationDegrees = normalized;
+    displayPreferences.putUShort("rotation", displayRotationDegrees);
+    displayStateReportPending = true;
+    tft.setRotation(flipped ? 3 : 1); // Both are 480x320 landscape orientations.
+    touchInputReady = false;
+    touchReleasedSince = 0;
+    tft.fillScreen(TFT_BLACK);
+    if (lv_scr_act() != nullptr) {
+        lv_obj_invalidate(lv_scr_act());
+        lv_refr_now(nullptr);
+    }
+    Serial.printf("[DISPLAY] Orientation set to %u degrees\n", displayRotationDegrees);
 }
 
 void launcherTileEvent(lv_event_t *event) {
@@ -308,14 +445,21 @@ void launcherTileEvent(lv_event_t *event) {
     }
     const AppDescriptor *app = static_cast<const AppDescriptor *>(lv_event_get_user_data(event));
     if (app != nullptr && app->id == AppId::UsageMonitor) {
+        Serial.println("[NAV] Launcher -> Usage Monitor");
+        openRouterRequested = false;
         openUsageRequested = true;
     } else if (app != nullptr && app->id == AppId::OpenRouter) {
+        Serial.println("[NAV] Launcher -> OpenRouter");
+        openUsageRequested = false;
         openRouterRequested = true;
     }
 }
 
 void homeButtonEvent(lv_event_t *event) {
     if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        Serial.println("[NAV] App -> Home");
+        openUsageRequested = false;
+        openRouterRequested = false;
         homeRequested = true;
     }
 }
@@ -353,21 +497,12 @@ void drawLauncherIcon(lv_obj_t *canvas, AppId id) {
     accentArc.rounded = true;
     lv_canvas_draw_arc(canvas, 28, 27, 20, 40, 165, &accentArc);
 
-    const uint32_t barColors[] = {0xFBCFE8, 0xBAE6FD, 0xFDE68A};
-    const lv_coord_t barHeights[] = {8, 14, 20};
-    for (int i = 0; i < 3; ++i) {
-        lv_draw_rect_dsc_t bar;
-        lv_draw_rect_dsc_init(&bar);
-        bar.bg_color = lv_color_hex(barColors[i]);
-        bar.bg_opa = LV_OPA_COVER;
-        bar.radius = 2;
-        lv_canvas_draw_rect(canvas, 17 + i * 9, 45 - barHeights[i], 6, barHeights[i], &bar);
-    }
+
 }
 
 lv_obj_t *createLauncherTile(lv_obj_t *parent, const AppDescriptor *app) {
     lv_obj_t *tile = lv_btn_create(parent);
-    lv_obj_set_size(tile, 142, 146);
+    lv_obj_set_size(tile, 218, 220);
     lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(tile, lv_color_hex(0x282432), LV_PART_MAIN);
     lv_obj_set_style_bg_grad_color(tile, lv_color_hex(0x202A31), LV_PART_MAIN);
@@ -379,18 +514,20 @@ lv_obj_t *createLauncherTile(lv_obj_t *parent, const AppDescriptor *app) {
     lv_obj_set_style_shadow_width(tile, 18, LV_PART_MAIN);
     lv_obj_set_style_shadow_opa(tile, LV_OPA_20, LV_PART_MAIN);
     lv_obj_set_style_pad_all(tile, 0, LV_PART_MAIN);
-    lv_obj_set_style_transform_zoom(tile, 242, LV_STATE_PRESSED);
     lv_obj_set_style_bg_color(tile, lv_color_hex(0x332D42), LV_STATE_PRESSED);
     lv_obj_add_event_cb(tile, launcherTileEvent, LV_EVENT_CLICKED, const_cast<AppDescriptor *>(app));
 
     if (app->id == AppId::UsageMonitor) {
         lv_obj_t *canvas = lv_canvas_create(tile);
+        lv_obj_clear_flag(canvas, LV_OBJ_FLAG_CLICKABLE);
         drawLauncherIcon(canvas, app->id);
-        lv_obj_align(canvas, LV_ALIGN_TOP_MID, 0, 10);
+        lv_obj_align(canvas, LV_ALIGN_TOP_MID, 0, 16);
+        cyd_motion_equalizer(canvas);
     } else {
         lv_obj_t *icon = lv_obj_create(tile);
+        lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_size(icon, 56, 56);
-        lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 10);
+        lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 16);
         lv_obj_clear_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_style_bg_opa(icon, LV_OPA_TRANSP, LV_PART_MAIN);
         lv_obj_set_style_border_width(icon, 0, LV_PART_MAIN);
@@ -400,8 +537,11 @@ lv_obj_t *createLauncherTile(lv_obj_t *parent, const AppDescriptor *app) {
         lv_obj_set_style_line_color(route, lv_color_hex(0xA7F3D0), LV_PART_MAIN);
         lv_obj_set_style_line_width(route, 5, LV_PART_MAIN);
         lv_obj_set_style_line_rounded(route, true, LV_PART_MAIN);
+        unsigned nodeIndex = 0;
         for (const lv_point_t &point : openRouterRoutePoints) {
             lv_obj_t *node = lv_obj_create(icon);
+            cyd_nodes[nodeIndex++] = node;
+            lv_obj_clear_flag(node, LV_OBJ_FLAG_CLICKABLE);
             lv_obj_set_size(node, 9, 9);
             lv_obj_set_pos(node, point.x - 4, point.y - 4);
             lv_obj_set_style_radius(node, LV_RADIUS_CIRCLE, LV_PART_MAIN);
@@ -411,24 +551,27 @@ lv_obj_t *createLauncherTile(lv_obj_t *parent, const AppDescriptor *app) {
     }
 
     lv_obj_t *title = lv_label_create(tile);
+    lv_obj_clear_flag(title, LV_OBJ_FLAG_CLICKABLE);
     lv_label_set_text(title, app->title);
     lv_obj_set_style_text_color(title, lv_color_hex(0xF8FAFC), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 74);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 86);
 
     lv_obj_t *subtitle = lv_label_create(tile);
+    lv_obj_clear_flag(subtitle, LV_OBJ_FLAG_CLICKABLE);
     lv_label_set_text(subtitle, app->subtitle);
     lv_obj_set_style_text_color(subtitle, lv_color_hex(0xC7D2FE), LV_PART_MAIN);
-    lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 99);
+    lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 118);
 
     lv_obj_t *openLabel = lv_label_create(tile);
+    lv_obj_clear_flag(openLabel, LV_OBJ_FLAG_CLICKABLE);
     lv_label_set_text(openLabel, "Open  " LV_SYMBOL_RIGHT);
     lv_obj_set_style_text_color(openLabel, lv_color_hex(0xA7F3D0), LV_PART_MAIN);
-    lv_obj_set_style_text_font(openLabel, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_align(openLabel, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_obj_set_style_text_font(openLabel, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(openLabel, LV_ALIGN_BOTTOM_MID, 0, -14);
 
-    lv_obj_fade_in(tile, 220, 60);
+    cyd_motion_card_init(tile);
     return tile;
 }
 
@@ -441,16 +584,16 @@ void buildLauncherUI() {
     lv_obj_set_style_pad_all(scr_launcher, 0, LV_PART_MAIN);
 
     lv_obj_t *lavenderGlow = lv_obj_create(scr_launcher);
-    lv_obj_set_size(lavenderGlow, 92, 92);
-    lv_obj_set_pos(lavenderGlow, 266, -44);
+    lv_obj_set_size(lavenderGlow, 120, 120);
+    lv_obj_set_pos(lavenderGlow, 380, -40);
     lv_obj_set_style_radius(lavenderGlow, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_bg_color(lavenderGlow, lv_color_hex(0xC4B5FD), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(lavenderGlow, LV_OPA_10, LV_PART_MAIN);
     lv_obj_set_style_border_width(lavenderGlow, 0, LV_PART_MAIN);
 
     lv_obj_t *mintGlow = lv_obj_create(scr_launcher);
-    lv_obj_set_size(mintGlow, 76, 76);
-    lv_obj_set_pos(mintGlow, -36, 196);
+    lv_obj_set_size(mintGlow, 90, 90);
+    lv_obj_set_pos(mintGlow, -30, 240);
     lv_obj_set_style_radius(mintGlow, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_bg_color(mintGlow, lv_color_hex(0xA7F3D0), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(mintGlow, LV_OPA_10, LV_PART_MAIN);
@@ -459,28 +602,28 @@ void buildLauncherUI() {
     lv_obj_t *title = lv_label_create(scr_launcher);
     lv_label_set_text(title, "CYD Apps");
     lv_obj_set_style_text_color(title, lv_color_hex(0xF8FAFC), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, LV_PART_MAIN);
-    lv_obj_set_pos(title, 16, 10);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, LV_PART_MAIN);
+    lv_obj_set_pos(title, 24, 12);
 
     lv_obj_t *subtitle = lv_label_create(scr_launcher);
     lv_label_set_text(subtitle, "Choose an app");
     lv_obj_set_style_text_color(subtitle, lv_color_hex(0xC7D2FE), LV_PART_MAIN);
-    lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_set_pos(subtitle, 18, 40);
+    lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(subtitle, 26, 46);
 
     launcher_wifi_pill = lv_obj_create(scr_launcher);
-    lv_obj_set_size(launcher_wifi_pill, 91, 27);
-    lv_obj_set_pos(launcher_wifi_pill, 216, 13);
+    lv_obj_set_size(launcher_wifi_pill, 114, 30);
+    lv_obj_set_pos(launcher_wifi_pill, 346, 16);
     lv_obj_clear_flag(launcher_wifi_pill, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(launcher_wifi_pill, lv_color_hex(0x202028), LV_PART_MAIN);
     lv_obj_set_style_border_color(launcher_wifi_pill, lv_color_hex(0xFDE68A), LV_PART_MAIN);
     lv_obj_set_style_border_width(launcher_wifi_pill, 1, LV_PART_MAIN);
-    lv_obj_set_style_radius(launcher_wifi_pill, 14, LV_PART_MAIN);
+    lv_obj_set_style_radius(launcher_wifi_pill, 15, LV_PART_MAIN);
     lv_obj_set_style_pad_all(launcher_wifi_pill, 0, LV_PART_MAIN);
 
     launcher_wifi_dot = lv_obj_create(launcher_wifi_pill);
     lv_obj_set_size(launcher_wifi_dot, 8, 8);
-    lv_obj_set_pos(launcher_wifi_dot, 10, 8);
+    lv_obj_set_pos(launcher_wifi_dot, 10, 10);
     lv_obj_set_style_radius(launcher_wifi_dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_bg_color(launcher_wifi_dot, lv_color_hex(0xFDE68A), LV_PART_MAIN);
     lv_obj_set_style_border_width(launcher_wifi_dot, 0, LV_PART_MAIN);
@@ -489,17 +632,17 @@ void buildLauncherUI() {
     lv_label_set_text(launcher_wifi_label, "Connecting");
     lv_obj_set_style_text_color(launcher_wifi_label, lv_color_hex(0xF8FAFC), LV_PART_MAIN);
     lv_obj_set_style_text_font(launcher_wifi_label, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_set_pos(launcher_wifi_label, 24, 6);
+    lv_obj_set_pos(launcher_wifi_label, 26, 7);
 
     lv_obj_t *grid = lv_obj_create(scr_launcher);
-    lv_obj_set_size(grid, 304, 170);
-    lv_obj_set_pos(grid, 8, 62);
+    lv_obj_set_size(grid, 460, 235);
+    lv_obj_set_pos(grid, 10, 75);
     lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(grid, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(grid, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(grid, 6, LV_PART_MAIN);
-    lv_obj_set_style_pad_row(grid, 8, LV_PART_MAIN);
-    lv_obj_set_style_pad_column(grid, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(grid, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(grid, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(grid, 16, LV_PART_MAIN);
     lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
@@ -512,12 +655,14 @@ void showLauncherScreen() {
     activeScreen = AppScreen::MainMenu;
     usageFetchPending = false;
     nextAccountRequested = false;
-    lv_scr_load_anim(scr_launcher, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 180, 0, false);
+    cyd_motion_show(scr_launcher, true);
+    displayStateReportPending = true;
 }
 
 void showUsageMonitorScreen() {
     activeScreen = AppScreen::UsageMonitor;
-    lv_scr_load_anim(scr_dashboard, LV_SCR_LOAD_ANIM_MOVE_LEFT, 180, 0, false);
+    cyd_motion_show(scr_dashboard, false);
+    displayStateReportPending = true;
     if (WiFi.status() == WL_CONNECTED) {
         usageFetchPending = true;
     } else {
@@ -527,7 +672,8 @@ void showUsageMonitorScreen() {
 
 void showOpenRouterScreen() {
     activeScreen = AppScreen::OpenRouter;
-    lv_scr_load_anim(scr_openrouter, LV_SCR_LOAD_ANIM_MOVE_LEFT, 180, 0, false);
+    cyd_motion_show(scr_openrouter, false);
+    displayStateReportPending = true;
     if (WiFi.status() == WL_CONNECTED) {
         usageFetchPending = true;
     } else {
@@ -536,6 +682,7 @@ void showOpenRouterScreen() {
 }
 
 void showTelemetryError(const String &detail) {
+    motionAccount = "";
     lv_obj_add_flag(card_primary, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(card_details, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(lbl_col_gemini, LV_OBJ_FLAG_HIDDEN);
@@ -550,7 +697,6 @@ void showTelemetryError(const String &detail) {
     lv_label_set_text(lbl_error_detail, detail.c_str());
     lv_obj_set_style_text_color(lbl_next_icon, lv_color_hex(0xEF4444), LV_PART_MAIN);
 }
-
 void buildDashboardUI() {
     scr_dashboard = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_dashboard, lv_color_hex(0x09090B), LV_PART_MAIN);
@@ -559,31 +705,30 @@ void buildDashboardUI() {
     // --- Header Section ---
     header_img = lv_img_create(scr_dashboard);
     lv_img_set_src(header_img, &mascot_img);
-    lv_obj_set_pos(header_img, 6, 3);
+    lv_obj_set_pos(header_img, 10, 6);
 
     lbl_ag_mascot = lv_label_create(scr_dashboard);
     lv_label_set_text(lbl_ag_mascot, "🚀");
     lv_obj_set_style_text_font(lbl_ag_mascot, &lv_font_montserrat_16, LV_PART_MAIN);
-    lv_obj_set_pos(lbl_ag_mascot, 6, 4);
+    lv_obj_set_pos(lbl_ag_mascot, 10, 6);
     lv_obj_add_flag(lbl_ag_mascot, LV_OBJ_FLAG_HIDDEN);
 
     lbl_account_name = lv_label_create(scr_dashboard);
     lv_label_set_text(lbl_account_name, "Loading Account...");
     lv_obj_set_style_text_color(lbl_account_name, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_account_name, &lv_font_montserrat_16, LV_PART_MAIN);
-    lv_obj_set_size(lbl_account_name, 214, 24);
+    lv_obj_set_size(lbl_account_name, 320, 24);
     lv_label_set_long_mode(lbl_account_name, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(lbl_account_name, 36, 4);
+    lv_obj_set_pos(lbl_account_name, 48, 7);
 
     btn_home = lv_btn_create(scr_dashboard);
-    lv_obj_set_size(btn_home, 28, 26);
-    lv_obj_set_pos(btn_home, 258, 1);
+    lv_obj_set_size(btn_home, 48, 38);
+    lv_obj_set_pos(btn_home, 376, 1);
     lv_obj_set_style_radius(btn_home, 6, LV_PART_MAIN);
     lv_obj_set_style_bg_color(btn_home, lv_color_hex(0x2B2635), LV_PART_MAIN);
     lv_obj_set_style_border_color(btn_home, lv_color_hex(0xC4B5FD), LV_PART_MAIN);
     lv_obj_set_style_border_width(btn_home, 1, LV_PART_MAIN);
     lv_obj_set_style_pad_all(btn_home, 0, LV_PART_MAIN);
-    lv_obj_set_style_transform_zoom(btn_home, 238, LV_STATE_PRESSED);
     lv_obj_add_event_cb(btn_home, homeButtonEvent, LV_EVENT_CLICKED, NULL);
     lv_obj_t *homeIcon = lv_label_create(btn_home);
     lv_label_set_text(homeIcon, LV_SYMBOL_HOME);
@@ -591,8 +736,8 @@ void buildDashboardUI() {
     lv_obj_center(homeIcon);
 
     btn_next_account = lv_btn_create(scr_dashboard);
-    lv_obj_set_size(btn_next_account, 28, 26);
-    lv_obj_set_pos(btn_next_account, 290, 1);
+    lv_obj_set_size(btn_next_account, 48, 38);
+    lv_obj_set_pos(btn_next_account, 428, 1);
     lv_obj_set_style_radius(btn_next_account, 6, LV_PART_MAIN);
     lv_obj_set_style_bg_color(btn_next_account, lv_color_hex(0x17212A), LV_PART_MAIN);
     lv_obj_set_style_border_color(btn_next_account, lv_color_hex(0x334155), LV_PART_MAIN);
@@ -606,8 +751,9 @@ void buildDashboardUI() {
 
     // --- ChatGPT Card 1: Primary Quota ---
     card_primary = lv_obj_create(scr_dashboard);
-    lv_obj_set_size(card_primary, 312, 122);
-    lv_obj_set_pos(card_primary, 4, 30);
+    lv_obj_clear_flag(card_primary, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(card_primary, 460, 118);
+    lv_obj_set_pos(card_primary, 10, 40);
     lv_obj_set_style_bg_color(card_primary, lv_color_hex(0x18181B), LV_PART_MAIN);
     lv_obj_set_style_border_color(card_primary, lv_color_hex(0x27272A), LV_PART_MAIN);
     lv_obj_set_style_border_width(card_primary, 1, LV_PART_MAIN);
@@ -618,11 +764,12 @@ void buildDashboardUI() {
     lv_label_set_text(lbl_primary_val, "0%");
     lv_obj_set_style_text_color(lbl_primary_val, lv_color_hex(0x10B981), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_primary_val, &lv_font_montserrat_32, LV_PART_MAIN);
-    lv_obj_set_pos(lbl_primary_val, 6, 2);
+    lv_obj_set_pos(lbl_primary_val, 10, 4);
 
     lv_obj_t *badge1 = lv_obj_create(card_primary);
-    lv_obj_set_size(badge1, 115, 24);
-    lv_obj_align(badge1, LV_ALIGN_TOP_RIGHT, 0, -2);
+    lv_obj_clear_flag(badge1, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(badge1, 125, 26);
+    lv_obj_align(badge1, LV_ALIGN_TOP_RIGHT, -6, 2);
     lv_obj_set_style_bg_color(badge1, lv_color_hex(0x27272A), LV_PART_MAIN);
     lv_obj_set_style_border_width(badge1, 0, LV_PART_MAIN);
     lv_obj_set_style_radius(badge1, 10, LV_PART_MAIN);
@@ -635,8 +782,8 @@ void buildDashboardUI() {
     lv_obj_center(lbl_primary_tag);
 
     bar_primary = lv_bar_create(card_primary);
-    lv_obj_set_size(bar_primary, 296, 14);
-    lv_obj_set_pos(bar_primary, 4, 52);
+    lv_obj_set_size(bar_primary, 440, 16);
+    lv_obj_set_pos(bar_primary, 8, 54);
     lv_bar_set_range(bar_primary, 0, 100);
     lv_bar_set_value(bar_primary, 0, LV_ANIM_ON);
     lv_obj_set_style_bg_color(bar_primary, lv_color_hex(0x27272A), LV_PART_MAIN);
@@ -657,35 +804,66 @@ void buildDashboardUI() {
     lv_label_set_text(lbl_primary_sub, "100% left");
     lv_obj_set_style_text_color(lbl_primary_sub, lv_color_hex(0x10B981), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_primary_sub, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_pos(lbl_primary_sub, 6, 80);
+    lv_obj_set_pos(lbl_primary_sub, 10, 80);
 
-    // --- ChatGPT Card 2: Footer / Credits ---
+    // --- ChatGPT Card 2: Weekly quota plus plan / credits footer ---
     card_details = lv_obj_create(scr_dashboard);
-    lv_obj_set_size(card_details, 312, 60);
-    lv_obj_set_pos(card_details, 4, 160);
+    lv_obj_clear_flag(card_details, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(card_details, 460, 110);
+    lv_obj_set_pos(card_details, 10, 168);
     lv_obj_set_style_bg_color(card_details, lv_color_hex(0x18181B), LV_PART_MAIN);
     lv_obj_set_style_border_color(card_details, lv_color_hex(0x27272A), LV_PART_MAIN);
     lv_obj_set_style_border_width(card_details, 1, LV_PART_MAIN);
     lv_obj_set_style_radius(card_details, 10, LV_PART_MAIN);
     lv_obj_set_style_pad_all(card_details, 8, LV_PART_MAIN);
 
+    lbl_weekly_val = lv_label_create(card_details);
+    lv_label_set_text(lbl_weekly_val, "0% left");
+    lv_obj_set_style_text_color(lbl_weekly_val, lv_color_hex(0x10B981), LV_PART_MAIN);
+    lv_obj_set_style_text_font(lbl_weekly_val, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_set_pos(lbl_weekly_val, 10, 0);
+
+    lbl_weekly_tag = lv_label_create(card_details);
+    lv_label_set_text(lbl_weekly_tag, "Weekly Limit");
+    lv_obj_set_style_text_color(lbl_weekly_tag, lv_color_hex(0xE4E4E7), LV_PART_MAIN);
+    lv_obj_set_style_text_font(lbl_weekly_tag, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_align(lbl_weekly_tag, LV_ALIGN_TOP_RIGHT, -10, 5);
+
+    bar_weekly = lv_bar_create(card_details);
+    lv_obj_set_size(bar_weekly, 440, 12);
+    lv_obj_set_pos(bar_weekly, 8, 36);
+    lv_bar_set_range(bar_weekly, 0, 100);
+    lv_obj_set_style_bg_color(bar_weekly, lv_color_hex(0x27272A), LV_PART_MAIN);
+    lv_obj_set_style_border_color(bar_weekly, lv_color_hex(0x3F3F46), LV_PART_MAIN);
+    lv_obj_set_style_border_width(bar_weekly, 1, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(bar_weekly, lv_color_hex(0x10B981), LV_PART_INDICATOR);
+    lv_obj_set_style_radius(bar_weekly, 5, LV_PART_MAIN);
+    lv_obj_set_style_radius(bar_weekly, 5, LV_PART_INDICATOR);
+
+    lbl_weekly_sub = lv_label_create(card_details);
+    lv_label_set_text(lbl_weekly_sub, "Waiting for weekly quota");
+    lv_obj_set_style_text_color(lbl_weekly_sub, lv_color_hex(0x94A3B8), LV_PART_MAIN);
+    lv_obj_set_style_text_font(lbl_weekly_sub, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_pos(lbl_weekly_sub, 10, 52);
+
     lbl_extra_credits = lv_label_create(card_details);
     lv_label_set_recolor(lbl_extra_credits, true);
     lv_label_set_text(lbl_extra_credits, "Credits: #38bdf8 None#");
     lv_obj_set_style_text_color(lbl_extra_credits, lv_color_hex(0xE4E4E7), LV_PART_MAIN);
-    lv_obj_set_style_text_font(lbl_extra_credits, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_pos(lbl_extra_credits, 6, 12);
+    lv_obj_set_style_text_font(lbl_extra_credits, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_pos(lbl_extra_credits, 10, 78);
 
     lbl_server_status = lv_label_create(card_details);
     lv_label_set_text(lbl_server_status, "ChatGPT Plus");
     lv_obj_set_style_text_color(lbl_server_status, lv_color_hex(0x10B981), LV_PART_MAIN);
-    lv_obj_set_style_text_font(lbl_server_status, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_align(lbl_server_status, LV_ALIGN_TOP_RIGHT, -6, 12);
+    lv_obj_set_style_text_font(lbl_server_status, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_align(lbl_server_status, LV_ALIGN_TOP_RIGHT, -10, 78);
 
     // --- Collector Error Screen ---
     card_error = lv_obj_create(scr_dashboard);
-    lv_obj_set_size(card_error, 312, 154);
-    lv_obj_set_pos(card_error, 4, 48);
+    lv_obj_clear_flag(card_error, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(card_error, 460, 236);
+    lv_obj_set_pos(card_error, 10, 42);
     lv_obj_set_style_bg_color(card_error, lv_color_hex(0x211316), LV_PART_MAIN);
     lv_obj_set_style_border_color(card_error, lv_color_hex(0xF43F5E), LV_PART_MAIN);
     lv_obj_set_style_border_width(card_error, 1, LV_PART_MAIN);
@@ -699,8 +877,8 @@ void buildDashboardUI() {
     lbl_error_detail = lv_label_create(card_error);
     lv_label_set_text(lbl_error_detail, "Waiting for the CLI collector.");
     lv_obj_set_style_text_color(lbl_error_detail, lv_color_hex(0xF4D7DA), LV_PART_MAIN);
-    lv_obj_set_style_text_font(lbl_error_detail, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_size(lbl_error_detail, 276, 95);
+    lv_obj_set_style_text_font(lbl_error_detail, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_set_size(lbl_error_detail, 420, 140);
     lv_label_set_long_mode(lbl_error_detail, LV_LABEL_LONG_WRAP);
     lv_obj_set_pos(lbl_error_detail, 0, 43);
     lv_obj_add_flag(card_error, LV_OBJ_FLAG_HIDDEN);
@@ -711,22 +889,22 @@ void buildDashboardUI() {
 
     lbl_col_gemini = lv_label_create(scr_dashboard);
     lv_label_set_text(lbl_col_gemini, "Gemini Models");
-    lv_obj_set_style_text_color(lbl_col_gemini, lv_color_hex(0x2563EB), LV_PART_MAIN); // Deep Royal Blue
+    lv_obj_set_style_text_color(lbl_col_gemini, lv_color_hex(0x2563EB), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_col_gemini, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_pos(lbl_col_gemini, 2, 28);
+    lv_obj_set_pos(lbl_col_gemini, 14, 38);
     lv_obj_add_flag(lbl_col_gemini, LV_OBJ_FLAG_HIDDEN);
 
     lbl_col_claude = lv_label_create(scr_dashboard);
     lv_label_set_text(lbl_col_claude, "Claude Models");
-    lv_obj_set_style_text_color(lbl_col_claude, lv_color_hex(0xF97316), LV_PART_MAIN); // Anthropic Orange
+    lv_obj_set_style_text_color(lbl_col_claude, lv_color_hex(0xF97316), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_col_claude, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_pos(lbl_col_claude, 160, 28);
+    lv_obj_set_pos(lbl_col_claude, 250, 38);
     lv_obj_add_flag(lbl_col_claude, LV_OBJ_FLAG_HIDDEN);
 
     // Box 1: Gemini 5H
     box_gemini_5h = lv_obj_create(scr_dashboard);
-    lv_obj_set_size(box_gemini_5h, 158, 88);
-    lv_obj_set_pos(box_gemini_5h, 0, 48);
+    lv_obj_set_size(box_gemini_5h, 224, 105);
+    lv_obj_set_pos(box_gemini_5h, 10, 58);
     lv_obj_set_style_bg_color(box_gemini_5h, lv_color_hex(0x18181B), LV_PART_MAIN);
     lv_obj_set_style_border_color(box_gemini_5h, lv_color_hex(0x2563EB), LV_PART_MAIN);
     lv_obj_set_style_border_width(box_gemini_5h, 1, LV_PART_MAIN);
@@ -738,17 +916,17 @@ void buildDashboardUI() {
     lv_label_set_text(lbl_g5_t, "5H Limit");
     lv_obj_set_style_text_color(lbl_g5_t, lv_color_hex(0x3B82F6), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_g5_t, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_set_pos(lbl_g5_t, 4, 4);
+    lv_obj_set_pos(lbl_g5_t, 6, 6);
 
     lbl_g5_val = lv_label_create(box_gemini_5h);
     lv_label_set_text(lbl_g5_val, "78%");
     lv_obj_set_style_text_color(lbl_g5_val, lv_color_hex(0x3B82F6), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_g5_val, &lv_font_montserrat_20, LV_PART_MAIN);
-    lv_obj_align(lbl_g5_val, LV_ALIGN_TOP_RIGHT, -4, 2);
+    lv_obj_align(lbl_g5_val, LV_ALIGN_TOP_RIGHT, -6, 4);
 
     bar_g5 = lv_bar_create(box_gemini_5h);
-    lv_obj_set_size(bar_g5, 144, 10);
-    lv_obj_set_pos(bar_g5, 4, 32);
+    lv_obj_set_size(bar_g5, 208, 12);
+    lv_obj_set_pos(bar_g5, 4, 48);
     lv_bar_set_range(bar_g5, 0, 100);
     lv_obj_set_style_bg_color(bar_g5, lv_color_hex(0x27272A), LV_PART_MAIN);
     lv_obj_set_style_bg_color(bar_g5, lv_color_hex(0x2563EB), LV_PART_INDICATOR);
@@ -759,12 +937,12 @@ void buildDashboardUI() {
     lv_label_set_text(lbl_g5_sub, "Refresh in: 4h 31m");
     lv_obj_set_style_text_color(lbl_g5_sub, lv_color_hex(0x94A3B8), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_g5_sub, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_set_pos(lbl_g5_sub, 4, 52);
+    lv_obj_set_pos(lbl_g5_sub, 6, 72);
 
     // Box 2: Gemini Weekly
     box_gemini_wk = lv_obj_create(scr_dashboard);
-    lv_obj_set_size(box_gemini_wk, 158, 88);
-    lv_obj_set_pos(box_gemini_wk, 0, 142);
+    lv_obj_set_size(box_gemini_wk, 224, 105);
+    lv_obj_set_pos(box_gemini_wk, 10, 172);
     lv_obj_set_style_bg_color(box_gemini_wk, lv_color_hex(0x18181B), LV_PART_MAIN);
     lv_obj_set_style_border_color(box_gemini_wk, lv_color_hex(0x2563EB), LV_PART_MAIN);
     lv_obj_set_style_border_width(box_gemini_wk, 1, LV_PART_MAIN);
@@ -776,17 +954,17 @@ void buildDashboardUI() {
     lv_label_set_text(lbl_gw_t, "Weekly");
     lv_obj_set_style_text_color(lbl_gw_t, lv_color_hex(0x3B82F6), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_gw_t, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_set_pos(lbl_gw_t, 4, 4);
+    lv_obj_set_pos(lbl_gw_t, 6, 6);
 
     lbl_gw_val = lv_label_create(box_gemini_wk);
     lv_label_set_text(lbl_gw_val, "48%");
     lv_obj_set_style_text_color(lbl_gw_val, lv_color_hex(0x3B82F6), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_gw_val, &lv_font_montserrat_20, LV_PART_MAIN);
-    lv_obj_align(lbl_gw_val, LV_ALIGN_TOP_RIGHT, -4, 2);
+    lv_obj_align(lbl_gw_val, LV_ALIGN_TOP_RIGHT, -6, 4);
 
     bar_gw = lv_bar_create(box_gemini_wk);
-    lv_obj_set_size(bar_gw, 144, 10);
-    lv_obj_set_pos(bar_gw, 4, 32);
+    lv_obj_set_size(bar_gw, 208, 12);
+    lv_obj_set_pos(bar_gw, 4, 48);
     lv_bar_set_range(bar_gw, 0, 100);
     lv_obj_set_style_bg_color(bar_gw, lv_color_hex(0x27272A), LV_PART_MAIN);
     lv_obj_set_style_bg_color(bar_gw, lv_color_hex(0x2563EB), LV_PART_INDICATOR);
@@ -797,12 +975,12 @@ void buildDashboardUI() {
     lv_label_set_text(lbl_gw_sub, "Refresh in: 1d 21h");
     lv_obj_set_style_text_color(lbl_gw_sub, lv_color_hex(0x94A3B8), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_gw_sub, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_set_pos(lbl_gw_sub, 4, 52);
+    lv_obj_set_pos(lbl_gw_sub, 6, 72);
 
     // Box 3: Claude 5H
     box_claude_5h = lv_obj_create(scr_dashboard);
-    lv_obj_set_size(box_claude_5h, 158, 88);
-    lv_obj_set_pos(box_claude_5h, 160, 48);
+    lv_obj_set_size(box_claude_5h, 224, 105);
+    lv_obj_set_pos(box_claude_5h, 246, 58);
     lv_obj_set_style_bg_color(box_claude_5h, lv_color_hex(0x18181B), LV_PART_MAIN);
     lv_obj_set_style_border_color(box_claude_5h, lv_color_hex(0xF97316), LV_PART_MAIN);
     lv_obj_set_style_border_width(box_claude_5h, 1, LV_PART_MAIN);
@@ -814,17 +992,17 @@ void buildDashboardUI() {
     lv_label_set_text(lbl_c5_t, "5H Limit");
     lv_obj_set_style_text_color(lbl_c5_t, lv_color_hex(0xFB923C), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_c5_t, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_set_pos(lbl_c5_t, 4, 4);
+    lv_obj_set_pos(lbl_c5_t, 6, 6);
 
     lbl_c5_val = lv_label_create(box_claude_5h);
     lv_label_set_text(lbl_c5_val, "100%");
     lv_obj_set_style_text_color(lbl_c5_val, lv_color_hex(0xFB923C), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_c5_val, &lv_font_montserrat_20, LV_PART_MAIN);
-    lv_obj_align(lbl_c5_val, LV_ALIGN_TOP_RIGHT, -4, 2);
+    lv_obj_align(lbl_c5_val, LV_ALIGN_TOP_RIGHT, -6, 4);
 
     bar_c5 = lv_bar_create(box_claude_5h);
-    lv_obj_set_size(bar_c5, 144, 10);
-    lv_obj_set_pos(bar_c5, 4, 32);
+    lv_obj_set_size(bar_c5, 208, 12);
+    lv_obj_set_pos(bar_c5, 4, 48);
     lv_bar_set_range(bar_c5, 0, 100);
     lv_obj_set_style_bg_color(bar_c5, lv_color_hex(0x27272A), LV_PART_MAIN);
     lv_obj_set_style_bg_color(bar_c5, lv_color_hex(0xF97316), LV_PART_INDICATOR);
@@ -834,12 +1012,12 @@ void buildDashboardUI() {
     lbl_c5_sub = lv_label_create(box_claude_5h);
     lv_label_set_text(lbl_c5_sub, "Quota available");
     lv_obj_set_style_text_font(lbl_c5_sub, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_set_pos(lbl_c5_sub, 4, 52);
+    lv_obj_set_pos(lbl_c5_sub, 6, 72);
 
     // Box 4: Claude Weekly
     box_claude_wk = lv_obj_create(scr_dashboard);
-    lv_obj_set_size(box_claude_wk, 158, 88);
-    lv_obj_set_pos(box_claude_wk, 160, 142);
+    lv_obj_set_size(box_claude_wk, 224, 105);
+    lv_obj_set_pos(box_claude_wk, 246, 172);
     lv_obj_set_style_bg_color(box_claude_wk, lv_color_hex(0x18181B), LV_PART_MAIN);
     lv_obj_set_style_border_color(box_claude_wk, lv_color_hex(0xF97316), LV_PART_MAIN);
     lv_obj_set_style_border_width(box_claude_wk, 1, LV_PART_MAIN);
@@ -851,17 +1029,17 @@ void buildDashboardUI() {
     lv_label_set_text(lbl_cw_t, "Weekly");
     lv_obj_set_style_text_color(lbl_cw_t, lv_color_hex(0xFB923C), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_cw_t, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_set_pos(lbl_cw_t, 4, 4);
+    lv_obj_set_pos(lbl_cw_t, 6, 6);
 
     lbl_cw_val = lv_label_create(box_claude_wk);
-    lv_label_set_text(lbl_cw_val, "66%");
+    lv_label_set_text(lbl_cw_val, "82%");
     lv_obj_set_style_text_color(lbl_cw_val, lv_color_hex(0xFB923C), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_cw_val, &lv_font_montserrat_20, LV_PART_MAIN);
-    lv_obj_align(lbl_cw_val, LV_ALIGN_TOP_RIGHT, -4, 2);
+    lv_obj_align(lbl_cw_val, LV_ALIGN_TOP_RIGHT, -6, 4);
 
     bar_cw = lv_bar_create(box_claude_wk);
-    lv_obj_set_size(bar_cw, 144, 10);
-    lv_obj_set_pos(bar_cw, 4, 32);
+    lv_obj_set_size(bar_cw, 208, 12);
+    lv_obj_set_pos(bar_cw, 4, 48);
     lv_bar_set_range(bar_cw, 0, 100);
     lv_obj_set_style_bg_color(bar_cw, lv_color_hex(0x27272A), LV_PART_MAIN);
     lv_obj_set_style_bg_color(bar_cw, lv_color_hex(0xF97316), LV_PART_INDICATOR);
@@ -872,28 +1050,28 @@ void buildDashboardUI() {
     lv_label_set_text(lbl_cw_sub, "Refresh in: 2d 15h");
     lv_obj_set_style_text_color(lbl_cw_sub, lv_color_hex(0x94A3B8), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_cw_sub, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_set_pos(lbl_cw_sub, 4, 52);
+    lv_obj_set_pos(lbl_cw_sub, 6, 72);
 
     // --- Footer Ticker ---
     lbl_ticker = lv_label_create(scr_dashboard);
     lv_label_set_text(lbl_ticker, "* Initializing 24/7 AI Monitor...");
     lv_obj_set_style_text_color(lbl_ticker, lv_color_hex(0xF97316), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_ticker, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_set_size(lbl_ticker, 300, 20);
+    lv_obj_set_size(lbl_ticker, 460, 20);
     lv_label_set_long_mode(lbl_ticker, LV_LABEL_LONG_DOT);
-    lv_obj_align(lbl_ticker, LV_ALIGN_BOTTOM_MID, 0, -3);
+    lv_obj_align(lbl_ticker, LV_ALIGN_BOTTOM_MID, 0, -4);
 }
 
 lv_obj_t *createOpenRouterSpendCard(lv_obj_t *parent, const char *title, lv_coord_t x, lv_obj_t **value) {
     lv_obj_t *card = lv_obj_create(parent);
-    lv_obj_set_size(card, 64, 72);
-    lv_obj_set_pos(card, x, 37);
+    lv_obj_set_size(card, 94, 88);
+    lv_obj_set_pos(card, x, 44);
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(card, lv_color_hex(0x151D1C), LV_PART_MAIN);
     lv_obj_set_style_border_color(card, lv_color_hex(0x345048), LV_PART_MAIN);
     lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 9, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(card, 6, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, 8, LV_PART_MAIN);
     lv_obj_t *caption = lv_label_create(card);
     lv_label_set_text(caption, title);
     lv_obj_set_style_text_color(caption, lv_color_hex(0x94A3B8), LV_PART_MAIN);
@@ -901,8 +1079,8 @@ lv_obj_t *createOpenRouterSpendCard(lv_obj_t *parent, const char *title, lv_coor
     *value = lv_label_create(card);
     lv_label_set_text(*value, "$0.00");
     lv_obj_set_style_text_color(*value, lv_color_hex(0xA7F3D0), LV_PART_MAIN);
-    lv_obj_set_style_text_font(*value, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_align(*value, LV_ALIGN_BOTTOM_LEFT, 0, -4);
+    lv_obj_set_style_text_font(*value, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_align(*value, LV_ALIGN_BOTTOM_LEFT, 0, -2);
     return card;
 }
 
@@ -916,15 +1094,15 @@ void buildOpenRouterUI() {
 
     or_account_label = lv_label_create(scr_openrouter);
     lv_label_set_text(or_account_label, "OpenRouter");
-    lv_obj_set_size(or_account_label, 236, 24);
+    lv_obj_set_size(or_account_label, 320, 24);
     lv_label_set_long_mode(or_account_label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_color(or_account_label, lv_color_hex(0xF8FAFC), LV_PART_MAIN);
     lv_obj_set_style_text_font(or_account_label, &lv_font_montserrat_16, LV_PART_MAIN);
     lv_obj_set_pos(or_account_label, 12, 7);
 
     lv_obj_t *home = lv_btn_create(scr_openrouter);
-    lv_obj_set_size(home, 28, 26);
-    lv_obj_set_pos(home, 286, 2);
+    lv_obj_set_size(home, 48, 38);
+    lv_obj_set_pos(home, 422, 1);
     lv_obj_set_style_radius(home, 6, LV_PART_MAIN);
     lv_obj_set_style_bg_color(home, lv_color_hex(0x20302C), LV_PART_MAIN);
     lv_obj_set_style_border_color(home, lv_color_hex(0xA7F3D0), LV_PART_MAIN);
@@ -937,49 +1115,49 @@ void buildOpenRouterUI() {
     lv_obj_center(homeIcon);
 
     or_balance_arc = lv_arc_create(scr_openrouter);
-    lv_obj_set_size(or_balance_arc, 104, 104);
-    lv_obj_set_pos(or_balance_arc, 4, 34);
+    lv_obj_set_size(or_balance_arc, 120, 120);
+    lv_obj_set_pos(or_balance_arc, 10, 36);
     lv_arc_set_range(or_balance_arc, 0, 100);
     lv_arc_set_bg_angles(or_balance_arc, 135, 45);
     lv_arc_set_value(or_balance_arc, 0);
     lv_obj_remove_style(or_balance_arc, NULL, LV_PART_KNOB);
     lv_obj_clear_flag(or_balance_arc, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_arc_width(or_balance_arc, 9, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(or_balance_arc, 10, LV_PART_MAIN);
     lv_obj_set_style_arc_color(or_balance_arc, lv_color_hex(0x263330), LV_PART_MAIN);
-    lv_obj_set_style_arc_width(or_balance_arc, 9, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(or_balance_arc, 10, LV_PART_INDICATOR);
     lv_obj_set_style_arc_color(or_balance_arc, lv_color_hex(0xA7F3D0), LV_PART_INDICATOR);
     or_balance_value = lv_label_create(or_balance_arc);
     lv_label_set_text(or_balance_value, "$0.00");
     lv_obj_set_style_text_color(or_balance_value, lv_color_hex(0xF8FAFC), LV_PART_MAIN);
     lv_obj_set_style_text_font(or_balance_value, &lv_font_montserrat_20, LV_PART_MAIN);
-    lv_obj_align(or_balance_value, LV_ALIGN_CENTER, 0, -5);
+    lv_obj_align(or_balance_value, LV_ALIGN_CENTER, 0, -6);
     lv_obj_t *remaining = lv_label_create(or_balance_arc);
     lv_label_set_text(remaining, "remaining");
     lv_obj_set_style_text_color(remaining, lv_color_hex(0x94A3B8), LV_PART_MAIN);
     lv_obj_set_style_text_font(remaining, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_align(remaining, LV_ALIGN_CENTER, 0, 17);
+    lv_obj_align(remaining, LV_ALIGN_CENTER, 0, 18);
 
-    createOpenRouterSpendCard(scr_openrouter, "Today", 114, &or_today_value);
-    createOpenRouterSpendCard(scr_openrouter, "Week", 181, &or_week_value);
-    createOpenRouterSpendCard(scr_openrouter, "Month", 248, &or_month_value);
+    createOpenRouterSpendCard(scr_openrouter, "Today", 146, &or_today_value);
+    createOpenRouterSpendCard(scr_openrouter, "Week", 252, &or_week_value);
+    createOpenRouterSpendCard(scr_openrouter, "Month", 358, &or_month_value);
 
     lv_obj_t *chartCard = lv_obj_create(scr_openrouter);
-    lv_obj_set_size(chartCard, 190, 78);
-    lv_obj_set_pos(chartCard, 4, 145);
+    lv_obj_set_size(chartCard, 260, 115);
+    lv_obj_set_pos(chartCard, 10, 168);
     lv_obj_clear_flag(chartCard, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(chartCard, lv_color_hex(0x121817), LV_PART_MAIN);
     lv_obj_set_style_border_color(chartCard, lv_color_hex(0x2E403B), LV_PART_MAIN);
     lv_obj_set_style_border_width(chartCard, 1, LV_PART_MAIN);
     lv_obj_set_style_radius(chartCard, 9, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(chartCard, 5, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(chartCard, 6, LV_PART_MAIN);
     lv_obj_t *chartTitle = lv_label_create(chartCard);
     lv_label_set_text(chartTitle, "Last 7 completed days");
     lv_obj_set_style_text_color(chartTitle, lv_color_hex(0x94A3B8), LV_PART_MAIN);
     lv_obj_set_style_text_font(chartTitle, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_set_pos(chartTitle, 2, -1);
+    lv_obj_set_pos(chartTitle, 4, 0);
     or_chart = lv_chart_create(chartCard);
-    lv_obj_set_size(or_chart, 176, 48);
-    lv_obj_set_pos(or_chart, 1, 19);
+    lv_obj_set_size(or_chart, 244, 76);
+    lv_obj_set_pos(or_chart, 2, 22);
     lv_chart_set_type(or_chart, LV_CHART_TYPE_BAR);
     lv_chart_set_point_count(or_chart, 7);
     lv_chart_set_range(or_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
@@ -992,33 +1170,33 @@ void buildOpenRouterUI() {
     for (uint16_t i = 0; i < 7; ++i) lv_chart_set_value_by_id(or_chart, or_chart_series, i, 0);
 
     lv_obj_t *modelCard = lv_obj_create(scr_openrouter);
-    lv_obj_set_size(modelCard, 117, 78);
-    lv_obj_set_pos(modelCard, 199, 145);
+    lv_obj_set_size(modelCard, 192, 115);
+    lv_obj_set_pos(modelCard, 278, 168);
     lv_obj_clear_flag(modelCard, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(modelCard, lv_color_hex(0x181526), LV_PART_MAIN);
     lv_obj_set_style_border_color(modelCard, lv_color_hex(0x594D73), LV_PART_MAIN);
     lv_obj_set_style_border_width(modelCard, 1, LV_PART_MAIN);
     lv_obj_set_style_radius(modelCard, 9, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(modelCard, 7, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(modelCard, 8, LV_PART_MAIN);
     lv_obj_t *modelTitle = lv_label_create(modelCard);
     lv_label_set_text(modelTitle, "TOP MODEL - 7D");
     lv_obj_set_style_text_color(modelTitle, lv_color_hex(0xC4B5FD), LV_PART_MAIN);
     lv_obj_set_style_text_font(modelTitle, &lv_font_montserrat_12, LV_PART_MAIN);
     or_top_model = lv_label_create(modelCard);
     lv_label_set_text(or_top_model, "No completed usage");
-    lv_obj_set_size(or_top_model, 99, 43);
+    lv_obj_set_size(or_top_model, 172, 70);
     lv_label_set_long_mode(or_top_model, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(or_top_model, lv_color_hex(0xF8FAFC), LV_PART_MAIN);
-    lv_obj_set_style_text_font(or_top_model, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_set_pos(or_top_model, 0, 22);
+    lv_obj_set_style_text_font(or_top_model, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(or_top_model, 0, 24);
 
     or_state_label = lv_label_create(scr_openrouter);
     lv_label_set_text(or_state_label, "Waiting for cached telemetry");
-    lv_obj_set_size(or_state_label, 300, 14);
+    lv_obj_set_size(or_state_label, 460, 16);
     lv_label_set_long_mode(or_state_label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_color(or_state_label, lv_color_hex(0x94A3B8), LV_PART_MAIN);
     lv_obj_set_style_text_font(or_state_label, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_set_pos(or_state_label, 10, 224);
+    lv_obj_align(or_state_label, LV_ALIGN_BOTTOM_MID, 0, -4);
 }
 
 void fetchQuotaData() {
@@ -1029,7 +1207,7 @@ void fetchQuotaData() {
 
     lv_obj_set_style_text_color(lbl_next_icon, lv_color_hex(0x10B981), LV_PART_MAIN);
 
-    HTTPClient http;
+    HTTPClient &http = telemetryHttp;
     String payload;
     int httpCode = HTTP_CODE_OK;
     if (prefetchedTelemetryPayload.length() > 0) {
@@ -1043,9 +1221,10 @@ void fetchQuotaData() {
         http.setConnectTimeout(TELEMETRY_CONNECT_TIMEOUT_MS);
         http.setTimeout(TELEMETRY_READ_TIMEOUT_MS);
         addTelemetryAuth(http);
-        httpCode = http.GET();
+        httpCode = animatedGet(http);
     }
 
+    fetchRetryInterval = httpCode == HTTP_CODE_OK ? FETCH_INTERVAL : min(fetchRetryInterval * 2UL, 30000UL);
     if (httpCode == HTTP_CODE_OK) {
         int payloadSize = payload.length() > 0 ? static_cast<int>(payload.length()) : http.getSize();
         if (payloadSize > static_cast<int>(MAX_TELEMETRY_BYTES)) {
@@ -1054,7 +1233,7 @@ void fetchQuotaData() {
             return;
         }
         if (payload.length() == 0) {
-            payload = http.getString();
+            payload = animatedBody(http);
         }
         if (payload.length() > MAX_TELEMETRY_BYTES) {
             http.end();
@@ -1076,6 +1255,10 @@ void fetchQuotaData() {
             }
             String default_ticker = "* " + accountName;
             String ticker = doc["status_ticker"] | default_ticker;
+
+            String identity = provider + ":" + accountName;
+            bool motionReset = motionAccount != identity;
+            motionAccount = identity;
 
             // Apply Header
             lv_label_set_text(lbl_account_name, accountName.c_str());
@@ -1130,25 +1313,25 @@ void fetchQuotaData() {
                 // Update Gemini 5H Box (Progress bar = % remaining)
                 String g5_val_str = String(g_5h) + "%";
                 lv_label_set_text(lbl_g5_val, g5_val_str.c_str());
-                lv_bar_set_value(bar_g5, g_5h, LV_ANIM_ON);
+                cyd_motion_bar(bar_g5, g_5h, motionReset);
                 lv_label_set_text(lbl_g5_sub, g_5h_sub.c_str());
 
                 // Update Gemini Weekly Box
                 String gw_val_str = String(g_wk) + "%";
                 lv_label_set_text(lbl_gw_val, gw_val_str.c_str());
-                lv_bar_set_value(bar_gw, g_wk, LV_ANIM_ON);
+                cyd_motion_bar(bar_gw, g_wk, motionReset);
                 lv_label_set_text(lbl_gw_sub, g_wk_sub.c_str());
 
                 // Update Claude 5H Box
                 String c5_val_str = String(c_5h) + "%";
                 lv_label_set_text(lbl_c5_val, c5_val_str.c_str());
-                lv_bar_set_value(bar_c5, c_5h, LV_ANIM_ON);
+                cyd_motion_bar(bar_c5, c_5h, motionReset);
                 lv_label_set_text(lbl_c5_sub, c_5h_sub.c_str());
 
                 // Update Claude Weekly Box
                 String cw_val_str = String(c_wk) + "%";
                 lv_label_set_text(lbl_cw_val, cw_val_str.c_str());
-                lv_bar_set_value(bar_cw, c_wk, LV_ANIM_ON);
+                cyd_motion_bar(bar_cw, c_wk, motionReset);
                 lv_label_set_text(lbl_cw_sub, c_wk_sub.c_str());
 
             } else {
@@ -1181,19 +1364,34 @@ void fetchQuotaData() {
                 String p_tag = doc["primary_tag"] | "Usage Limit";
                 String p_sub = doc["primary_sub"] | "100% left";
                 String plan_type = doc["plan_type"] | "ChatGPT Plus";
+                int weekly_left = doc["codex_weekly_pct"] | left_pct;
+                String weekly_sub = doc["codex_weekly_sub"] | "Weekly reset unavailable";
 
                 lv_label_set_text(lbl_primary_val, p_val.c_str());
                 lv_label_set_text(lbl_primary_tag, p_tag.c_str());
                 lv_obj_set_style_text_color(lbl_primary_tag, lv_color_hex(0xE4E4E7), LV_PART_MAIN);
                 lv_obj_set_style_text_font(lbl_primary_val, &lv_font_montserrat_32, LV_PART_MAIN);
 
-                lv_obj_set_size(bar_primary, 296, 14);
-                lv_obj_set_pos(bar_primary, 4, 52);
-                lv_bar_set_value(bar_primary, left_pct, LV_ANIM_ON);
+                lv_obj_set_size(bar_primary, 440, 16);
+                lv_obj_set_pos(bar_primary, 8, 54);
+                cyd_motion_bar(bar_primary, left_pct, motionReset);
 
                 lv_label_set_text(lbl_primary_sub, p_sub.c_str());
                 lv_obj_set_style_text_font(lbl_primary_sub, &lv_font_montserrat_14, LV_PART_MAIN);
-                lv_obj_set_pos(lbl_primary_sub, 6, 80);
+                lv_obj_set_pos(lbl_primary_sub, 10, 80);
+
+                String weekly_value = String(weekly_left) + "% left";
+                lv_label_set_text(lbl_weekly_val, weekly_value.c_str());
+                lv_label_set_text(lbl_weekly_tag, "Weekly Limit");
+                lv_obj_set_size(bar_weekly, 440, 12);
+                lv_obj_set_pos(bar_weekly, 8, 36);
+                cyd_motion_bar(bar_weekly, weekly_left, motionReset);
+                lv_label_set_text(lbl_weekly_sub, weekly_sub.c_str());
+                lv_obj_set_pos(lbl_weekly_sub, 10, 52);
+                const int weekly_used = 100 - weekly_left;
+                const uint32_t weekly_color = weekly_used > 80 ? 0xF43F5E : weekly_used > 50 ? 0xF59E0B : 0x10B981;
+                lv_obj_set_style_text_color(lbl_weekly_val, lv_color_hex(weekly_color), LV_PART_MAIN);
+                lv_obj_set_style_bg_color(bar_weekly, lv_color_hex(weekly_color), LV_PART_INDICATOR);
 
                 // Color-code primary bar & value
                 if (p_pct >= 100) {
@@ -1221,10 +1419,16 @@ void fetchQuotaData() {
                 lv_obj_set_style_text_color(lbl_server_status, lv_color_hex(0x10B981), LV_PART_MAIN);
             }
 
-            // Flash Green LED on update
+            if (motionReset) {
+                if (provider == "antigravity") {
+                    cyd_motion_enter(box_gemini_5h, 0); cyd_motion_enter(box_claude_5h, 60);
+                    cyd_motion_enter(box_gemini_wk, 120); cyd_motion_enter(box_claude_wk, 180);
+                } else if (provider != "error") {
+                    cyd_motion_enter(card_primary, 0); cyd_motion_enter(card_details, 90);
+                }
+            }
             digitalWrite(LED_GREEN, LOW);
-            delay(20);
-            digitalWrite(LED_GREEN, HIGH);
+            greenLedUntil = millis() + 20;
         } else {
             showTelemetryError("Monitor returned invalid telemetry JSON.");
         }
@@ -1235,12 +1439,101 @@ void fetchQuotaData() {
     } else {
         Serial.printf("[NET] LAN request failed: HTTPClient=%d (%s)\n",
                       httpCode, HTTPClient::errorToString(httpCode).c_str());
-        showTelemetryError("Local monitor connection failed. Check LAN address and server.");
+        showTelemetryError(WiFi.status() == WL_CONNECTED ? "Wi-Fi connected; monitor server unreachable. Retrying." : "Wi-Fi disconnected. Reconnecting automatically.");
     }
     http.end();
 }
 
+void pollDisplayCommand() {
+    if (WiFi.status() != WL_CONNECTED || millis() - lastDisplayCommandPoll < commandPollInterval) return;
+    lastDisplayCommandPoll = millis();
+    String url = String(TELEMETRY_SERVER_URL);
+    url.replace("/api/v1/cyd-status", "/api/v1/display-command");
+    url += "?after=" + lastDisplayCommandId;
+    commandPollInterval = min(commandPollInterval * 2UL, 10000UL);
+    HTTPClient &http = telemetryHttp;
+    if (!beginTelemetryRequest(http, telemetryPlainClient, url)) return;
+    http.setReuse(true);
+    http.setConnectTimeout(TELEMETRY_CONNECT_TIMEOUT_MS);
+    http.setTimeout(TELEMETRY_READ_TIMEOUT_MS);
+    addTelemetryAuth(http);
+    const int code = animatedGet(http);
+    if (code != HTTP_CODE_OK || http.getSize() > static_cast<int>(MAX_TELEMETRY_BYTES)) {
+        http.end();
+        return;
+    }
+    const String payload = animatedBody(http);
+    http.end();
+    if (payload.length() > MAX_TELEMETRY_BYTES) return;
+    JsonDocument doc;
+    const DeserializationError error = deserializeJson(doc, payload);
+    if (error) return;
+    commandPollInterval = COMMAND_POLL_INTERVAL;
+    displayCommandSeen = true;
+    String commandId = doc["id"] | "";
+    String app = doc["app"] | "";
+    const uint16_t rotation = doc["rotation"] | 0;
+    applyDisplayRotation(rotation);
+    if (commandId.length() == 0 || commandId == lastDisplayCommandId) return;
+    lastDisplayCommandId = commandId;
+    prefetchedTelemetryPayload = "";
+    if (app == "usage" && doc["telemetry"].is<JsonObject>()) {
+        serializeJson(doc["telemetry"], prefetchedTelemetryPayload);
+    }
+    if (app == "openrouter") {
+        homeRequested = false;
+        Serial.println("[REMOTE] Dashboard -> OpenRouter");
+        openUsageRequested = false;
+        if (activeScreen != AppScreen::OpenRouter) openRouterRequested = true;
+        else fetchOpenRouterData();
+    } else if (app == "usage") {
+        homeRequested = false;
+        Serial.println("[REMOTE] Dashboard -> Usage Monitor");
+        openRouterRequested = false;
+        usageFetchPending = true;
+        if (activeScreen != AppScreen::UsageMonitor) openUsageRequested = true;
+    } else if (app == "launcher") {
+        Serial.println("[REMOTE] Dashboard -> Launcher");
+        openUsageRequested = false;
+        openRouterRequested = false;
+        if (activeScreen != AppScreen::MainMenu) homeRequested = true;
+    }
+}
+
+void reportDisplayState() {
+    if (!displayCommandSeen || !displayStateReportPending || WiFi.status() != WL_CONNECTED) return;
+    if (millis() - lastDisplayStateReportAttempt < FETCH_INTERVAL) return;
+    lastDisplayStateReportAttempt = millis();
+
+    const char *app = "launcher";
+    if (activeScreen == AppScreen::UsageMonitor) app = "usage";
+    else if (activeScreen == AppScreen::OpenRouter) app = "openrouter";
+
+    String url = String(TELEMETRY_SERVER_URL);
+    url.replace("/api/v1/cyd-status", "/api/v1/display-state");
+    HTTPClient &http = telemetryHttp;
+    if (!beginTelemetryRequest(http, telemetryPlainClient, url)) return;
+    http.setReuse(true);
+    http.setConnectTimeout(TELEMETRY_CONNECT_TIMEOUT_MS);
+    http.setTimeout(TELEMETRY_READ_TIMEOUT_MS);
+    addTelemetryAuth(http);
+    http.addHeader("Content-Type", "application/json");
+
+    JsonDocument doc;
+    doc["app"] = app;
+    doc["rotation"] = displayRotationDegrees;
+    String payload;
+    serializeJson(doc, payload);
+    const int code = animatedPost(http, payload);
+    http.end();
+    if (code == HTTP_CODE_OK) {
+        displayStateReportPending = false;
+        Serial.printf("[SYNC] Reported %s at %u degrees\n", app, displayRotationDegrees);
+    }
+}
+
 void showOpenRouterError(const String &detail) {
+    cyd_motion_openrouter_error();
     lv_label_set_text(or_balance_value, "--");
     lv_arc_set_value(or_balance_arc, 0);
     lv_label_set_text(or_today_value, "--");
@@ -1260,13 +1553,14 @@ void fetchOpenRouterData() {
     }
     String url = String(TELEMETRY_SERVER_URL);
     url.replace("/api/v1/cyd-status", "/api/v1/openrouter-status");
-    HTTPClient http;
+    HTTPClient &http = telemetryHttp;
     if (!beginTelemetryRequest(http, telemetryPlainClient, url)) return;
     http.setReuse(true);
     http.setConnectTimeout(TELEMETRY_CONNECT_TIMEOUT_MS);
     http.setTimeout(TELEMETRY_READ_TIMEOUT_MS);
     addTelemetryAuth(http);
-    const int code = http.GET();
+    const int code = animatedGet(http);
+    fetchRetryInterval = code == HTTP_CODE_OK ? FETCH_INTERVAL : min(fetchRetryInterval * 2UL, 30000UL);
     if (code != HTTP_CODE_OK) {
         if (code == HTTP_CODE_UNAUTHORIZED) showOpenRouterError("Device token rejected");
         else showOpenRouterError(code > 0 ? "Monitor returned HTTP " + String(code) : "Local monitor connection failed");
@@ -1278,7 +1572,7 @@ void fetchOpenRouterData() {
         showOpenRouterError("Response exceeded safe size");
         return;
     }
-    String payload = http.getString();
+    String payload = animatedBody(http);
     http.end();
     if (payload.length() > MAX_TELEMETRY_BYTES) {
         showOpenRouterError("Response exceeded safe size");
@@ -1303,22 +1597,23 @@ void fetchOpenRouterData() {
     const String today = "$" + String(static_cast<float>(doc["usage_today"] | 0.0f), 2);
     const String week = "$" + String(static_cast<float>(doc["usage_week"] | 0.0f), 2);
     const String month = "$" + String(static_cast<float>(doc["usage_month"] | 0.0f), 2);
-    lv_label_set_text(or_balance_value, balanceText.c_str());
-    lv_arc_set_value(or_balance_arc, percent);
-    lv_label_set_text(or_today_value, today.c_str());
-    lv_label_set_text(or_week_value, week.c_str());
-    lv_label_set_text(or_month_value, month.c_str());
+    cyd_motion_money(or_balance_value, balanceText.c_str(), false);
+    cyd_motion_arc(percent, false);
+    cyd_motion_money(or_today_value, today.c_str(), false);
+    cyd_motion_money(or_week_value, week.c_str(), false);
+    cyd_motion_money(or_month_value, month.c_str(), false);
     String model = doc["top_model"]["name"] | "No completed usage";
     lv_label_set_text(or_top_model, model.c_str());
     JsonArray daily = doc["daily_usage"].as<JsonArray>();
     float maximum = 0.0f;
     for (JsonObject point : daily) maximum = max(maximum, static_cast<float>(point["usage"] | 0.0f));
+    int chartValues[7];
     for (uint16_t i = 0; i < 7; ++i) {
         float value = i < daily.size() ? static_cast<float>(daily[i]["usage"] | 0.0f) : 0.0f;
         int normalized = maximum > 0.0f ? static_cast<int>(roundf(value * 100.0f / maximum)) : 0;
-        lv_chart_set_value_by_id(or_chart, or_chart_series, i, normalized);
+        chartValues[i] = normalized;
     }
-    lv_chart_refresh(or_chart);
+    cyd_motion_chart(chartValues, false);
     lv_label_set_text(or_state_label, "Cached OpenRouter API - refreshes every 90s");
     lv_obj_set_style_text_color(or_state_label, lv_color_hex(0x94A3B8), LV_PART_MAIN);
 }
@@ -1329,6 +1624,58 @@ void serviceWifiState() {
     const bool becameConnected = status == WL_CONNECTED && previousWifiStatus != WL_CONNECTED;
     const unsigned long now = millis();
 
+    if (wifiDisconnectReasonPending) {
+        const uint8_t reason = lastWifiDisconnectReason;
+        wifiDisconnectReasonPending = false;
+        Serial.printf("[WIFI] Disconnected: reason=%u (%s)\n", reason,
+                      WiFi.disconnectReasonName(static_cast<wifi_err_reason_t>(reason)));
+    }
+
+    if (status == WL_CONNECTED) {
+        if (becameConnected) {
+            Serial.printf("[WIFI] Connected: RSSI=%d dBm, channel=%d\n", WiFi.RSSI(), WiFi.channel());
+        }
+        wifiEverConnected = true;
+        wifiDisconnectedSince = 0;
+        lastWifiReconnectAttempt = 0;
+        wifiRadioRecoveryAttempted = false;
+    } else {
+        if (wifiDisconnectedSince == 0) {
+            // Zero is the sentinel, so preserve elapsed-time arithmetic even if
+            // the first sample happens during the initial millisecond of boot.
+            wifiDisconnectedSince = now == 0 ? 1 : now;
+            Serial.printf("[WIFI] Connection unavailable: status=%d\n", static_cast<int>(status));
+        }
+
+        const unsigned long disconnectedFor = now - wifiDisconnectedSince;
+        if (disconnectedFor >= WIFI_RADIO_RECOVERY_AFTER_MS && !wifiRadioRecoveryAttempted) {
+            wifiRadioRecoveryAttempted = true;
+            lastWifiReconnectAttempt = now;
+            Serial.println("[WIFI] Recovery stage 2: reinitializing station radio");
+            WiFi.disconnect(true, false);
+            WiFi.mode(WIFI_STA);
+            WiFi.setSleep(false);
+            WiFi.setAutoReconnect(true);
+            WiFi.begin(WIFI_SSID, WIFI_PASS);
+        } else if (disconnectedFor >= WIFI_EXPLICIT_RECONNECT_AFTER_MS &&
+                   (lastWifiReconnectAttempt == 0 ||
+                    now - lastWifiReconnectAttempt >= WIFI_EXPLICIT_RECONNECT_INTERVAL_MS)) {
+            lastWifiReconnectAttempt = now;
+            Serial.printf("[WIFI] Recovery stage 1: explicit reconnect (%s)\n",
+                          WiFi.reconnect() ? "started" : "not started");
+        }
+
+        // A full reboot is the last resort and is only allowed after this boot
+        // has held a valid connection. That prevents reboot loops when the AP is
+        // intentionally down or credentials are wrong.
+        if (wifiEverConnected && disconnectedFor >= WIFI_RESTART_AFTER_MS) {
+            Serial.println("[WIFI] Recovery stage 3: prolonged outage, restarting device");
+            Serial.flush();
+            delay(50);
+            ESP.restart();
+        }
+    }
+
     if (becameConnected && (activeScreen == AppScreen::UsageMonitor || activeScreen == AppScreen::OpenRouter)) {
         usageFetchPending = true;
     }
@@ -1338,11 +1685,11 @@ void serviceWifiState() {
         if (status == WL_CONNECTED) {
             setLauncherWifiState("Online", 0xA7F3D0);
             digitalWrite(LED_BLUE, HIGH);
-        } else if (now - wifiBeginTime < 15000) {
+        } else if (wifiDisconnectedSince != 0 && now - wifiDisconnectedSince < 15000) {
             setLauncherWifiState("Connecting", 0xFDE68A);
             digitalWrite(LED_BLUE, ((now / 500) % 2) ? HIGH : LOW);
         } else {
-            setLauncherWifiState("Offline", 0xFBCFE8);
+            setLauncherWifiState("Recovering", 0xFBCFE8);
             digitalWrite(LED_BLUE, HIGH);
         }
     }
@@ -1352,6 +1699,7 @@ void serviceWifiState() {
 void setup() {
     Serial.begin(115200);
     delay(300);
+    Serial.printf("[BOOT] reset_reason=%d\n", (int)esp_reset_reason());
 
     // RGB Setup
     pinMode(LED_RED, OUTPUT);
@@ -1361,23 +1709,36 @@ void setup() {
     digitalWrite(LED_GREEN, HIGH);
     digitalWrite(LED_BLUE, HIGH);
 
-    // Touch setup
-    touchSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
-    touch.begin(touchSPI);
-    touch.setRotation(1);
+    // The 4.0-inch E32R40T backlight is active-high on GPIO27.
+    pinMode(TFT_BL, OUTPUT);
+    digitalWrite(TFT_BL, TFT_BACKLIGHT_ON);
 
-    // Display & LVGL Setup
+    // Display Setup
+    displayPreferences.begin("cyd-display", false);
+    displayRotationDegrees = displayPreferences.getUShort("rotation", 0) == 180 ? 180 : 0;
     tft.init();
-    tft.setRotation(1); // Landscape 320x240 right-side up
+    tft.setRotation(displayRotationDegrees == 180 ? 3 : 1); // Landscape 480x320
+    Serial.printf("[DISPLAY] Restored orientation: %u degrees\n", displayRotationDegrees);
+    uint8_t id1 = tft.readcommand8(0x04, 1);
+    uint8_t id2 = tft.readcommand8(0x04, 2);
+    uint8_t id3 = tft.readcommand8(0x04, 3);
+    Serial.printf("[DISPLAY] Read ID bytes: 0x%02X 0x%02X 0x%02X\n", id1, id2, id3);
+    tft.fillScreen(TFT_BLACK);
+
+    // XPT2046 shares SCK/MOSI/MISO with the display and uses CS=33.
+    Serial.println("[TOUCH] Using E32R40T XPT2046 resistive touch (shared SPI, CS=33)");
+    uint16_t calData[5] = { 200, 3600, 240, 3700, 7 };
+    tft.setTouch(calData);
 
     lv_init();
-    lv_disp_draw_buf_init(&draw_buf, buf, NULL, 320 * 30);
+    lv_disp_draw_buf_init(&draw_buf, buf, NULL, 480 * 20);
 
     static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res = 320;
-    disp_drv.ver_res = 240;
+    disp_drv.hor_res = 480;
+    disp_drv.ver_res = 320;
     disp_drv.flush_cb = my_disp_flush;
+    disp_drv.monitor_cb = displayMonitor;
     disp_drv.draw_buf = &draw_buf;
     lv_disp_drv_register(&disp_drv);
 
@@ -1392,21 +1753,44 @@ void setup() {
     buildLauncherUI();
     buildDashboardUI();
     buildOpenRouterUI();
+    cyd_motion_bar_init(bar_primary, 0); cyd_motion_bar_init(bar_weekly, 90);
+    cyd_motion_bar_init(bar_g5, 0); cyd_motion_bar_init(bar_c5, 60);
+    cyd_motion_bar_init(bar_gw, 120); cyd_motion_bar_init(bar_cw, 180);
+    cyd_motion_arc_init(or_balance_arc);
+    cyd_motion_money_init(or_balance_value, 0); cyd_motion_money_init(or_today_value, 60);
+    cyd_motion_money_init(or_week_value, 120); cyd_motion_money_init(or_month_value, 180);
+    cyd_motion_chart_init(or_chart, or_chart_series);
+    cyd_motion_screen_init(scr_launcher); cyd_motion_screen_init(scr_dashboard); cyd_motion_screen_init(scr_openrouter);
+    lv_obj_t *cards[] = {card_primary, card_details, box_gemini_5h, box_claude_5h, box_gemini_wk, box_claude_wk,
+        lv_obj_get_parent(or_today_value), lv_obj_get_parent(or_week_value), lv_obj_get_parent(or_month_value), lv_obj_get_parent(or_chart)};
+    for (lv_obj_t *card : cards) cyd_motion_card_init(card);
+    cyd_motion_init();
+    telemetryDone = xSemaphoreCreateBinary();
+    if (telemetryDone && xTaskCreate(telemetryWorker, "cyd-http", 6144, NULL, 1, &telemetryWorkerTask) != pdPASS)
+        telemetryWorkerTask = nullptr;
     lv_scr_load(scr_launcher);
     lv_timer_handler();
 
     // Start Wi-Fi without blocking the launcher. Connection state, recovery,
     // and the first app fetch are serviced from loop().
+    WiFi.onEvent(onWifiEvent, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
     WiFi.persistent(false);
+    WiFi.mode(WIFI_STA);
+    // This display is continuously USB-powered. Disabling the default modem
+    // sleep removes DTIM/listen timing from the always-on LAN telemetry path,
+    // trading a small power increase for lower latency and fewer missed frames.
+    WiFi.setSleep(false);
     WiFi.setAutoReconnect(true);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
-    wifiBeginTime = millis();
     previousWifiStatus = WiFi.status();
     serviceWifiState();
     printSimulatorKeybinds();
 }
 
 void loop() {
+    static unsigned long lastDiagnostics;
+    if (millis() - lastDiagnostics >= 30000) { lastDiagnostics = millis(); printDeviceDiagnostics(); }
+    serviceUpdateLed();
     lv_timer_handler();
     delay(5);
 
@@ -1434,6 +1818,8 @@ void loop() {
             } else {
                 Serial.println("[KEY] Open Usage Monitor before switching accounts.");
             }
+        } else if (c == 'd' || c == 'D') {
+            printDeviceDiagnostics();
         } else if (c == '?') {
             printSimulatorKeybinds();
         }
@@ -1448,33 +1834,37 @@ void loop() {
 
     if (openUsageRequested) {
         openUsageRequested = false;
-        if (activeScreen == AppScreen::MainMenu) {
+        if (activeScreen != AppScreen::UsageMonitor) {
             showUsageMonitorScreen();
         }
     }
 
     if (openRouterRequested) {
         openRouterRequested = false;
-        if (activeScreen == AppScreen::MainMenu) {
+        if (activeScreen != AppScreen::OpenRouter) {
             showOpenRouterScreen();
         }
     }
 
     serviceWifiState();
+    pollDisplayCommand();
+
 
     if (nextAccountRequested && activeScreen == AppScreen::UsageMonitor) {
         nextAccountRequested = false;
         triggerNextAccount();
     }
 
-    if (usageFetchPending && activeScreen != AppScreen::MainMenu) {
+    if (!homeRequested && !openUsageRequested && !openRouterRequested && usageFetchPending && activeScreen != AppScreen::MainMenu) {
         usageFetchPending = false;
         if (activeScreen == AppScreen::UsageMonitor) fetchQuotaData();
         else fetchOpenRouterData();
         lastFetchTime = millis();
-    } else if (activeScreen != AppScreen::MainMenu && millis() - lastFetchTime >= FETCH_INTERVAL) {
+    } else if (!homeRequested && !openUsageRequested && !openRouterRequested && activeScreen != AppScreen::MainMenu && millis() - lastFetchTime >= fetchRetryInterval) {
         lastFetchTime = millis();
         if (activeScreen == AppScreen::UsageMonitor) fetchQuotaData();
         else fetchOpenRouterData();
     }
+    lv_timer_handler();
+    if (!homeRequested && !openUsageRequested && !openRouterRequested) reportDisplayState();
 }
