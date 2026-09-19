@@ -1,3 +1,4 @@
+param([switch]$TestMotion)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $expectedEmscripten = '3.1.74'
@@ -5,6 +6,7 @@ $emsdkRoot = if ($env:EMSDK_ROOT) { $env:EMSDK_ROOT } else { Join-Path $env:USER
 $emsdk = Join-Path $emsdkRoot 'upstream\emscripten\emcc.bat'
 $lvgl = Join-Path $projectRoot '.pio\libdeps\esp32-2432S028R\lvgl'
 $output = Join-Path $projectRoot 'server\static\lvgl'
+if ($TestMotion) { $output = Join-Path $projectRoot '.pio\motion-tests' }
 
 function Get-ProjectRelativePath([string]$path) {
   # System.IO.Path.GetRelativePath is unavailable in Windows PowerShell 5.1,
@@ -30,10 +32,20 @@ $sources = Get-ChildItem -Path (Join-Path $lvgl 'src') -Recurse -Filter *.c |
   Sort-Object |
   ForEach-Object { '"' + $_ + '"' }
 $simulatorSource = Get-ProjectRelativePath (Join-Path $PSScriptRoot 'lvgl_cyd_sim.c')
+if ($TestMotion) { $simulatorSource = Get-ProjectRelativePath (Join-Path $PSScriptRoot 'test_motion.c') }
 $sources += '"' + $simulatorSource + '"'
 Set-Content -Path $responseFile -Value $sources -Encoding utf8
 Push-Location $projectRoot
 try {
+  if ($TestMotion) {
+    & $emsdk "@$responseFile" '-I' $PSScriptRoot '-I' (Join-Path $lvgl 'src') '-DLV_CONF_INCLUDE_SIMPLE' `
+      "-ffile-prefix-map=$projectRoot=." '-s' 'ENVIRONMENT=node' '-s' 'ALLOW_MEMORY_GROWTH=1' '-O1' `
+      '-o' (Join-Path $output 'test_motion.js')
+    if ($LASTEXITCODE -ne 0) { throw 'Motion test compilation failed.' }
+    & node (Join-Path $output 'test_motion.js')
+    if ($LASTEXITCODE -ne 0) { throw 'Motion tests failed.' }
+    return
+  }
   & $emsdk "@$responseFile" `
     '-I' $PSScriptRoot '-I' (Join-Path $lvgl 'src') '-DLV_CONF_INCLUDE_SIMPLE' `
     "-ffile-prefix-map=$projectRoot=." `
@@ -41,6 +53,7 @@ try {
     '-s' 'EXPORTED_FUNCTIONS=["_cyd_init","_cyd_tick","_cyd_pointer","_cyd_publish_provider_mascots","_cyd_set_codex","_cyd_set_antigravity","_cyd_set_error","_cyd_set_openrouter","_cyd_show_launcher","_cyd_show_usage","_cyd_show_openrouter"]' `
     '-s' 'EXPORTED_RUNTIME_METHODS=["ccall"]' '-s' 'ALLOW_MEMORY_GROWTH=1' '-O3' `
     '-o' (Join-Path $output 'cyd_lvgl.js')
+  if ($LASTEXITCODE -ne 0) { throw 'WebAssembly build failed.' }
 } finally {
   Pop-Location
   Remove-Item -LiteralPath $responseFile -Force

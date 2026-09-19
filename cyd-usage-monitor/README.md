@@ -5,6 +5,138 @@ from locally authenticated OpenAI Codex and Google Antigravity CLIs plus
 account-wide OpenRouter credits and spend. A small Docker-hosted dashboard
 manages isolated CLI profiles, private OpenRouter setup, and the CYD API.
 
+## Animated device and browser preview
+
+The physical CYD and WebAssembly preview share `src/ui_motion.h`:
+
+- Home: moving equalizer bars, traveling OpenRouter node highlights, directional screen reveals.
+- ChatGPT: 720 ms eased drains/refills with a 90 ms stagger between quota bars.
+- Antigravity: blue/orange bars and card entrances staggered 60 ms across the grid.
+- OpenRouter: balance arc sweep, exact-cent counters, and chart columns staggered
+  55 ms apart, plus a brief arc highlight on refresh.
+
+Changed bars get a traveling highlight. Identical cached readings get one sweep
+per 30 seconds, without restarting value transitions. Three-second LAN polling
+and provider collection intervals are unchanged. Account updates continue from the currently displayed value without a zero flash.
+
+Navigation uses a 440 ms directional reveal with stationary screens and narrow
+newly exposed redraw strips. Repeated requests coalesce; rapid navigation keeps
+only the latest destination. Returning to a screen preserves counters and bars
+instead of resetting them after arrival. Widget motion pauses during the reveal.
+Pressed controls use color feedback without expensive image zoom rendering.
+
+One 33 ms timer uses fixed storage and small redraw regions. Hidden widgets
+settle without ambient redraws. Errors cancel OpenRouter motion immediately.
+Quota labels show the received reading immediately while bars settle to it.
+Serialized HTTP operations use a worker while the UI task keeps LVGL drawing
+and sampling touch. Navigation still waits for the current bounded operation;
+this is not a device frame-rate guarantee. Update LED flashes no longer block.
+
+Run the normal firmware/server checks plus these commands from the workspace:
+
+```powershell
+./cyd-usage-monitor/simulator/build-wasm.ps1 -TestMotion
+./cyd-usage-monitor/simulator/build-wasm.ps1
+```
+
+The first runs real LVGL tests in Node/WASM for drains, refills, retargeting,
+duplicate readings, limits, refresh sweeps, grid values, counters/charts, errors,
+and rapid navigation. Generated test files stay under ignored `.pio/`.
+
+## Select the CYD account when sending a desktop message
+
+For a replacement computer, follow the [fresh Windows setup and recovery runbook](instructions/CHAT_ACCOUNT_SWITCH_SETUP.md), including private mappings, startup recovery, and real-message acceptance checks.
+
+Windows can use lightweight local hooks to select an existing CYD account when
+sending a message. Codex uses a short-lived hook. Antigravity uses one windowless
+Python process sleeping on Windows directory-change notifications, with no
+transcript polling or additional model requests. A one-minute health check
+refreshes status and checks receiver threads. Neither changes quota collection
+or firmware.
+
+- **ChatGPT/Codex desktop:** `UserPromptSubmit` starts a short-lived official
+  Codex app-server client and calls `account/read` with `refreshToken=false`.
+  It uses the configured desktop Codex home and executable, rechecks identity
+  for every submission (including steering within the same turn), and maps the
+  normalized email hash to a CYD profile.
+  Unknown or ambiguous identities leave the display alone. CLI-originated
+  hooks are ignored. The desktop and identity client must share managed local
+  authentication; externally managed app tokens and remote tasks are not supported.
+- **Antigravity:** the Windows file-event helper selects one configured primary
+  account only when its bounded local transcript tail contains a new `USER_EXPLICIT`
+  `USER_INPUT` marker. Follow-up messages select again; model continuations
+  do not reclaim the display. Antigravity message timestamps determine ordering,
+  so delayed transcript writes cannot override a newer Codex submission. Only
+  message metadata is retained. The transcript
+  adapter is version-dependent and skips unrecognized or stale records. It works
+  across projects under the configured local Antigravity brain directories.
+  Existing messages at helper startup are ignored. The documented global
+  `PreInvocation` hook did not run in the tested desktop installation, so only
+  our Antigravity hook is disabled in favor of this fallback.
+
+First configure the existing Windows user settings `CYD_API_TOKEN` and
+`CYD_USAGE_MONITOR_NEXT_ACCOUNT_URL`. From the checkout, run:
+
+```powershell
+python cyd-usage-monitor/scripts/install-chat-account-switch.py
+python -m unittest discover -s cyd-usage-monitor/scripts -p test_chat_account_switch.py
+```
+
+The installer copies the helper to `%USERPROFILE%\.cyd-usage-monitor`, saves
+private mappings in `chat-switch.json`, and merges backed-up global hooks into
+`~/.codex/hooks.json` and `~/.gemini/config/hooks.json`. Existing unrelated hooks
+are preserved. Discovery can automatically map enabled Codex accounts whose
+labels contain exactly one email address; custom labels without an email need
+a private mapping. Multiple profiles for the same email are deliberately
+ambiguous. The installer automatically chooses Antigravity only when exactly
+one enabled profile exists, unless a valid private choice already exists.
+
+**Review and trust the new Codex hook in the desktop Hooks settings or `/hooks`.**
+Installation does not bypass hook trust. The Antigravity helper starts immediately
+and on Windows sign-in via the per-user task `CYD Antigravity Messages`; no app
+restart or Hooks settings page is needed. Test a message in each app, then switch ChatGPT accounts
+and send another message to verify the desktop login and local account query
+stay aligned. Current-account smoke checks alone do not prove login switching.
+
+Failures do not block the chat or fall back to a guessed account. Network calls
+are limited to the existing private IPv4 LAN endpoint, without proxies,
+redirects, or retries. A synchronous Codex hook captures identity before its
+model invocation; healthy runs add a short local query and LAN request, while
+failures are bounded by the four-second hook timeout. Antigravity selection runs outside its agent process. No prompts, emails, provider credentials, or routing IDs are logged.
+The latest-result JSON files remain available. A bounded SQLite journal retains
+up to 1,000 diagnostic events, with duplicate/ignored callbacks throttled to one
+per source/result per minute. It records local time, source, outcome, failure
+stage, duration, and hashed task/account references. The server retains 200
+accepted selections and route reports in its existing settings file, including
+source attribution for updated desktop and Stream Deck helpers. Old or untagged
+clients appear as `device-api`; source tags are diagnostic claims, not identity.
+Device route reports do not prove which account pixels were rendered.
+
+```powershell
+python cyd-usage-monitor/scripts/chat-account-switch.py --diagnose
+Get-ScheduledTask -TaskName 'CYD Antigravity Messages'
+Get-ScheduledTaskInfo -TaskName 'CYD Antigravity Messages'
+```
+
+`--diagnose` shows the latest 40 local/server records plus watcher status age.
+If a Codex Desktop update removes the versioned CLI path recorded during setup,
+the hook safely rediscovers the newest bundled `codex.exe` under the standard
+desktop installation directory before starting `account/read`.
+The history API is Bearer-protected and exists only on the private device
+listener. There is no background server polling for diagnostics. Watcher status
+refreshes every minute; verify a live process and running task as well as `ready`.
+The task runs without elevation, supports battery power, has no runtime limit,
+and attempts recovery every minute without launching another running instance.
+Deduplication remains one day; old messages are not replayed after downtime.
+
+To disable both integrations, set `enabled` to `false` in the private
+`chat-switch.json`. To uninstall, remove only their handler entries from the
+two hook files, stop/unregister `CYD Antigravity Messages`, and stop only the
+verified helper process. Remove any legacy `CYDAntigravityMessages` Run entry.
+Re-run installation after adding accounts, changing the desktop
+Codex home, or an update that removes the configured Codex executable. Keep
+private settings and backups outside the public checkout.
+
 ![CYD Usage Monitor dashboard](../docs/images/cyd-usage-monitor-dashboard.png)
 
 ## How it works
@@ -27,6 +159,27 @@ It does not copy browser cookies, `auth.json`, refresh tokens, or provider
 credentials, and it does not call private provider HTTP APIs. OpenRouter is a
 narrow exception using only its documented credits, key-list, and activity
 read endpoints.
+
+### Refresh cadence and freshness
+
+Each CLI profile is refreshed on its own worker thread, so a slow or hung CLI
+never delays the other accounts. The account currently selected for the CYD is
+refreshed every `CYD_MONITOR_ACTIVE_POLL_SECONDS` (default 30 s); every other
+profile waits `CYD_MONITOR_POLL_SECONDS` (default 90 s). Selecting a different
+account on the display or dashboard makes it due immediately. At most
+`CYD_MONITOR_MAX_PARALLEL_COLLECTIONS` (default 3) CLI captures run at once;
+raise it on a host with spare memory, since each capture starts a full CLI
+process. Codex `/status` is requested from six seconds after launch and retried
+until the panel parses, so a warm start finishes in roughly ten seconds.
+
+A single failed capture does not blank the display. The collector keeps the
+last healthy result alongside the failure, and the CYD keeps showing those
+values (with a `retrying` note in the Antigravity ticker) until either the
+alert threshold of consecutive failures confirms an outage or the last healthy
+result is older than the profile's stale budget (two refresh intervals plus
+one 60-second capture). The firmware applies the same idea to its own LAN
+polling: a transport failure replaces the quota widgets only after three
+consecutive misses, while token rejection still shows immediately.
 
 ## Hardware & Pin Mapping
 
@@ -286,8 +439,9 @@ Port 8000 is not published by Compose. Port 8001 is bound only to the private
 address configured in ignored `.env`. Visit the Access-protected dashboard
 hostname, pass the Cloudflare identity check, then sign in as `admin`, create
 an account profile, and complete the CLI login flow. The collector stores each
-CLI profile in its isolated private directory and polls usage every 90 seconds
-by default. To enable OpenRouter, use **Accounts / OpenRouter account** to save
+CLI profile in its isolated private directory and polls the displayed account
+every 30 seconds and the others every 90 seconds by default (see
+[Refresh cadence and freshness](#refresh-cadence-and-freshness)). To enable OpenRouter, use **Accounts / OpenRouter account** to save
 a dedicated Management API key and display label. Saving queues an immediate
 collection; the monitor never creates, edits, or deletes OpenRouter keys.
 
@@ -412,8 +566,68 @@ unreachable server, or closed port.
 
 ### Stream Deck account cycling
 
+Verify Windows helper security with
+`python -m unittest discover -s cyd-usage-monitor/scripts -p test_stream_deck_security.py`
+from the workspace root. Tests use synthetic credentials and a temporary local
+HTTP server; they do not contact the real monitor.
+
+Both Windows helpers validate a canonical private IPv4 endpoint and disable
+proxies, redirects, and automatic Windows authentication before sending the device
+token. Network failures expose only a generic diagnostic.
+
+Button presses use native in-process HTTP with bounded timeouts and no automatic
+cycle retry. Existing button paths, account IDs, and user environment settings
+remain compatible. PowerShell is retained for `-ListAccounts` and diagnostics.
+The helper accepts only a private IPv4 HTTP endpoint, matching the device API.
+VBScript must be enabled on Windows; it is deprecated by Microsoft.
+
+The CYD checks commands every 400 ms, retaining a persistent HTTP client and
+backing off failed command polls up to 10 seconds. Cached quota refresh remains
+3 seconds; provider collection frequency is unchanged. LAN connection/read
+limits are 500/750 ms; network I/O still runs synchronously, so stalls can delay
+touch/rendering. The browser retains its independent 1.2-second refresh.
+`GET /api/v1/display-command?after=<last-command-id>` includes `telemetry` for a
+new Usage command only. An empty `after` requests the initial payload; omitting
+it preserves the legacy response. Command/profile snapshot reads and account
+selection writes are protected by the storage transaction lock. Older servers
+remain usable through the firmware's separate quota-fetch fallback.
+
+
+For one button per account, discover the current profiles in PowerShell:
+
+```powershell
+& "<checkout>\cyd-usage-monitor\scripts\stream-deck-next-account.ps1" -ListAccounts
+```
+
+The list shows stable `id`, display `label`, `provider`, `enabled`, and
+`active`. Use an enabled account's ID as one additional argument on its
+windowless Stream Deck button:
+
+```text
+//B //NoLogo "<checkout>\cyd-usage-monitor\scripts\stream-deck-next-account.vbs" "<profile-id>"
+```
+
+Only the account ID differs between buttons; the URL and token use the same
+Windows environment variables below. Labels use a custom dashboard label when
+set, otherwise the collected account name (including the remembered name during
+collection errors), and finally the provider until an account name is known.
+No account names need to be hard-coded or saved as manual labels.
+Re-run discovery after adding accounts.
+Renaming a label does not change its ID; deleting and recreating an account
+requires updating its button. Pressing the same button again keeps that account
+selected. Omit the ID to retain next-account cycling.
+
+The private Bearer-protected device listener exposes `GET /api/v1/accounts`
+for discovery and `POST /api/v1/select-account` with JSON
+`{"profile_id":"<profile-id>"}` for selection. Selection returns
+`{"status":"ok","profile_id":"<profile-id>"}` after queuing the Usage
+Monitor display command; the physical device applies it on its next command
+poll. Unknown or disabled IDs return 404 without changing the selection.
+These routes are unavailable on the public dashboard listener. Discovery
+returns configured labels, not CLI credentials or profile directories.
+
 `scripts/stream-deck-next-account.vbs` provides a windowless Stream Deck entry
-point for the PowerShell account-cycling helper. It cycles to the next enabled
+point that sends HTTP directly through Windows WinHTTP; it does not start PowerShell. It cycles to the next enabled
 Codex or Antigravity profile without flashing a console or placing the private
 device token in the button configuration. Configure these Windows **user**
 environment variables outside the repository:
@@ -452,8 +666,9 @@ and set `WAHA_URL`,
 `WAHA_API_KEY`, `WAHA_SESSION`, and `WAHA_ALERT_CHAT_ID` in the private `.env`
 file. The dashboard stores only the group routing ID; it never exposes the
 WAHA API key. Set `CYD_MONITOR_TIMEZONE` to an IANA timezone such as
-`America/New_York` if alert timestamps should use local time; it defaults to
-UTC.
+`America/New_York` to ensure provider CLI quota resets (such as Codex
+5-hour and weekly limits), container system time, and alert timestamps use
+local time; it defaults to UTC.
 
 Failure alerts use WhatsApp formatting and include the first detection time,
 the number of consecutive failed collections,
@@ -557,3 +772,29 @@ unofficial project-created compatibility artwork; see the repository
 
 This project is released under the repository's
 [MIT License](../LICENSE).
+
+### Distinguishing Wi-Fi and server failures
+
+The device reports Wi-Fi association separately from an unreachable monitor.
+Failed periodic telemetry requests back off from 3 seconds to at most 30 seconds;
+command polling retains its separate failure backoff. Successful reads restore
+normal polling. While data is already on screen, the error card appears only
+after three consecutive failed polls (serial `[NET]` lines report the streak),
+so a single LAN hiccup or a busy monitor host does not flash an error. Serial `D` and periodic `[DIAG]` entries report uptime, Wi-Fi
+status/disconnect count, RSSI, heap/stack headroom, HTTP counts and redraw timing.
+`[BOOT] reset_reason` helps distinguish resets from connection failures. These
+logs omit credentials, account identity, and network addresses.
+
+If Docker reports `cannot assign requested address` for its device port, compare
+`CYD_LAN_BIND_ADDRESS` with the server's assigned LAN interface address, then
+update private configuration and the firmware endpoint. Reserve the server's
+LAN address in the router to avoid DHCP changes. A healthy container-internal
+listener alone does not prove the published LAN endpoint is reachable.
+
+When the monitor server LAN address changes, also update the Windows user
+setting `CYD_USAGE_MONITOR_NEXT_ACCOUNT_URL`. Stream Deck and desktop-message
+helpers read this shared setting on each invocation; firmware configuration
+alone does not update it. No Stream Deck restart is needed for these helpers.
+
+Collector tests isolate runtime storage and inherited notification credentials;
+they do not require a writable production `/app/data` directory.

@@ -54,6 +54,25 @@ class ServerApiTests(unittest.TestCase):
         cls.device_thread.join(timeout=5)
         _TEMP.cleanup()
 
+    def test_command_inline_payload_is_new_only_and_profile_bound(self):
+        second = {**self.profile, "id": "codex-abcdef0123", "label": "Second"}
+        app.write_json(app.PROFILES_FILE, {"profiles": [self.profile, second], "active_profile_id": second["id"]})
+        app.update_json(app.SETTINGS_FILE, {}, lambda settings: app.set_display_control(
+            settings, "usage", profile_id=self.profile["id"],
+        ))
+        status, first, _ = self.request("/api/v1/display-command?after=", basic=False, bearer=True, device=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(first["telemetry"]["account_name"], self.profile["label"])
+        self.assertEqual(first["telemetry"]["status"], "error")
+        unchanged = self.request("/api/v1/display-command?after=" + first["id"], basic=False, bearer=True, device=True)[1]
+        self.assertNotIn("telemetry", unchanged)
+        legacy = self.request("/api/v1/display-command", basic=False, bearer=True, device=True)[1]
+        self.assertNotIn("telemetry", legacy)
+        self.assertEqual(self.request("/api/v1/display-command?after=", device=True)[0], 401)
+        self.assertEqual(self.request("/api/v1/display-command?after=", basic=False, bearer=True)[0], 404)
+        app.update_json(app.SETTINGS_FILE, {}, lambda settings: app.set_display_control(settings, "launcher"))
+        self.assertNotIn("telemetry", app.display_command_response(first["id"]))
+
     def setUp(self):
         self.profile = {
             "id": "codex-0123456789", "provider": "codex", "label": "Demo account",
@@ -69,7 +88,44 @@ class ServerApiTests(unittest.TestCase):
             except FileNotFoundError:
                 pass
 
-    def request(self, path, *, method="GET", payload=None, basic=True, csrf=False, bearer=False, device=False, content_type="application/json"):
+    def test_selection_history_attribution_privacy_and_route_isolation(self):
+        path = "/api/v1/selection-history"
+        self.assertEqual(self.request(path, basic=False, device=True)[0], 401)
+        self.assertEqual(self.request(path, bearer=True, device=False)[0], 404)
+        for source in ("codex-hook", "antigravity-watch", "stream-deck", "private@example.com"):
+            self.assertEqual(self.request("/api/v1/select-account", method="POST",
+                payload={"profile_id": self.profile["id"]}, basic=False, bearer=True,
+                device=True, source=source)[0], 200)
+        self.request("/api/admin/active-profile", method="POST", csrf=True,
+                     payload={"profile_id": self.profile["id"]})
+        events = self.request(path, basic=False, bearer=True, device=True)[1]["events"]
+        self.assertEqual([e["source"] for e in events],
+                         ["codex-hook", "antigravity-watch", "stream-deck", "device-api", "dashboard"])
+        self.assertEqual([e["sequence"] for e in events], list(range(1, 6)))
+        for e in events:
+            self.assertEqual(e["action"], "select-account")
+            self.assertEqual(e["provider"], "codex")
+        encoded = json.dumps(events)
+        for value in (self.profile["id"], self.profile["label"], "private@example.com", app.DEVICE_TOKEN):
+            self.assertNotIn(value, encoded)
+        before = len(events)
+        self.request("/api/v1/select-account", method="POST", payload={"profile_id": "missing"},
+                     basic=False, bearer=True, device=True)
+        self.assertEqual(len(self.request(path, basic=False, bearer=True, device=True)[1]["events"]), before)
+
+    def test_selection_history_bound_and_device_report_semantics(self):
+        settings = {}
+        for _ in range(205):
+            app.set_display_control(settings, "usage", profile_id=self.profile["id"])
+        self.assertEqual(len(settings["selection_history"]), 200)
+        self.assertEqual(settings["selection_history"][0]["sequence"], 6)
+        app.write_json(app.SETTINGS_FILE, settings)
+        self.request("/api/v1/display-state", method="POST", basic=False, bearer=True, device=True,
+                     payload={"app": "usage", "rotation": 0})
+        last = app.read_json(app.SETTINGS_FILE, {})["selection_history"][-1]
+        self.assertEqual((last["source"], last["action"]), ("device-report", "reported-route"))
+
+    def request(self, path, *, method="GET", payload=None, basic=True, csrf=False, bearer=False, device=False, content_type="application/json", source=None):
         data = None if payload is None else json.dumps(payload).encode("utf-8")
         base_url = self.device_base_url if device else self.base_url
         request = urllib.request.Request(base_url + path, data=data, method=method)
@@ -81,6 +137,8 @@ class ServerApiTests(unittest.TestCase):
             request.add_header("Content-Type", content_type)
         if csrf:
             request.add_header("X-CYD-CSRF", "1")
+        if source is not None:
+            request.add_header("X-CYD-Source", source)
         try:
             response = urllib.request.urlopen(request, timeout=5)
         except urllib.error.HTTPError as error:
@@ -92,6 +150,53 @@ class ServerApiTests(unittest.TestCase):
             return response.status, body, headers
         finally:
             response.close()
+
+    def test_account_labels_use_collected_names_without_overwriting_custom_labels(self):
+        profiles = [
+            dict(self.profile, id="custom", label="My label", last_account_name="Collected name"),
+            dict(self.profile, id="remembered", label="", last_account_name="Remembered name"),
+            dict(self.profile, id="snapshot", label=""),
+            dict(self.profile, id="new", label=""),
+        ]
+        app.write_json(app.PROFILES_FILE, {"profiles": profiles})
+        app.write_json(app.STATE_FILE, {"profiles": {
+            "snapshot": {"account_name": "Snapshot name"},
+            "remembered": {"status": "error", "account_name": ""},
+        }})
+        status, body, _ = self.request("/api/v1/accounts", device=True, bearer=True)
+        self.assertEqual(status, 200)
+        self.assertEqual([p["label"] for p in body["accounts"]],
+                         ["My label", "Remembered name", "Snapshot name", "codex"])
+        self.assertEqual(app.profiles_config()["profiles"], profiles)
+
+    def test_device_account_discovery_and_selection(self):
+        second = dict(self.profile, id="antigravity-0123456789", provider="antigravity", label="Second")
+        disabled = dict(self.profile, id="codex-aaaaaaaaaa", enabled=False)
+        app.write_json(app.PROFILES_FILE, {"profiles": [self.profile, second, disabled],
+                                          "active_profile_id": self.profile["id"]})
+        status, body, _ = self.request("/api/v1/accounts", device=True, bearer=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(body["accounts"]), 3)
+        self.assertEqual(set(body["accounts"][0]), {"id", "provider", "label", "enabled", "active"})
+        self.assertTrue(body["accounts"][0]["active"])
+        self.assertFalse(body["accounts"][2]["enabled"])
+        for path, method, payload in [("/api/v1/accounts", "GET", None),
+                                      ("/api/v1/select-account", "POST", {"profile_id": second["id"]})]:
+            self.assertEqual(self.request(path, method=method, payload=payload, device=True)[0], 401)
+            self.assertNotEqual(self.request(path, method=method, payload=payload, bearer=True, basic=False)[0], 200)
+        for profile_id, expected in [(None, 400), ([], 400), ("missing", 404), (disabled["id"], 404)]:
+            status, _, _ = self.request("/api/v1/select-account", method="POST", device=True,
+                                        bearer=True, payload={"profile_id": profile_id})
+            self.assertEqual(status, expected)
+            self.assertEqual(app.profiles_config()["active_profile_id"], self.profile["id"])
+        for _ in range(2):
+            status, body, _ = self.request("/api/v1/select-account", method="POST", device=True,
+                                           bearer=True, payload={"profile_id": second["id"]})
+            self.assertEqual(status, 200)
+            self.assertEqual(body["profile_id"], second["id"])
+            self.assertEqual(app.profiles_config()["active_profile_id"], second["id"])
+            self.assertEqual(app.display_command()["app"], "usage")
+            self.assertEqual(app.display_command()["profile_id"], second["id"])
 
     def test_dashboard_and_admin_preview_use_basic_auth(self):
         status, dashboard, headers = self.request("/")
@@ -279,6 +384,76 @@ class ServerApiTests(unittest.TestCase):
         healthy = self.request("/api/admin/cyd-status")[1]
         self.assertEqual(healthy["codex_5h_pct"], 44)
         self.assertEqual(healthy["codex_weekly_pct"], 91)
+
+    def test_single_failed_poll_keeps_last_good_values_until_confirmed_or_stale(self):
+        app.write_json(app.PROFILES_FILE, {"profiles": [self.profile], "active_profile_id": self.profile["id"]})
+        last_ok = {
+            "profile_id": self.profile["id"], "provider": "codex", "status": "ok",
+            "account_name": "actual-account@example.com", "plan_type": "Plus", "credits": "None",
+            "metrics": {"five_hour": {"remaining_pct": 44, "reset": "05:03"}, "weekly": {"remaining_pct": 91, "reset": "00:03 on 3 Sep"}},
+            "collected_at": app.utcnow(),
+        }
+        failed = {
+            "profile_id": self.profile["id"], "provider": "codex", "status": "error",
+            "error": "quota panel incomplete", "collected_at": app.utcnow(), "consecutive_failures": 1,
+            "alert_confirmed": False, "refresh_interval_seconds": 30, "stale_after_seconds": 120, "last_ok": last_ok,
+        }
+        app.write_json(app.STATE_FILE, {"profiles": {self.profile["id"]: failed}})
+        degraded = self.request("/api/admin/cyd-status")[1]
+        self.assertEqual(degraded["status"], "ok")
+        self.assertEqual(degraded["codex_5h_pct"], 44)
+        self.assertTrue(degraded["degraded"])
+        self.assertIn("quota panel incomplete", degraded["degraded_error"])
+        self.assertIn("retrying", degraded["status_ticker"])
+
+        # The collector's confirmed outage threshold shows the real error.
+        app.write_json(app.STATE_FILE, {"profiles": {self.profile["id"]: dict(failed, consecutive_failures=3, alert_confirmed=True)}})
+        confirmed = self.request("/api/admin/cyd-status")[1]
+        self.assertEqual(confirmed["status"], "error")
+        self.assertEqual(confirmed["primary_sub"], "quota panel incomplete")
+
+        # So does a last healthy result older than the profile's stale budget.
+        old = dict(last_ok, collected_at="2020-01-01T00:00:00Z")
+        app.write_json(app.STATE_FILE, {"profiles": {self.profile["id"]: dict(failed, last_ok=old)}})
+        stale = self.request("/api/admin/cyd-status")[1]
+        self.assertEqual(stale["status"], "error")
+        self.assertEqual(stale["primary_sub"], "Last CLI result is stale")
+
+    def test_stale_budget_follows_the_collector_refresh_interval(self):
+        aged = (app.dt.datetime.now(app.dt.timezone.utc) - app.dt.timedelta(seconds=200)).isoformat().replace("+00:00", "Z")
+        self.assertTrue(app.is_stale({"collected_at": aged}))  # default: 2 × 90 s
+        self.assertFalse(app.is_stale({"collected_at": aged, "stale_after_seconds": 240}))
+        self.assertTrue(app.is_stale({"collected_at": aged, "stale_after_seconds": 120}))
+        self.assertTrue(app.is_stale({"collected_at": aged, "stale_after_seconds": True}))
+        self.assertTrue(app.is_stale({}))
+
+    def test_antigravity_cyd_payload_formats_disabled_and_standard_subtexts(self):
+        ag_profile = dict(self.profile, id="antigravity-0123456789", provider="antigravity", label="Antigravity")
+        app.write_json(app.PROFILES_FILE, {"profiles": [ag_profile], "active_profile_id": ag_profile["id"]})
+        app.write_json(app.STATE_FILE, {"profiles": {ag_profile["id"]: {
+            "profile_id": ag_profile["id"], "provider": "antigravity", "status": "ok",
+            "account_name": "actual-ag@example.com", "plan_type": "Antigravity", "credits": "None",
+            "metrics": {
+                "gemini": {
+                    "five_hour": {"remaining_pct": 100, "reset": "Quota available"},
+                    "weekly": {"remaining_pct": 28, "reset": "106h 18m"},
+                },
+                "claude": {
+                    "five_hour": {"remaining_pct": 0, "reset": "Weekly limit reached"},
+                    "weekly": {"remaining_pct": 0, "reset": "11h 23m"},
+                },
+            }, "collected_at": app.utcnow(),
+        }}})
+        payload = self.request("/api/admin/cyd-status")[1]
+        self.assertEqual(payload["provider"], "antigravity")
+        self.assertEqual(payload["gemini_5h_pct"], 100)
+        self.assertEqual(payload["gemini_5h_sub"], "Quota available")
+        self.assertEqual(payload["gemini_weekly_pct"], 28)
+        self.assertEqual(payload["gemini_weekly_sub"], "Refresh in: 106h 18m")
+        self.assertEqual(payload["claude_5h_pct"], 0)
+        self.assertEqual(payload["claude_5h_sub"], "Weekly limit reached")
+        self.assertEqual(payload["claude_weekly_pct"], 0)
+        self.assertEqual(payload["claude_weekly_sub"], "Refresh in: 11h 23m")
 
     def test_openrouter_secret_setup_is_private_and_removable(self):
         secret = "management-secret-that-must-never-be-returned"

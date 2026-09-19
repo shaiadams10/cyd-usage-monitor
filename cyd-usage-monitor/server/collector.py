@@ -60,7 +60,10 @@ SETTINGS_FILE = DATA_DIR / "monitor-settings.json"
 LOGIN_INPUT_DIR = DATA_DIR / ".login-inputs"
 DEBUG_EVIDENCE_DIR = DATA_DIR / ".collector-debug"
 PROFILE_ROOT = Path(os.environ.get("CYD_MONITOR_PROFILE_ROOT", "/profiles"))
-COLLECTION_LOCK = threading.Lock()
+# Profiles are fully isolated (own HOME, CODEX_HOME, and workspace), so they
+# collect in parallel. Each profile still serializes its own CLI runs.
+_PROFILE_LOCKS: dict[str, threading.Lock] = {}
+_PROFILE_LOCKS_GUARD = threading.Lock()
 OPENROUTER_API_ROOT = "https://openrouter.ai/api/v1"
 OPENROUTER_MAX_BYTES = 256 * 1024
 OPENROUTER_TIMEOUT_SECONDS = 15
@@ -80,8 +83,24 @@ def bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
     return value
 
 
-POLL_SECONDS = bounded_int_env("CYD_MONITOR_POLL_SECONDS", 90, 60, 86400)
+POLL_SECONDS = bounded_int_env("CYD_MONITOR_POLL_SECONDS", 90, 30, 86400)
+# The account currently selected for the CYD is refreshed on a faster cadence;
+# every other profile keeps the background interval above.
+ACTIVE_POLL_SECONDS = bounded_int_env("CYD_MONITOR_ACTIVE_POLL_SECONDS", 30, 10, 86400)
+MAX_PARALLEL_COLLECTIONS = bounded_int_env("CYD_MONITOR_MAX_PARALLEL_COLLECTIONS", 3, 1, 16)
 ALERT_FAILURE_THRESHOLD = bounded_int_env("CYD_MONITOR_ALERT_FAILURE_THRESHOLD", 3, 1, 10)
+# Longest single CLI capture (the Codex timeout below). A snapshot is stale once
+# two refresh intervals plus one full capture have passed without a new result.
+COLLECTION_TIMEOUT_BUDGET = 60
+
+
+def profile_lock(profile_id: str) -> threading.Lock:
+    with _PROFILE_LOCKS_GUARD:
+        return _PROFILE_LOCKS.setdefault(profile_id, threading.Lock())
+
+
+def stale_after_seconds(interval_seconds: int) -> int:
+    return int(interval_seconds) * 2 + COLLECTION_TIMEOUT_BUDGET
 INCIDENT_HISTORY_LIMIT = 50
 ALERT_TIMEZONE_NAME = os.environ.get("CYD_MONITOR_TIMEZONE", "UTC").strip() or "UTC"
 try:
@@ -294,8 +313,11 @@ def parse_antigravity_usage(raw: str) -> dict:
         body = match.group("body")
         group_metrics = {}
         for name, heading in (("weekly", "Weekly Limit Remaining"), ("five_hour", "Five Hour Limit Remaining")):
-            # Antigravity has two valid layouts: a reset time for a partially
-            # used quota, or a separate "Quota available" line at 100%.
+            # Antigravity has three valid layouts:
+            # 1. A percentage and refresh time for partially used quota.
+            # 2. A 100% value with a separate "Quota available" line.
+            # 3. A "Disabled: ..." line when weekly limit is reached, where
+            #    the 5-hour limit does not apply (0% remaining).
             block_match = re.search(
                 re.escape(heading) + r"(?P<block>.*?)(?=\n\s*(?:Weekly|Five Hour) Limit Remaining|\Z)",
                 body, re.I | re.S,
@@ -304,20 +326,29 @@ def parse_antigravity_usage(raw: str) -> dict:
                 raise ValueError(f"Antigravity /usage did not contain {key} {name} data")
             block = block_match.group("block")
             value = re.search(r"(\d+(?:\.\d+)?)%\s*(?:remaining)?", block, re.I)
-            reset = re.search(r"Refreshes?\s+in\s+([^\n]+)", block, re.I)
+            reset = re.search(r"(?:Refreshes?|fully refresh(?:es)?|resets?)\s+in\s+([^\n.]+)", block, re.I)
             if not value:
+                if re.search(r"\bdisabled\b|hit your (?:weekly|5-hour|five hour)?\s*limit|does not currently apply", block, re.I):
+                    if reset:
+                        reset_text = reset.group(1).strip()
+                    elif re.search(r"weekly limit", block, re.I):
+                        reset_text = "Weekly limit reached"
+                    else:
+                        reset_text = "Limit reached"
+                    group_metrics[name] = {"remaining_pct": 0, "reset": reset_text}
+                    continue
                 raise ValueError(f"Antigravity /usage did not contain {key} {name} data")
-            reset_text = reset.group(1).strip() if reset else "Quota available" if re.search(r"Quota available", block, re.I) else "Reset time unavailable"
+            if reset:
+                reset_text = reset.group(1).strip()
+            elif re.search(r"Quota available", block, re.I):
+                reset_text = "Quota available"
+            elif re.search(r"weekly limit", block, re.I):
+                reset_text = "Weekly limit reached"
+            elif re.search(r"\bdisabled\b", block, re.I):
+                reset_text = "Limit reached"
+            else:
+                reset_text = "Reset time unavailable"
             group_metrics[name] = {"remaining_pct": percentage(value.group(1)), "reset": reset_text}
-            continue
-            item = re.search(
-                heading + r".*?(\d+(?:\.\d+)?)%\s+remaining\s*[·.]\s*Refreshes?\s+in\s+([^\n]+)",
-                body,
-                re.I | re.S,
-            )
-            if not item:
-                raise ValueError(f"Antigravity /usage did not contain {key} {name} data")
-            group_metrics[name] = {"remaining_pct": percentage(item.group(1)), "reset": item.group(2).strip()}
         metrics[key] = group_metrics
     return {"provider": "antigravity", "account_name": account.group(1).strip(), "plan_type": "Antigravity", "metrics": metrics, "credits": "None"}
 
@@ -448,7 +479,13 @@ def archive_failure_evidence(profile: dict, error: Exception, diagnostics: dict)
         "provider": profile["provider"], "error": str(error), "diagnostics": diagnostics,
         "redacted_transcript": transcript,
     })
-    evidence_files = sorted(DEBUG_EVIDENCE_DIR.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    def modified_at(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:  # A parallel profile capture may have pruned it already.
+            return 0.0
+
+    evidence_files = sorted(DEBUG_EVIDENCE_DIR.glob("*.json"), key=modified_at, reverse=True)
     for expired in evidence_files[INCIDENT_HISTORY_LIMIT:]:
         try:
             expired.unlink()
@@ -475,6 +512,9 @@ def profile_environment(profile: dict) -> dict[str, str]:
         "LANG": os.environ.get("LANG", "C.UTF-8"),
         "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
     }
+    timezone_name = os.environ.get("CYD_MONITOR_TIMEZONE", "").strip() or os.environ.get("TZ", "").strip() or ALERT_TIMEZONE_NAME
+    if timezone_name:
+        env["TZ"] = timezone_name
     for name in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
         if os.environ.get(name):
             env[name] = os.environ[name]
@@ -527,6 +567,15 @@ def cli_executable(provider: str) -> str | None:
     return None
 
 
+CODEX_STATUS_INPUTS: list[tuple[float, str, str]] = [
+    (6.0, "/status\r", "Codex started. Asking for the first /status panel…"),
+    (14.0, "/status\r", "Codex is still warming up. Refreshing the /status panel…"),
+    (24.0, "/status\r", "Waiting for rate-limit values. Retrying /status…"),
+    (36.0, "/status\r", "Codex is slow to answer. Retrying /status…"),
+    (52.0, "/status\r", "Waiting for final rate-limit values. Retrying /status…"),
+]
+
+
 def collect_profile(profile: dict, include_transcript: bool = False, progress: Callable[[str], None] | None = None):
     provider = profile["provider"]
     executable = cli_executable(provider)
@@ -539,14 +588,12 @@ def collect_profile(profile: dict, include_transcript: bool = False, progress: C
         # Inline mode avoids the alternate-screen redraw race in Codex 0.147.
         # Cold starts can initially return a refresh request, so retry while
         # watching for a complete panel instead of sleeping for a fixed 80 sec.
+        # The capture stops as soon as the panel parses, so asking early costs
+        # nothing on a warm start and the later retries cover slow ones.
         raw = pty_command(
             [executable, "--no-alt-screen", "--sandbox", "read-only", "--ask-for-approval", "never"], env,
-            [
-                (18.0, "/status\r", "Codex started. Asking for the first /status panel…"),
-                (36.0, "/status\r", "Codex is still warming up. Refreshing the /status panel…"),
-                (52.0, "/status\r", "Waiting for final rate-limit values. Retrying /status…"),
-            ],
-            timeout=60, cwd=str(profile_workdir(profile)),
+            CODEX_STATUS_INPUTS,
+            timeout=COLLECTION_TIMEOUT_BUDGET, cwd=str(profile_workdir(profile)),
             complete=lambda text: _panel_parses(parse_codex_status, text), progress=progress,
             responders=[(
                 r"Update now\s*\(runs .*?\)\s*2\.?\s*Skip",
@@ -892,7 +939,7 @@ def notify_transition(profile: dict, previous: dict | None, snapshot: dict) -> b
             f"❗ *Collector reason:* {whatsapp_value(snapshot.get('error', 'Unknown collector error'))}\n"
             f"*What happened*\n{whatsapp_value(failure_explanation(profile, snapshot))}\n\n"
             f"🔎 *Capture evidence:* {evidence}\n"
-            f"🔁 *Automatic action:* retry in the next collection cycle (configured every {POLL_SECONDS} seconds). No credentials were changed.\n\n"
+            f"🔁 *Automatic action:* retry on the next scheduled poll (every {snapshot.get('refresh_interval_seconds', POLL_SECONDS)} seconds for this account). No credentials were changed.\n\n"
             "🛠️ If it keeps failing, open the protected dashboard → Alerts to inspect the incident history."
         )
     else:
@@ -910,9 +957,20 @@ def notify_transition(profile: dict, previous: dict | None, snapshot: dict) -> b
     return delivered
 
 
-def persist_snapshot(profile: dict, snapshot: dict) -> bool:
+def last_good_snapshot(previous: dict | None) -> dict | None:
+    """Return the most recent healthy result carried by a stored snapshot."""
+    if not isinstance(previous, dict):
+        return None
+    if previous.get("status") == "ok":
+        return {key: value for key, value in previous.items() if key != "last_ok"}
+    last_ok = previous.get("last_ok")
+    return last_ok if isinstance(last_ok, dict) and last_ok.get("status") == "ok" else None
+
+
+def persist_snapshot(profile: dict, snapshot: dict, interval_seconds: int | None = None) -> bool:
     """Persist a result only if its profile still exists after collection."""
     profile_id = profile["id"]
+    interval_seconds = int(interval_seconds or POLL_SECONDS)
     with data_lock(DATA_DIR):
         config = read_json_unlocked(PROFILES_FILE, {"profiles": []})
         configured_profile = next((item for item in config.get("profiles", []) if item.get("id") == profile_id), None)
@@ -920,6 +978,15 @@ def persist_snapshot(profile: dict, snapshot: dict) -> bool:
             return False
         state = read_json_unlocked(STATE_FILE, {"profiles": {}})
         previous = state.setdefault("profiles", {}).get(profile_id)
+        # The server keeps showing the last healthy values through short
+        # failures, so a single missed capture never blanks the display.
+        snapshot["refresh_interval_seconds"] = interval_seconds
+        snapshot["stale_after_seconds"] = stale_after_seconds(interval_seconds)
+        snapshot.pop("last_ok", None)
+        if snapshot.get("status") == "error":
+            last_ok = last_good_snapshot(previous)
+            if last_ok:
+                snapshot["last_ok"] = last_ok
         account_name = str(snapshot.get("account_name") or "").strip()[:160]
         if not account_name:
             account_name = str(configured_profile.get("last_account_name") or (previous or {}).get("account_name") or "").strip()[:160]
@@ -971,22 +1038,136 @@ def persist_snapshot(profile: dict, snapshot: dict) -> bool:
     return True
 
 
+def collect_and_persist(profile: dict, interval_seconds: int | None = None) -> dict:
+    """Collect one profile under its own lock and store the normalized result."""
+    with profile_lock(profile["id"]):
+        try:
+            snapshot = collect_profile(profile)
+        except Exception as error:
+            snapshot = error_snapshot(profile, error)
+        persist_snapshot(profile, snapshot, interval_seconds)
+        return snapshot
+
+
+def profile_interval(profile: dict, active_profile_id: str | None) -> int:
+    return ACTIVE_POLL_SECONDS if profile.get("id") == active_profile_id else POLL_SECONDS
+
+
 def collect_all(force_ids: set[str] | None = None) -> None:
-    with COLLECTION_LOCK:
-        config = read_json(PROFILES_FILE, {"profiles": [], "active_profile_id": None})
+    """Collect every enabled profile once, in parallel, then OpenRouter."""
+    config = read_json(PROFILES_FILE, {"profiles": [], "active_profile_id": None})
+    active_id = config.get("active_profile_id")
+    pending = [
+        profile for profile in config.get("profiles", [])
+        if profile.get("enabled", True) and profile.get("id")
+        and (force_ids is None or profile["id"] in force_ids)
+    ]
+    slots = threading.Semaphore(MAX_PARALLEL_COLLECTIONS)
+
+    def run(profile: dict) -> None:
+        with slots:
+            collect_and_persist(profile, profile_interval(profile, active_id))
+
+    workers = [threading.Thread(target=run, args=(profile,), name=f"collect-{profile['id']}", daemon=True) for profile in pending]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    if force_ids is None:
+        collect_openrouter()
+
+
+class CollectionScheduler:
+    """Refresh each profile on its own cadence with bounded parallelism.
+
+    The profile selected for the CYD is refreshed every ACTIVE_POLL_SECONDS;
+    the rest wait POLL_SECONDS. A newly selected profile therefore becomes due
+    immediately, and one slow or hung CLI never delays the other accounts.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic,
+                 runner: Callable[[dict, int], object] = collect_and_persist,
+                 openrouter_runner: Callable[[], object] = collect_openrouter):
+        self.clock = clock
+        self.runner = runner
+        self.openrouter_runner = openrouter_runner
+        self.threads: dict[str, threading.Thread] = {}
+        self.last_started: dict[str, float] = {}
+        self.openrouter_thread: threading.Thread | None = None
+        self.openrouter_started: float | None = None
+
+    def running_ids(self) -> set[str]:
+        return {profile_id for profile_id, thread in self.threads.items() if thread.is_alive()}
+
+    def due_profiles(self, config: dict) -> list[tuple[dict, int]]:
+        """Return profiles that should start now, most overdue first."""
+        now = self.clock()
+        running = self.running_ids()
+        active_id = config.get("active_profile_id")
+        due: list[tuple[tuple[bool, float], dict, int]] = []
         for profile in config.get("profiles", []):
-            if not profile.get("enabled", True):
-                continue
             profile_id = profile.get("id")
-            if not profile_id or (force_ids is not None and profile_id not in force_ids):
+            if not profile_id or not profile.get("enabled", True) or profile_id in running:
                 continue
-            try:
-                snapshot = collect_profile(profile)
-            except Exception as error:
-                snapshot = error_snapshot(profile, error)
-            persist_snapshot(profile, snapshot)
-        if force_ids is None:
-            collect_openrouter()
+            interval = profile_interval(profile, active_id)
+            started = self.last_started.get(profile_id)
+            overdue = float("inf") if started is None else now - started - interval
+            if overdue >= 0:
+                # The displayed account always wins a free slot; then most overdue.
+                due.append(((profile_id == active_id, overdue), profile, interval))
+        due.sort(key=lambda item: item[0], reverse=True)
+        return [(profile, interval) for _, profile, interval in due]
+
+    def tick(self, config: dict) -> None:
+        # Forget profiles that were removed so their threads do not pin a slot.
+        known = {profile.get("id") for profile in config.get("profiles", [])}
+        for profile_id in list(self.last_started):
+            if profile_id not in known and not (profile_id in self.threads and self.threads[profile_id].is_alive()):
+                self.last_started.pop(profile_id, None)
+                self.threads.pop(profile_id, None)
+        free = MAX_PARALLEL_COLLECTIONS - len(self.running_ids())
+        active_id = config.get("active_profile_id")
+        for profile, interval in self.due_profiles(config):
+            profile_id = profile["id"]
+            # The displayed account never queues behind background captures;
+            # it may briefly exceed the limit by one.
+            if free <= 0 and profile_id != active_id:
+                break
+            free -= 1
+            thread = threading.Thread(target=self.runner, args=(profile, interval), name=f"collect-{profile_id}", daemon=True)
+            thread.start()
+            self.threads[profile_id] = thread
+            self.last_started[profile_id] = self.clock()
+        openrouter_running = self.openrouter_thread is not None and self.openrouter_thread.is_alive()
+        if not openrouter_running and (self.openrouter_started is None or self.clock() - self.openrouter_started >= POLL_SECONDS):
+            self.openrouter_thread = threading.Thread(target=self.openrouter_runner, name="collect-openrouter", daemon=True)
+            self.openrouter_thread.start()
+            self.openrouter_started = self.clock()
+
+    def schedule(self, config: dict) -> dict:
+        """Describe the cadence for the dashboard countdown."""
+        running = self.running_ids()
+        active_id = config.get("active_profile_id")
+        profiles = {}
+        now = self.clock()
+        for profile in config.get("profiles", []):
+            profile_id = profile.get("id")
+            if not profile_id or not profile.get("enabled", True):
+                continue
+            interval = profile_interval(profile, active_id)
+            started = self.last_started.get(profile_id)
+            # Recomputed from the current cadence so a newly selected account
+            # shows its shorter countdown right away.
+            profiles[profile_id] = {
+                "interval_seconds": interval, "collection_running": profile_id in running,
+                "next_poll_at": utc_after(max(0.0, started + interval - now)) if started is not None else None,
+            }
+        upcoming = sorted(entry["next_poll_at"] for entry in profiles.values() if entry["next_poll_at"])
+        return {
+            "interval_seconds": ACTIVE_POLL_SECONDS, "background_interval_seconds": POLL_SECONDS,
+            "max_parallel": MAX_PARALLEL_COLLECTIONS, "collection_running": bool(running),
+            "next_poll_at": upcoming[0] if upcoming else None, "profiles": profiles,
+        }
 
 
 def _panel_parses(parser: Callable[[str], dict], raw: str) -> bool:
@@ -999,7 +1180,7 @@ def _panel_parses(parser: Callable[[str], dict], raw: str) -> bool:
 
 def collect_one_with_transcript(profile: dict, progress: Callable[[str], None] | None = None) -> tuple[dict, str]:
     """Collect one profile and persist both the normalized snapshot and raw CLI panel."""
-    with COLLECTION_LOCK:
+    with profile_lock(profile["id"]):
         transcript = ""
         try:
             snapshot, transcript = collect_profile(profile, include_transcript=True, progress=progress)
@@ -1007,7 +1188,8 @@ def collect_one_with_transcript(profile: dict, progress: Callable[[str], None] |
             snapshot, transcript = error_snapshot(profile, error), error.transcript
         except Exception as error:
             snapshot = error_snapshot(profile, error)
-        persist_snapshot(profile, snapshot)
+        active_id = read_json(PROFILES_FILE, {}).get("active_profile_id")
+        persist_snapshot(profile, snapshot, profile_interval(profile, active_id))
         return snapshot, transcript
 
 
@@ -1410,43 +1592,31 @@ def main() -> None:
         collect_all()
         return
     sessions: dict[str, LoginSession] = {}
-    last_collection = 0.0
-    scheduled_collection: threading.Thread | None = None
-    schedule_running: bool | None = None
-    schedule_due: str | None = None
+    scheduler = CollectionScheduler()
+    published_schedule: dict | None = None
     next_input_cleanup = 0.0
 
-    def publish_schedule(running: bool, due: str | None) -> None:
+    def publish_schedule(schedule: dict) -> None:
         """Expose scheduling state for the dashboard countdown."""
-        nonlocal schedule_running, schedule_due
-        if running == schedule_running and due == schedule_due:
+        nonlocal published_schedule
+        if schedule == published_schedule:
             return
-        schedule = {
-            "interval_seconds": POLL_SECONDS, "collection_running": running,
-            "next_poll_at": due, "updated_at": utcnow(),
-        }
-        update_json(RUNTIME_FILE, {"requests": {}}, lambda runtime: runtime.update({"schedule": schedule}))
-        schedule_running, schedule_due = running, due
+        payload = dict(schedule, updated_at=utcnow())
+        update_json(RUNTIME_FILE, {"requests": {}}, lambda runtime: runtime.update({"schedule": payload}))
+        published_schedule = schedule
 
     while True:
         process_requests(sessions)
         if time.monotonic() >= next_input_cleanup:
             cleanup_login_inputs()
             next_input_cleanup = time.monotonic() + 60
-        # Scheduled CLI panel reads can take tens of seconds across several
-        # accounts.  Keep them off the event loop so a dashboard test alert is
-        # picked up on the next 0.5s tick instead of waiting for every CLI.
-        running = scheduled_collection is not None and scheduled_collection.is_alive()
-        if not running and time.monotonic() - last_collection >= POLL_SECONDS:
-            scheduled_collection = threading.Thread(target=collect_all, name="scheduled-cli-collection", daemon=True)
-            scheduled_collection.start()
-            last_collection = time.monotonic()
-            schedule_due = utc_after(POLL_SECONDS)
-            publish_schedule(True, schedule_due)
-        elif running:
-            publish_schedule(True, schedule_due)
-        else:
-            publish_schedule(False, schedule_due)
+        # CLI panel reads take seconds each. Every profile runs on its own
+        # worker thread so a dashboard test alert or account switch is picked
+        # up on the next 0.5s tick, and the displayed account refreshes on its
+        # faster cadence regardless of how many other accounts exist.
+        config = read_json(PROFILES_FILE, {"profiles": [], "active_profile_id": None})
+        scheduler.tick(config)
+        publish_schedule(scheduler.schedule(config))
         time.sleep(0.5)
 
 

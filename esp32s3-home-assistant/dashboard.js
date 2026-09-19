@@ -119,10 +119,13 @@ customElements.whenDefined("esp-log").then(() => {
   setInterval(wireLogViewer, 500);
 });
 
-// Session History is a URL-addressable dashboard page fed by structured
-// `voice_session: SESSION_JSON ...` log records. Home Assistant Recorder keeps
-// the source entity history; this view retains the newest 200 packaged rows in
-// this browser and can export reviewed records for recognition research.
+// Session History is a URL-addressable dashboard page fed by both structured
+// `voice_session: SESSION_JSON ...` device records and the durable acoustic
+// diagnostics API. Home Assistant Recorder keeps the source entity history;
+// this view retains the newest 200 packaged rows in this browser and can export
+// reviewed records for recognition research. Importing unmatched diagnostics
+// is intentional: decoder failures must remain reviewable even when no device
+// log row reached this browser.
 customElements.whenDefined("esp-app").then(() => {
   const STORAGE_KEY = "esp32.voiceSessions.v1";
   const DIAGNOSTICS_URL_KEY = "esp32.voiceDiagnosticsUrl.v1";
@@ -393,16 +396,150 @@ customElements.whenDefined("esp-app").then(() => {
       @media (max-width:1000px) { .codex-view-tabs { border-bottom:1px solid var(--codex-line); border-right:0; min-height:0; padding:16px; } .codex-sidebar-brand { align-items:center; display:flex; gap:14px; justify-content:space-between; padding-bottom:14px; } .codex-sidebar-title { font-size:18px; margin-top:3px; } .codex-sidebar-subtitle,.codex-sidebar-context { display:none; } .codex-sidebar-ready { margin-top:0; } .codex-sidebar-nav { grid-template-columns:1fr 1fr; margin-top:14px; } .codex-overview-hero { grid-template-columns:1fr; margin:0 18px 22px; } .codex-hero-metrics { grid-template-columns:repeat(3,1fr); } main.codex-overview-main { grid-template-columns:1fr; } }
       @media (max-width:760px) { .codex-research-workspace { grid-template-columns:1fr; } .codex-session-queue { grid-auto-columns:minmax(230px,80%); grid-auto-flow:column; overflow-x:auto; position:static; } }
       @media (max-width:600px) { .codex-session-page { padding:22px 10px 28px; } .codex-session-title { font-size:32px; } .codex-overview-hero { grid-template-columns:1fr; margin:0 10px 18px; padding:20px 17px; } .codex-hero-status h2 { font-size:38px; } .codex-hero-metrics { grid-template-columns:1fr; } main.codex-overview-main { padding:0 10px 32px !important; } }
+
+      /* Purpose-built voice console. The stock entity table remains alive as
+         the ESPHome transport/fallback surface, but is no longer the UI. */
+      :host { --voice-ink:#eef7f4; --voice-muted:#8da5a0; --voice-card:#0b171b; --voice-card-2:#0f2024; --voice-green:#48e1a4; --voice-mint:#9af4d0; --voice-coral:#ff8c6b; --voice-yellow:#f7c85d; background:radial-gradient(circle at 78% 4%,rgba(72,225,164,.10),transparent 32%),#061014; }
+      main.codex-overview-main { display:none !important; }
+      .codex-overview-hero { background:none; border:0; display:block; margin:0; max-width:none; overflow:visible; padding:28px 30px 54px; }
+      .codex-overview-hero::after { display:none; }
+      .voice-console { margin:0 auto; max-width:1180px; }
+      .voice-console-top { align-items:center; display:flex; gap:18px; justify-content:space-between; margin-bottom:26px; }
+      .voice-console-title { color:var(--voice-ink); font:850 clamp(27px,3vw,42px)/1 system-ui; letter-spacing:-.045em; margin:0; }
+      .voice-console-title span { color:var(--voice-green); }
+      .voice-console-meta { color:var(--voice-muted); font:650 12px/1.4 ui-monospace,monospace; margin-top:8px; }
+      .voice-live-pill { align-items:center; background:rgba(72,225,164,.08); border:1px solid rgba(72,225,164,.26); border-radius:999px; color:var(--voice-mint); display:flex; font:800 12px system-ui; gap:9px; padding:10px 15px; }
+      .voice-live-pill::before { background:currentColor; border-radius:50%; box-shadow:0 0 0 5px rgba(72,225,164,.10),0 0 18px currentColor; content:""; height:8px; width:8px; }
+      .voice-live-pill.busy { background:rgba(247,200,93,.08); border-color:rgba(247,200,93,.30); color:var(--voice-yellow); }
+      .voice-live-pill.error { background:rgba(255,140,107,.08); border-color:rgba(255,140,107,.32); color:var(--voice-coral); }
+      .voice-primary-grid { display:grid; gap:18px; grid-template-columns:minmax(0,1.34fr) minmax(330px,.66fr); }
+      .voice-card { background:linear-gradient(145deg,rgba(15,32,36,.98),rgba(9,22,26,.98)); border:1px solid rgba(141,165,160,.16); border-radius:24px; box-shadow:0 22px 60px rgba(0,0,0,.22); box-sizing:border-box; }
+      .voice-presence { align-items:center; display:grid; gap:26px; grid-template-columns:154px minmax(0,1fr); min-height:322px; overflow:hidden; padding:32px; position:relative; }
+      .voice-presence::after { background:radial-gradient(circle,rgba(72,225,164,.12),transparent 68%); content:""; height:320px; pointer-events:none; position:absolute; right:-110px; top:-130px; width:320px; }
+      .voice-orb { align-items:center; aspect-ratio:1; background:radial-gradient(circle at 36% 32%,#9af4d0 0 8%,#48e1a4 9% 25%,#168a68 56%,#0c4539 100%); border:1px solid rgba(154,244,208,.55); border-radius:50%; box-shadow:0 0 0 12px rgba(72,225,164,.05),0 0 0 25px rgba(72,225,164,.025),0 28px 70px rgba(32,210,149,.25); display:flex; justify-content:center; position:relative; transition:filter .25s,transform .25s; }
+      .voice-orb::before { border:2px solid rgba(6,32,24,.45); border-radius:50%; content:""; inset:24%; position:absolute; }
+      .voice-orb::after { background:#062018; border-radius:50%; box-shadow:0 0 22px rgba(6,32,24,.55); content:""; height:18%; position:absolute; width:18%; }
+      .voice-orb.busy { animation:voice-breathe 1.7s ease-in-out infinite; filter:hue-rotate(72deg); }
+      .voice-orb.error { filter:hue-rotate(140deg) saturate(.78); }
+      @keyframes voice-breathe { 50% { box-shadow:0 0 0 18px rgba(247,200,93,.06),0 0 0 36px rgba(247,200,93,.025),0 28px 80px rgba(247,200,93,.22); transform:scale(1.025); } }
+      @media (prefers-reduced-motion:reduce) { .voice-orb.busy { animation:none; } * { scroll-behavior:auto !important; transition-duration:.01ms !important; } }
+      .voice-kicker { color:var(--voice-green); font:850 11px/1.4 ui-monospace,monospace; letter-spacing:.18em; text-transform:uppercase; }
+      .voice-state-title { color:var(--voice-ink); font:900 clamp(35px,5vw,62px)/.96 system-ui; letter-spacing:-.055em; margin:12px 0 14px; }
+      .voice-state-copy { color:var(--voice-muted); font:16px/1.6 system-ui; margin:0; max-width:570px; }
+      .voice-wake-phrase { align-items:center; background:rgba(72,225,164,.07); border:1px solid rgba(72,225,164,.16); border-radius:14px; color:#c9f9e7; display:inline-flex; font:750 14px system-ui; gap:9px; margin-top:24px; padding:11px 14px; }
+      .voice-wake-phrase span { color:var(--voice-green); }
+      .voice-volume { display:flex; flex-direction:column; min-height:322px; padding:28px; }
+      .voice-card-head { align-items:flex-start; display:flex; gap:16px; justify-content:space-between; }
+      .voice-card-label { color:var(--voice-muted); font:800 12px/1.4 system-ui; letter-spacing:.08em; text-transform:uppercase; }
+      .voice-volume-number { color:var(--voice-ink); font:900 58px/.9 system-ui; letter-spacing:-.06em; }
+      .voice-volume-number small { color:var(--voice-muted); font-size:18px; letter-spacing:0; }
+      .voice-range-wrap { margin:38px 0 22px; }
+      .voice-range { accent-color:var(--voice-green); cursor:pointer; height:34px; margin:0; width:100%; }
+      .voice-range-labels { color:var(--voice-muted); display:flex; font:700 11px ui-monospace,monospace; justify-content:space-between; margin-top:3px; }
+      .voice-volume-actions { display:grid; gap:10px; grid-template-columns:52px 1fr 52px; margin-top:auto; }
+      .voice-button { align-items:center; background:#14282d; border:1px solid rgba(141,165,160,.22); border-radius:14px; color:var(--voice-ink); cursor:pointer; display:inline-flex; font:800 14px system-ui; justify-content:center; min-height:48px; padding:0 16px; transition:background .15s,border-color .15s,transform .15s; }
+      .voice-button:hover { background:#193239; border-color:rgba(72,225,164,.42); }
+      .voice-button:active { transform:scale(.98); }
+      .voice-button:focus-visible,.voice-switch:focus-visible,.voice-range:focus-visible { outline:3px solid rgba(72,225,164,.55); outline-offset:3px; }
+      .voice-button.primary { background:var(--voice-green); border-color:var(--voice-green); color:#062018; }
+      .voice-button.primary:hover { background:var(--voice-mint); }
+      .voice-button.warning { color:#ffd8cc; }
+      .voice-button:disabled { cursor:wait; opacity:.55; }
+      .voice-secondary-grid { display:grid; gap:18px; grid-template-columns:repeat(2,minmax(0,1fr)); margin-top:18px; }
+      .voice-section { padding:25px; }
+      .voice-section-title { color:var(--voice-ink); font:850 20px/1.2 system-ui; letter-spacing:-.02em; margin:5px 0 20px; }
+      .voice-toggle-list { display:grid; gap:10px; }
+      .voice-toggle-row { align-items:center; background:rgba(4,13,16,.34); border:1px solid rgba(141,165,160,.13); border-radius:16px; display:flex; gap:16px; justify-content:space-between; min-height:68px; padding:10px 12px 10px 16px; }
+      .voice-toggle-copy { display:grid; gap:4px; }
+      .voice-toggle-copy strong { color:var(--voice-ink); font:780 15px system-ui; }
+      .voice-toggle-copy span { color:var(--voice-muted); font:13px/1.35 system-ui; }
+      .voice-switch { background:#24383d; border:0; border-radius:999px; cursor:pointer; height:34px; padding:3px; position:relative; transition:background .2s; width:58px; }
+      .voice-switch::after { background:#8da5a0; border-radius:50%; box-shadow:0 3px 8px rgba(0,0,0,.28); content:""; display:block; height:28px; transition:background .2s,transform .2s; width:28px; }
+      .voice-switch[aria-pressed="true"] { background:rgba(72,225,164,.24); }
+      .voice-switch[aria-pressed="true"]::after { background:var(--voice-green); transform:translateX(24px); }
+      .voice-conversation { display:grid; gap:12px; }
+      .voice-bubble { background:rgba(4,13,16,.42); border:1px solid rgba(141,165,160,.13); border-radius:16px 16px 16px 5px; padding:15px 17px; }
+      .voice-bubble.reply { background:rgba(72,225,164,.07); border-color:rgba(72,225,164,.17); border-radius:16px 16px 5px 16px; }
+      .voice-bubble span { color:var(--voice-muted); display:block; font:800 10px ui-monospace,monospace; letter-spacing:.12em; margin-bottom:7px; text-transform:uppercase; }
+      .voice-bubble strong { color:var(--voice-ink); font:700 15px/1.5 system-ui; overflow-wrap:anywhere; }
+      .voice-stats { display:grid; gap:10px; grid-template-columns:repeat(4,1fr); margin-top:18px; }
+      .voice-stat { background:rgba(4,13,16,.38); border:1px solid rgba(141,165,160,.13); border-radius:16px; padding:16px; }
+      .voice-stat span { color:var(--voice-muted); display:block; font:750 10px/1.3 system-ui; letter-spacing:.07em; margin-bottom:8px; text-transform:uppercase; }
+      .voice-stat strong { color:var(--voice-ink); font:800 17px/1.2 ui-monospace,monospace; overflow-wrap:anywhere; }
+      .voice-tools { align-items:center; display:flex; flex-wrap:wrap; gap:10px; margin-top:18px; }
+      .voice-tools-note { color:var(--voice-muted); flex:1 1 260px; font:13px/1.5 system-ui; }
+      .voice-toast { background:#d9fff0; border-radius:12px; bottom:22px; box-shadow:0 14px 45px rgba(0,0,0,.35); color:#08251c; font:800 13px system-ui; opacity:0; padding:12px 16px; pointer-events:none; position:fixed; right:22px; transform:translateY(10px); transition:opacity .2s,transform .2s; z-index:50; }
+      .voice-toast.show { opacity:1; transform:translateY(0); }
+
+      /* Voice Lab evidence inbox. Outcome flags and human-review state are
+         intentionally separate so color never has to carry meaning alone. */
+      .codex-session-page { color:var(--voice-ink); max-width:1260px; padding:30px 30px 54px; }
+      .codex-session-head { align-items:flex-end; border-bottom:1px solid rgba(141,165,160,.14); margin-bottom:22px; padding-bottom:24px; }
+      .codex-session-title { color:var(--voice-ink); font:850 clamp(34px,4vw,52px)/.98 system-ui; letter-spacing:-.045em; margin:7px 0 12px; }
+      .codex-session-subtitle { color:var(--voice-muted); font:14px/1.65 system-ui; max-width:760px; }
+      .codex-session-actions { align-items:center; display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }
+      .codex-session-action { background:rgba(141,165,160,.07); border:1px solid rgba(141,165,160,.22); border-radius:12px; color:var(--voice-ink); cursor:pointer; font:750 11px system-ui; letter-spacing:.04em; min-height:40px; padding:0 13px; text-transform:none; }
+      .codex-session-action:hover { background:rgba(72,225,164,.09); border-color:rgba(72,225,164,.42); }
+      .voice-lab-guide { align-items:center; background:linear-gradient(135deg,rgba(15,32,36,.98),rgba(8,22,25,.98)); border:1px solid rgba(141,165,160,.16); border-radius:18px; display:flex; flex-wrap:wrap; gap:13px 20px; margin-bottom:16px; padding:15px 18px; }
+      .voice-lab-guide strong { color:var(--voice-ink); font:800 12px system-ui; margin-right:auto; }
+      .voice-lab-key { align-items:center; color:var(--voice-muted); display:inline-flex; font:650 11px system-ui; gap:7px; }
+      .evidence-result-flag { align-items:center; border:1px solid currentColor; border-radius:999px; display:inline-flex; flex:0 0 auto; font:850 10px system-ui; gap:6px; letter-spacing:.035em; padding:5px 8px; }
+      .evidence-result-flag::before { content:""; display:block; height:6px; width:6px; }
+      .evidence-result-flag.success { background:rgba(72,225,164,.09); color:var(--voice-green); }
+      .evidence-result-flag.success::before { background:currentColor; border-radius:50%; box-shadow:0 0 10px currentColor; }
+      .evidence-result-flag.error { background:rgba(255,140,107,.09); color:var(--voice-coral); }
+      .evidence-result-flag.error::before { background:currentColor; transform:rotate(45deg); }
+      .evidence-result-flag.captured { background:rgba(141,165,160,.07); color:#a8bfba; }
+      .evidence-result-flag.captured::before { border:1px solid currentColor; border-radius:50%; box-sizing:border-box; }
+      .evidence-review-dot { background:#38bdf8; border-radius:50%; box-shadow:0 0 0 4px rgba(56,189,248,.11),0 0 14px rgba(56,189,248,.75); display:inline-block; flex:0 0 auto; height:8px; width:8px; }
+      .voice-lab-inbox-stats { display:grid; gap:10px; grid-template-columns:repeat(4,1fr); margin-bottom:22px; }
+      .voice-lab-inbox-stat { background:var(--voice-card); border:1px solid rgba(141,165,160,.16); border-radius:16px; display:grid; gap:4px; padding:16px 17px; }
+      .voice-lab-inbox-stat strong { color:var(--voice-ink); font:850 27px/1 system-ui; }
+      .voice-lab-inbox-stat span { color:var(--voice-muted); font:700 11px system-ui; }
+      .voice-lab-inbox-stat.needs-review strong { color:#7dd3fc; }
+      .voice-lab-inbox-stat.success strong { color:var(--voice-green); }
+      .voice-lab-inbox-stat.error strong { color:var(--voice-coral); }
+      .codex-diag-config { background:rgba(15,32,36,.72); border:1px solid rgba(141,165,160,.16); border-radius:16px; margin-bottom:24px; padding:13px 15px; }
+      .codex-diag-config input { border-radius:10px; min-height:38px; }
+      .codex-list-heading { align-items:flex-end; margin:0 0 13px; }
+      .codex-list-heading h3 { color:var(--voice-ink); font:820 23px system-ui; }
+      .codex-list-legend { color:var(--voice-muted); font:600 11px/1.4 system-ui; }
+      .codex-research-workspace { gap:18px; grid-template-columns:minmax(280px,340px) minmax(0,1fr); }
+      .codex-session-queue { gap:9px; max-height:calc(100vh - 48px); overflow:auto; padding-right:4px; }
+      .codex-session-choice { background:rgba(11,23,27,.88); border:1px solid rgba(141,165,160,.15); border-radius:16px; gap:9px; min-height:112px; padding:15px 16px; position:relative; }
+      .codex-session-choice:hover { background:rgba(15,32,36,.98); border-color:rgba(141,165,160,.38); }
+      .codex-session-choice.active { background:linear-gradient(145deg,rgba(15,43,46,.98),rgba(10,26,30,.98)); border-color:rgba(72,225,164,.52); box-shadow:inset 3px 0 0 var(--voice-green); }
+      .codex-session-choice-top { align-items:flex-start; }
+      .codex-session-choice-heard { font:780 14px/1.4 system-ui; padding-right:4px; }
+      .codex-session-choice-badges { align-items:center; display:flex; gap:10px; }
+      .codex-session-choice-meta { color:#718b86; font:10px/1.45 ui-monospace,monospace; }
+      .codex-selected-session { background:rgba(7,17,20,.54); border:1px solid rgba(141,165,160,.14); border-radius:22px; overflow:hidden; }
+      .codex-selected-hero { background:radial-gradient(circle at 90% 10%,rgba(72,225,164,.11),transparent 33%),linear-gradient(145deg,rgba(15,32,36,.98),rgba(9,22,26,.98)); border:0; border-bottom:1px solid rgba(141,165,160,.14); margin:0; padding:25px 26px; }
+      .codex-selected-session.error .codex-selected-hero { background:radial-gradient(circle at 90% 10%,rgba(255,140,107,.12),transparent 33%),linear-gradient(145deg,rgba(15,32,36,.98),rgba(9,22,26,.98)); }
+      .codex-selected-hero h3 { font:850 clamp(25px,3vw,36px)/1.12 system-ui; margin:18px 0 9px; }
+      .codex-selected-hero p { color:var(--voice-muted); font:13px/1.6 system-ui; }
+      .voice-selected-status { align-items:center; display:flex; flex-wrap:wrap; gap:11px; }
+      .voice-review-state { align-items:center; color:#7dd3fc; display:inline-flex; font:750 11px system-ui; gap:9px; }
+      .voice-review-state.reviewed { color:var(--voice-muted); }
+      .codex-detail-grid { gap:12px; padding:14px; }
+      .codex-detail-panel,.codex-recognition-box,.codex-acoustic-box { background:var(--voice-card); border:1px solid rgba(141,165,160,.15); border-radius:15px; }
+      .codex-review button { border-radius:10px; min-height:38px; padding:7px 11px; }
+      .codex-review button.selected { background:var(--voice-green); border-color:var(--voice-green); color:#062017; }
+      .codex-research-panel { background:rgba(11,23,27,.78); border:1px solid rgba(141,165,160,.15); border-radius:20px; margin:30px 0 0; padding:20px; }
+      .codex-research-stat,.codex-report-card { border-radius:13px; }
+      @media (max-width:900px) { .voice-primary-grid { grid-template-columns:1fr; } .voice-volume { min-height:280px; } .voice-presence { min-height:290px; } .voice-stats { grid-template-columns:repeat(2,1fr); } }
+      @media (max-width:760px) { .voice-lab-inbox-stats { grid-template-columns:1fr 1fr; } .codex-research-workspace { grid-template-columns:1fr; } .codex-session-queue { grid-auto-columns:minmax(260px,82%); max-height:none; overflow-x:auto; } }
+      @media (max-width:650px) { .codex-overview-hero { padding:20px 12px 36px; } .voice-console-top { align-items:flex-start; } .voice-live-pill { padding:9px 11px; } .voice-primary-grid,.voice-secondary-grid { grid-template-columns:1fr; } .voice-presence { grid-template-columns:86px minmax(0,1fr); min-height:0; padding:24px 20px; } .voice-state-title { font-size:36px; } .voice-state-copy { font-size:14px; } .voice-wake-phrase { margin-top:17px; } .voice-volume,.voice-section { padding:21px; } .voice-stats { grid-template-columns:1fr 1fr; } .voice-button { min-height:50px; } .voice-tools { align-items:stretch; flex-direction:column; } .voice-tools .voice-button { width:100%; } .codex-session-page { padding:22px 12px 36px; } .codex-session-head { align-items:flex-start; } .codex-session-actions { justify-content:flex-start; } .voice-lab-guide { align-items:flex-start; flex-direction:column; } .voice-lab-guide strong { margin-right:0; } .codex-research-stats { grid-template-columns:1fr 1fr; } .codex-detail-grid { grid-template-columns:1fr; padding:10px; } }
     `;
     root.appendChild(style);
 
     const tabs = document.createElement("aside");
     tabs.className = "codex-view-tabs";
     tabs.innerHTML = `
-      <div class="codex-sidebar-brand"><div><div class="codex-sidebar-kicker">ESP32-S3</div><div class="codex-sidebar-title">Home Assistant</div><div class="codex-sidebar-subtitle">Local voice operations console</div></div><div class="codex-sidebar-ready" data-sidebar-ready><span class="codex-status-dot"></span><span data-sidebar-ready-text>Connecting</span></div></div>
+      <div class="codex-sidebar-brand"><div><div class="codex-sidebar-kicker">ESP32-S3</div><div class="codex-sidebar-title">Voice Satellite</div><div class="codex-sidebar-subtitle">Private, local voice control</div></div><div class="codex-sidebar-ready" data-sidebar-ready><span class="codex-status-dot"></span><span data-sidebar-ready-text>Connecting</span></div></div>
       <nav class="codex-sidebar-nav" aria-label="Primary navigation">
-        <a class="codex-view-tab" href="${PAGE_OVERVIEW}" data-view="overview"><span>Overview</span><small>Live device</small></a>
-        <a class="codex-view-tab" href="${PAGE_SESSIONS}" data-view="sessions"><span>Research Sessions <span data-session-count>0</span></span><small data-sidebar-report-meta>Evidence</small><span class="codex-tab-report-count" data-report-count hidden></span></a>
+        <a class="codex-view-tab" href="${PAGE_OVERVIEW}" data-view="overview"><span>Control</span><small>Live device</small></a>
+        <a class="codex-view-tab" href="${PAGE_SESSIONS}" data-view="sessions"><span>Voice Lab <span data-session-count>0</span></span><small data-sidebar-report-meta>Evidence</small><span class="codex-tab-report-count" data-report-count hidden></span></a>
       </nav>
       <div class="codex-sidebar-context"><h3 data-sidebar-workspace>Live operations</h3><div class="codex-sidebar-fact"><span>Last heard</span><strong data-sidebar-heard>No transcript yet</strong></div><div class="codex-sidebar-fact"><span>Assistant reply</span><strong data-sidebar-reply>No reply yet</strong></div><div class="codex-sidebar-fact"><span>Last request</span><strong data-sidebar-timing>Waiting for timing</strong></div></div>
     `;
@@ -413,18 +550,20 @@ customElements.whenDefined("esp-app").then(() => {
     page.hidden = true;
     page.innerHTML = `
       <div class="codex-session-head">
-        <div><div class="codex-eyebrow">VOICE RESEARCH WORKSPACE</div><h2 class="codex-session-title">Session evidence</h2><div class="codex-session-subtitle">Review one interaction at a time. Labels and notes synchronize to the private research service and are included in the next deterministic report before covered raw recordings roll over.</div></div>
+        <div><div class="codex-eyebrow">VOICE LAB</div><h2 class="codex-session-title">Evidence inbox</h2><div class="codex-session-subtitle">Inspect every voice request, confirm what worked, and label problems for the next research report. Device outcome and human review are tracked separately.</div></div>
         <div class="codex-session-actions"><button class="codex-session-action" data-export="json">Export JSON</button><button class="codex-session-action" data-export="csv">Export CSV</button><button class="codex-session-action" data-clear>Clear local history</button></div>
       </div>
+      <div class="voice-lab-guide" aria-label="Evidence status guide"><strong>How to read each record</strong><span class="voice-lab-key"><span class="evidence-result-flag success">Successful</span>request completed</span><span class="voice-lab-key"><span class="evidence-result-flag error">Error</span>failure recorded</span><span class="voice-lab-key"><span class="evidence-review-dot" aria-hidden="true"></span>needs your review; the dot disappears after review</span></div>
+      <div class="voice-lab-inbox-stats" data-inbox-stats></div>
       <div class="codex-diag-config"><label for="codex-diag-url">Acoustic diagnostics service</label><input id="codex-diag-url" data-diagnostics-url placeholder="http://homeassistant.local:11400"><button class="codex-session-action" type="button" data-diagnostics-connect>Connect</button><span class="codex-diag-status" data-diagnostics-status>Not configured</span></div>
+      <div class="codex-list-heading"><div><div class="codex-eyebrow">LATEST EVIDENCE</div><h3>Review queue</h3></div><div class="codex-list-legend">Select a record to inspect its transcript, audio, timing, and review controls.</div></div>
+      <div class="codex-session-list"></div>
       <section class="codex-research-panel">
         <div class="codex-research-head"><div><div class="codex-eyebrow">AUTORESEARCH RETENTION</div><h3>Evidence archive</h3></div><div class="codex-research-state" data-research-state>Waiting for diagnostics</div></div>
         <div class="codex-research-stats" data-research-stats></div>
         <div class="codex-capacity"><div class="codex-capacity-label"><span>Raw evidence capacity</span><span data-capacity-label>0%</span></div><div class="codex-capacity-track"><span data-capacity-fill></span></div></div>
         <div class="codex-report-list" data-report-list><div class="codex-report-empty">No completed research reports yet.</div></div>
       </section>
-      <div class="codex-list-heading"><div><div class="codex-eyebrow">LATEST INTERACTIONS</div><h3>Review queue</h3></div><div class="codex-list-legend"><span class="ok">Successful</span><span class="error">Error</span><span>Unreviewed</span></div></div>
-      <div class="codex-session-list"></div>
     `;
     overview.insertAdjacentElement("afterend", page);
 
@@ -432,8 +571,48 @@ customElements.whenDefined("esp-app").then(() => {
     const hero = document.createElement("section");
     hero.className = "codex-overview-hero";
     hero.innerHTML = `
-      <div class="codex-hero-status" data-hero-status><div class="codex-eyebrow">LIVE VOICE SATELLITE</div><h2 data-hero-availability>Reading device state...</h2><p data-hero-state>Waiting for the ESP32 entities to update.</p></div>
-      <div class="codex-hero-metrics"><div class="codex-hero-metric"><span>Interaction</span><strong data-hero-interaction>Reading state</strong></div><div class="codex-hero-metric"><span>Pipeline</span><strong data-hero-pipeline>Waiting for device</strong></div><div class="codex-hero-metric"><span>Audio</span><strong data-hero-audio>Reading wake state</strong></div></div>`;
+      <div class="voice-console">
+        <header class="voice-console-top"><div><h1 class="voice-console-title">Voice <span>Satellite</span></h1><div class="voice-console-meta">ESP32-S3 · LOCAL CONTROL</div></div><div class="voice-live-pill" data-live-pill>Connecting</div></header>
+        <div class="voice-primary-grid">
+          <section class="voice-card voice-presence" aria-live="polite">
+            <div class="voice-orb" data-voice-orb aria-hidden="true"></div>
+            <div><div class="voice-kicker" data-voice-kicker>Checking voice pipeline</div><h2 class="voice-state-title" data-voice-title>Connecting…</h2><p class="voice-state-copy" data-voice-copy>Waiting for the assistant to report its current state.</p><div class="voice-wake-phrase">Say <span>“Hey Burden”</span></div></div>
+          </section>
+          <section class="voice-card voice-volume">
+            <div class="voice-card-head"><div><div class="voice-card-label">Speaker volume</div><div class="voice-console-meta">Full digital output range</div></div><div class="voice-volume-number"><span data-volume-value>--</span><small>%</small></div></div>
+            <div class="voice-range-wrap"><input class="voice-range" data-volume-range type="range" min="0" max="100" step="5" value="50" aria-label="Speaker volume"><div class="voice-range-labels"><span>Muted 0%</span><span>Full 100%</span></div></div>
+            <div class="voice-volume-actions"><button class="voice-button" type="button" data-volume-step="-5" aria-label="Lower volume">−</button><button class="voice-button primary" type="button" data-device-button="Test Speaker">Test speaker</button><button class="voice-button" type="button" data-volume-step="5" aria-label="Raise volume">+</button></div>
+          </section>
+        </div>
+        <section class="voice-card voice-section" style="margin-bottom:20px">
+          <div class="voice-kicker">Listen and compare</div><h2 class="voice-section-title">Speaker sound tests</h2>
+          <p class="voice-tools-note">Plays through the ESP32 speaker at the volume above. Speech samples are stored on the board. Tests pause wake-word listening and switch the ring off until playback finishes.</p>
+          <div style="display:flex;flex-wrap:wrap;gap:10px;margin:16px 0">
+            <button class="voice-button" data-device-button="Test Speaker">Frequency sweep</button>
+            <button class="voice-button" data-device-button="Test Chime">Doorbell chime</button>
+            <button class="voice-button" data-device-button="Test Random Sound">Random melody</button>
+            <button class="voice-button" data-device-button="Test Soft Noise">Soft noise</button>
+            <button class="voice-button" data-device-button="Test Level Steps">Rising level test</button>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:10px;margin:16px 0">
+            <button class="voice-button primary" data-device-button="Test Speech A">Speech: counting</button>
+            <button class="voice-button primary" data-device-button="Test Speech B">Speech: lights</button>
+            <button class="voice-button" data-device-button="Test Speech Stereo">Counting: stereo comparison</button>
+            <button class="voice-button warning" data-device-button="Stop Test Sound">Stop test</button>
+          </div>
+          <p class="voice-tools-note">The rising test plays four 1 kHz tones at 10%, 25%, 50%, and 80% source amplitude. Counting and its stereo comparison use identical speech and levels. Start low and compare clarity as you raise the main volume.</p>
+        </section>
+        <div class="voice-secondary-grid">
+          <section class="voice-card voice-section"><div class="voice-kicker">Everyday controls</div><h2 class="voice-section-title">Listening preferences</h2><div class="voice-toggle-list">
+            <div class="voice-toggle-row"><div class="voice-toggle-copy"><strong>Wake word</strong><span>Listen for “Hey Burden”</span></div><button class="voice-switch" type="button" data-device-switch="Wake Word Enabled" aria-label="Toggle wake word" aria-pressed="false"></button></div>
+            <div class="voice-toggle-row"><div class="voice-toggle-copy"><strong>Wake sound</strong><span>Play a short acknowledgement</span></div><button class="voice-switch" type="button" data-device-switch="Wake Sound" aria-label="Toggle wake sound" aria-pressed="false"></button></div>
+            <div class="voice-toggle-row"><div class="voice-toggle-copy"><strong>One-breath buffer</strong><span>How much speech to retain before the command</span></div><div><input class="voice-range" data-preroll-range type="range" min="180" max="340" step="20" value="260" aria-label="One-breath pre-roll"><div class="voice-range-labels"><span>180 ms</span><strong data-preroll-value>-- ms</strong><span>340 ms</span></div></div></div>
+          </div></section>
+          <section class="voice-card voice-section"><div class="voice-kicker">Latest interaction</div><h2 class="voice-section-title">What just happened</h2><div class="voice-conversation"><div class="voice-bubble"><span>You said</span><strong data-last-heard>Nothing heard yet</strong></div><div class="voice-bubble reply"><span>Assistant</span><strong data-last-reply>No reply yet</strong></div></div></section>
+        </div>
+        <div class="voice-stats" aria-label="Device health"><div class="voice-stat"><span>Pipeline</span><strong data-stat-pipeline>Waiting</strong></div><div class="voice-stat"><span>Total time</span><strong data-stat-time>—</strong></div><div class="voice-stat"><span>Wi-Fi</span><strong data-stat-wifi>—</strong></div><div class="voice-stat"><span>Free memory</span><strong data-stat-memory>—</strong></div></div>
+        <section class="voice-card voice-section voice-tools"><div class="voice-tools-note"><strong style="color:var(--voice-ink)">Device tools</strong><br>Restart controls are intentionally separated from everyday actions.</div><button class="voice-button warning" type="button" data-device-button="Restart Device" data-confirm="Restart the voice satellite now?">Restart device</button><button class="voice-button warning" type="button" data-device-button="Restart in Safe Mode" data-confirm="Restart the voice satellite in safe mode?">Safe mode</button></section>
+      </div><div class="voice-toast" data-voice-toast role="status"></div>`;
     overview.insertAdjacentElement("beforebegin", hero);
 
     const entityTableRoot = overview.querySelector("esp-entity-table")?.shadowRoot;
@@ -453,6 +632,24 @@ customElements.whenDefined("esp-app").then(() => {
       entityTableRoot.appendChild(entityStyle);
     }
 
+    const deviceValues = {};
+    let toastTimer;
+    const showToast = (message) => {
+      const toast = hero.querySelector("[data-voice-toast]");
+      toast.textContent = message;
+      toast.classList.add("show");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove("show"), 2200);
+    };
+    const friendlyVoiceState = (availability, voiceState) => {
+      const combined = `${availability} ${voiceState}`.toUpperCase();
+      if (combined.includes("ERROR") || combined.includes("UNAVAILABLE")) return {kind:"error", kicker:"Needs attention", title:"Unavailable", copy:voiceState || availability};
+      if (combined.includes("SPEAKING") || combined.includes("RESPONSE")) return {kind:"busy", kicker:"Assistant response", title:"Speaking", copy:"The assistant is playing its response."};
+      if (combined.includes("PROCESS") || combined.includes("STT") || combined.includes("THINK")) return {kind:"busy", kicker:"Processing your request", title:"Thinking", copy:"Your request is being recognized and routed."};
+      if (combined.includes("LISTEN") && !combined.includes("WAITING")) return {kind:"busy", kicker:"Microphone active", title:"Listening", copy:"Speak naturally. The assistant is capturing your request."};
+      if (combined.includes("READY") || combined.includes("WAITING FOR WAKE")) return {kind:"ready", kicker:"Ready for a request", title:"Ready for you", copy:"The microphone is listening locally for the wake phrase."};
+      return {kind:"busy", kicker:"Voice pipeline active", title:"Working", copy:voiceState || availability || "Waiting for the device."};
+    };
     const updateHero = () => {
       const tableRoot = overview.querySelector("esp-entity-table")?.shadowRoot;
       if (!tableRoot) return;
@@ -465,16 +662,44 @@ customElements.whenDefined("esp-app").then(() => {
           values[label] = control ? (control.checked ? "Enabled" : "Disabled") : (cells[2]?.textContent?.trim() || "");
         }
       });
+      Object.assign(deviceValues, values);
       const availability = values["Interaction Availability"] || "Device state unavailable";
       const ready = availability.includes("READY");
-      const status = hero.querySelector("[data-hero-status]");
-      status.classList.toggle("ready", ready);
-      status.classList.toggle("busy", !ready && !availability.includes("unavailable"));
-      hero.querySelector("[data-hero-availability]").textContent = availability;
-      hero.querySelector("[data-hero-state]").textContent = ready ? "The device is listening for Hey Burden and can accept a request." : (values["Voice State"] || "The device is currently occupied or unavailable.");
-      hero.querySelector("[data-hero-interaction]").textContent = ready ? "Accepting requests" : availability;
-      hero.querySelector("[data-hero-pipeline]").textContent = values["Voice State"] || "Waiting for device";
-      hero.querySelector("[data-hero-audio]").textContent = values["Wake Word Enabled"] || "Wake state unavailable";
+      const voiceState = values["Voice State"] || "";
+      const presentation = friendlyVoiceState(availability, voiceState);
+      const livePill = hero.querySelector("[data-live-pill]");
+      livePill.classList.toggle("busy", presentation.kind === "busy");
+      livePill.classList.toggle("error", presentation.kind === "error");
+      livePill.textContent = presentation.kind === "ready" ? "Online · Ready" : presentation.kind === "error" ? "Attention needed" : "Online · Busy";
+      const orb = hero.querySelector("[data-voice-orb]");
+      orb.classList.toggle("busy", presentation.kind === "busy");
+      orb.classList.toggle("error", presentation.kind === "error");
+      hero.querySelector("[data-voice-kicker]").textContent = presentation.kicker;
+      hero.querySelector("[data-voice-title]").textContent = presentation.title;
+      hero.querySelector("[data-voice-copy]").textContent = presentation.copy;
+      hero.querySelector("[data-last-heard]").textContent = values["Heard (Exact STT)"] || "Nothing heard yet";
+      hero.querySelector("[data-last-reply]").textContent = values["Assistant Reply (Exact)"] || values["Last Error"] || "No reply yet";
+      hero.querySelector("[data-stat-pipeline]").textContent = voiceState.replaceAll("_", " ") || "Waiting";
+      hero.querySelector("[data-stat-time]").textContent = values["Total Busy Time"] || "—";
+      hero.querySelector("[data-stat-wifi]").textContent = values["Wi-Fi Signal"] || "—";
+      const freeHeap = values["Free Heap"] || "";
+      const freePsram = values["Free PSRAM"] || "";
+      hero.querySelector("[data-stat-memory]").textContent = freePsram || freeHeap || "—";
+      const volume = Math.round(parseFloat(values["Speaker Volume"]));
+      const volumeRange = hero.querySelector("[data-volume-range]");
+      if (Number.isFinite(volume)) {
+        hero.querySelector("[data-volume-value]").textContent = volume;
+        if (root.activeElement !== volumeRange) volumeRange.value = volume;
+      }
+      const preRoll = Math.round(parseFloat(values["One-Breath Pre-roll"]));
+      const preRollRange = hero.querySelector("[data-preroll-range]");
+      if (Number.isFinite(preRoll)) {
+        hero.querySelector("[data-preroll-value]").textContent = `${preRoll} ms`;
+        if (root.activeElement !== preRollRange) preRollRange.value = preRoll;
+      }
+      hero.querySelectorAll("[data-device-switch]").forEach((control) => {
+        control.setAttribute("aria-pressed", values[control.dataset.deviceSwitch] === "Enabled" ? "true" : "false");
+      });
       tabs.querySelector("[data-sidebar-heard]").textContent = values["Heard (Exact STT)"] || "No transcript yet";
       tabs.querySelector("[data-sidebar-reply]").textContent = values["Assistant Reply (Exact)"] || "No reply yet";
       tabs.querySelector("[data-sidebar-timing]").textContent = values["Last Pipeline Timing"] || "Waiting for timing";
@@ -486,6 +711,51 @@ customElements.whenDefined("esp-app").then(() => {
     };
     updateHero();
     setInterval(updateHero, 1000);
+
+    const postDeviceAction = async (path, button, successMessage) => {
+      if (button) button.disabled = true;
+      try {
+        const response = await fetch(path, {method:"POST"});
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        showToast(successMessage);
+      } catch (error) {
+        console.warn("Device control failed", error);
+        showToast("Could not reach the device");
+      } finally {
+        if (button) setTimeout(() => { button.disabled = false; }, 350);
+      }
+    };
+    const setNumber = (name, value, button, message) => postDeviceAction(`/number/${encodeURIComponent(name)}/set?value=${encodeURIComponent(value)}`, button, message);
+    hero.addEventListener("input", (event) => {
+      if (event.target.matches("[data-volume-range]")) hero.querySelector("[data-volume-value]").textContent = event.target.value;
+      if (event.target.matches("[data-preroll-range]")) hero.querySelector("[data-preroll-value]").textContent = `${event.target.value} ms`;
+    });
+    hero.addEventListener("change", (event) => {
+      if (event.target.matches("[data-volume-range]")) setNumber("Speaker Volume", event.target.value, event.target, `Volume set to ${event.target.value}%`);
+      if (event.target.matches("[data-preroll-range]")) setNumber("One-Breath Pre-roll", event.target.value, event.target, `Buffer set to ${event.target.value} ms`);
+    });
+    hero.addEventListener("click", (event) => {
+      const step = event.target.closest("[data-volume-step]");
+      if (step) {
+        const range = hero.querySelector("[data-volume-range]");
+        const next = Math.max(Number(range.min), Math.min(Number(range.max), Number(range.value) + Number(step.dataset.volumeStep)));
+        range.value = next;
+        hero.querySelector("[data-volume-value]").textContent = next;
+        setNumber("Speaker Volume", next, step, `Volume set to ${next}%`);
+        return;
+      }
+      const toggle = event.target.closest("[data-device-switch]");
+      if (toggle) {
+        const name = toggle.dataset.deviceSwitch;
+        const enabled = toggle.getAttribute("aria-pressed") === "true";
+        postDeviceAction(`/switch/${encodeURIComponent(name)}/${enabled ? "turn_off" : "turn_on"}`, toggle, `${name} ${enabled ? "off" : "on"}`);
+        return;
+      }
+      const button = event.target.closest("[data-device-button]");
+      if (!button) return;
+      if (button.dataset.confirm && !confirm(button.dataset.confirm)) return;
+      postDeviceAction(`/button/${encodeURIComponent(button.dataset.deviceButton)}/press`, button, `${button.textContent.trim()} requested`);
+    });
 
     let sessions = readSessions();
     const list = page.querySelector(".codex-session-list");
@@ -503,7 +773,7 @@ customElements.whenDefined("esp-app").then(() => {
     const acousticPanel = (session, row) => {
       const diagnostic = session.acoustic;
       if (!diagnostic) {
-        return `<div class="codex-acoustic-box"><div class="codex-recognition-title">Deep acoustic diagnostics</div><div class="codex-protocol-note">No correlated decoder record yet. New sessions will attach automatically when the diagnostics service is connected.</div></div>`;
+        return `<div class="codex-acoustic-box"><div class="codex-recognition-title">Deep acoustic diagnostics</div><div class="codex-protocol-note">No recognizer capture exists for this interaction. This is expected when the pipeline stopped before Speech-to-Phrase received audio; the device outcome, error, and timing evidence are still retained above.</div></div>`;
       }
       const decoder = diagnostic.decoder || {};
       const audio = diagnostic.audio || {};
@@ -607,25 +877,36 @@ customElements.whenDefined("esp-app").then(() => {
     const render = () => {
       renderResearch();
       count.textContent = `(${sessions.length})`;
+      const inboxStats = page.querySelector("[data-inbox-stats]");
+      const isErrorOutcome = (session) => Boolean(session.error) || (!session.ok && /ERROR|FAILED|FAILURE|TIMEOUT|NO TRANSCRIPT|NO AUDIO/i.test(session.outcome || ""));
+      const successfulCount = sessions.filter((session) => !session.error && session.ok).length;
+      const errorCount = sessions.filter(isErrorOutcome).length;
+      const unreviewedCount = sessions.filter((session) => !session.review).length;
+      inboxStats.innerHTML = `<div class="voice-lab-inbox-stat"><strong>${sessions.length}</strong><span>Total evidence</span></div><div class="voice-lab-inbox-stat needs-review"><strong>${unreviewedCount}</strong><span>Needs review</span></div><div class="voice-lab-inbox-stat success"><strong>${successfulCount}</strong><span>Successful</span></div><div class="voice-lab-inbox-stat error"><strong>${errorCount}</strong><span>Errors</span></div>`;
       if (!sessions.length) {
         list.innerHTML = '<div class="codex-session-empty">No packaged sessions yet. The next completed Hey Burden interaction will appear here automatically.</div>';
         return;
       }
       if (!expandedId || !sessions.some((session) => session.id === expandedId)) expandedId = sessions[0].id;
       const s = sessions.find((session) => session.id === expandedId) || sessions[0];
-      const cardClass = s.error ? "error" : s.ok ? "ok" : "";
+      const cardClass = isErrorOutcome(s) ? "error" : s.ok ? "ok" : "";
       const row = (label, value) => value ? `<div class="codex-session-row"><div class="codex-session-label">${label}</div><div class="codex-session-value">${escapeHtml(value)}</div></div>` : "";
       const timing = (label, value) => `<span class="codex-timing">${label} ${Number(value || 0)}ms</span>`;
       const reviews = [["correct","Correct"],["wrong_stt","Wrong recognition"],["wrong_action","Wrong action"],["missed_audio","Missed audio"]];
       const evidence = recognitionEvidence(s);
-      const selectedReview = reviews.find(([value]) => value === s.review)?.[1] || "Unreviewed";
+      const selectedReview = reviews.find(([value]) => value === s.review)?.[1] || "";
+      const outcomeFlag = (session) => isErrorOutcome(session)
+        ? '<span class="evidence-result-flag error">Error</span>'
+        : session.ok
+          ? '<span class="evidence-result-flag success">Successful</span>'
+          : '<span class="evidence-result-flag captured">Captured</span>';
       const queue = sessions.map((session) => {
-        const stateClass = session.error ? "error" : session.ok ? "ok" : "";
-        const reviewed = reviews.find(([value]) => value === session.review)?.[1] || "Unreviewed";
-        return `<button type="button" class="codex-session-choice ${stateClass} ${session.id === s.id ? "active" : ""}" data-select-session="${escapeHtml(session.id)}"><div class="codex-session-choice-top"><span class="codex-session-choice-heard">${escapeHtml(session.heard || "No transcript")}</span><span class="codex-session-choice-state">${escapeHtml(reviewed)}</span></div><span class="codex-session-choice-meta">${escapeHtml(session.id)} | ${escapeHtml(new Date(session.received_at).toLocaleString())}</span><span class="codex-session-choice-meta">${escapeHtml(session.outcome)} | ${Number(session.total_ms || 0)}ms</span></button>`;
+        const stateClass = isErrorOutcome(session) ? "error" : session.ok ? "ok" : "";
+        const reviewDot = session.review ? "" : '<span class="evidence-review-dot" title="Needs review" aria-label="Needs review"></span>';
+        return `<button type="button" class="codex-session-choice ${stateClass} ${session.id === s.id ? "active" : ""}" data-select-session="${escapeHtml(session.id)}"><div class="codex-session-choice-top"><span class="codex-session-choice-heard">${escapeHtml(session.heard || "No transcript")}</span><span class="codex-session-choice-badges">${reviewDot}${outcomeFlag(session)}</span></div><span class="codex-session-choice-meta">${escapeHtml(new Date(session.received_at).toLocaleString())} · ${Number(session.total_ms || 0)}ms</span><span class="codex-session-choice-meta">${escapeHtml(session.id)}</span></button>`;
       }).join("");
       list.innerHTML = `<div class="codex-research-workspace"><aside class="codex-session-queue">${queue}</aside><article class="codex-selected-session ${cardClass}" data-session-id="${escapeHtml(s.id)}">
-        <section class="codex-selected-hero"><div class="codex-detail-title"><span>Selected interaction</span><span class="codex-session-outcome">${escapeHtml(s.outcome)}</span></div><h3>${escapeHtml(s.heard || "No transcript")}</h3><p>${escapeHtml(s.reply || s.error || "No assistant response was recorded.")} | ${Number(s.total_ms || 0)}ms total | ${escapeHtml(selectedReview)}</p></section>
+        <section class="codex-selected-hero"><div class="voice-selected-status">${outcomeFlag(s)}${s.review ? `<span class="voice-review-state reviewed">Reviewed · ${escapeHtml(selectedReview)}</span>` : '<span class="voice-review-state"><span class="evidence-review-dot" aria-hidden="true"></span>Needs review</span>'}</div><h3>${escapeHtml(s.heard || "No transcript")}</h3><p>${escapeHtml(s.reply || s.error || "No assistant response was recorded.")} · ${Number(s.total_ms || 0)}ms total</p></section>
         <div class="codex-detail-grid">
           <section class="codex-detail-panel"><div class="codex-detail-title"><span>Conversation result</span><span class="codex-session-outcome">${escapeHtml(s.outcome)}</span></div>${row("Wake", s.wake)}${row("Heard", s.heard || "No transcript")}${row("Reply", s.reply)}${row("Matched", s.matched)}${row("Result", s.result)}${row("Error", s.error)}</section>
           <section class="codex-recognition-box"><div class="codex-recognition-title">Recognition decision</div>${row("Normalized", evidence.normalized)}${row("Decision", evidence.decision)}${row("Evidence", evidence.evidence)}${row("Routing", evidence.route)}<div class="codex-protocol-note">This is the final Wyoming transcript and Home Assistant routing decision. Decoder alternatives and acoustic evidence are preserved below.</div></section>
@@ -730,19 +1011,61 @@ customElements.whenDefined("esp-app").then(() => {
           const record = JSON.parse(message.slice(start + marker.length));
           if (!record.id) return;
           const previous = sessions.find((item) => item.id === record.id);
-          record.received_at = previous?.received_at || new Date().toISOString();
-          record.review = previous?.review || "";
-          record.expected_speech = previous?.expected_speech || "";
-          record.review_note = previous?.review_note || "";
-          record.acoustic = previous?.acoustic;
-          record.diagnostics_base_url = previous?.diagnostics_base_url;
-          sessions = [record, ...sessions.filter((item) => item.id !== record.id)].slice(0, MAX_SESSIONS);
+          const now = Date.now();
+          const diagnosticText = normalizeTranscript(record.heard);
+          const imported = previous ? null : sessions.find((item) => {
+            if (!item.synthetic || !item.acoustic) return false;
+            const completed = new Date(item.acoustic.completed_at || item.acoustic.started_at).getTime();
+            return Number.isFinite(completed)
+              && now - completed >= -3000
+              && now - completed <= 120000
+              && normalizeTranscript(item.acoustic.decoder?.final_text) === diagnosticText;
+          });
+          const packaged = previous || imported;
+          record.received_at = packaged?.received_at || new Date().toISOString();
+          record.review = packaged?.review || "";
+          record.expected_speech = packaged?.expected_speech || "";
+          record.review_note = packaged?.review_note || "";
+          record.acoustic = packaged?.acoustic;
+          record.diagnostics_base_url = packaged?.diagnostics_base_url;
+          sessions = [record, ...sessions.filter((item) => item.id !== record.id && item !== imported)].slice(0, MAX_SESSIONS);
           saveSessions(sessions);
+          if (record.acoustic) syncReview(record);
           render();
         } catch (_error) {
           // Leave malformed/truncated records visible in Debug Log for diagnosis.
         }
       });
+    };
+
+    const sessionFromDiagnostic = (diagnostic) => {
+      const serverReview = diagnostic.review || {};
+      const deviceSession = serverReview.device_session && typeof serverReview.device_session === "object"
+        ? serverReview.device_session
+        : {};
+      const decoder = diagnostic.decoder || {};
+      const decoderStatus = String(decoder.status || "UNKNOWN");
+      const recognized = decoderStatus === "OK";
+      const sessionId = deviceSession.id || serverReview.device_session_id || `diagnostic-${diagnostic.id}`;
+      return {
+        ...deviceSession,
+        id: sessionId,
+        received_at: deviceSession.received_at || diagnostic.completed_at || diagnostic.started_at || new Date().toISOString(),
+        wake: deviceSession.wake || "Wake captured upstream",
+        heard: deviceSession.heard || decoder.final_text || "",
+        reply: deviceSession.reply || "",
+        matched: deviceSession.matched || "",
+        result: deviceSession.result || "",
+        error: deviceSession.error || (recognized ? "" : `Speech recognition: ${decoderStatus}`),
+        outcome: deviceSession.outcome || (recognized ? "TRANSCRIBED - ROUTING RECORD NOT CAPTURED" : `STT FAILED - ${decoderStatus}`),
+        ok: Boolean(deviceSession.ok),
+        review: serverReview.review || "",
+        expected_speech: serverReview.expected_speech || "",
+        review_note: serverReview.review_note || "",
+        acoustic: diagnostic,
+        diagnostics_base_url: diagnosticsBaseUrl,
+        synthetic: String(sessionId).startsWith("diagnostic-"),
+      };
     };
 
     const correlateDiagnostics = (records) => {
@@ -765,7 +1088,10 @@ customElements.whenDefined("esp-app").then(() => {
         const diagnosticTime = new Date(diagnostic.completed_at || diagnostic.started_at).getTime();
         let best = null;
         let bestDistance = Infinity;
+        const serverDeviceId = diagnostic.review?.device_session_id;
+        if (serverDeviceId) best = sessions.find((session) => session.id === serverDeviceId && !session.acoustic) || null;
         for (const session of sessions) {
+          if (best) break;
           if (session.acoustic) continue;
           const sessionTime = new Date(session.received_at).getTime();
           const distance = sessionTime - diagnosticTime;
@@ -783,9 +1109,22 @@ customElements.whenDefined("esp-app").then(() => {
           if (!best.review_note && serverReview.review_note) best.review_note = serverReview.review_note;
           claimed.add(diagnostic.id);
           changed = true;
+        } else {
+          const imported = sessionFromDiagnostic(diagnostic);
+          sessions = [imported, ...sessions.filter((session) => session.id !== imported.id)];
+          claimed.add(diagnostic.id);
+          changed = true;
         }
       }
-      if (changed) { saveSessions(sessions); render(); }
+      if (changed) {
+        const timestamp = (session) => {
+          const value = new Date(session.received_at).getTime();
+          return Number.isFinite(value) ? value : 0;
+        };
+        sessions = sessions.sort((left, right) => timestamp(right) - timestamp(left)).slice(0, MAX_SESSIONS);
+        saveSessions(sessions);
+        render();
+      }
       return changed;
     };
 
@@ -807,7 +1146,7 @@ customElements.whenDefined("esp-app").then(() => {
         researchStatus = payload.research || null;
         researchReports = Array.isArray(reportsPayload.reports) ? reportsPayload.reports : [];
         correlateDiagnostics(records);
-        sessions.filter((session) => session.acoustic).forEach(syncReview);
+        sessions.filter((session) => session.acoustic && !session.synthetic).forEach(syncReview);
         renderResearch();
         diagnosticsStatus.textContent = `Connected | ${records.length} raw record${records.length === 1 ? "" : "s"} | ${researchReports.length} report${researchReports.length === 1 ? "" : "s"}`;
       } catch (error) {
@@ -820,6 +1159,10 @@ customElements.whenDefined("esp-app").then(() => {
     ingestRows();
     render();
     renderPage();
+    // Reveal only after the custom shell is complete. The tiny blocking CSS
+    // resource arrives before this much larger JavaScript bundle, preventing
+    // the stock ESPHome shell from painting during download or enhancement.
+    document.querySelector('link[href="/0.css"]')?.remove();
     refreshDiagnostics();
     setInterval(refreshDiagnostics, 4000);
   };

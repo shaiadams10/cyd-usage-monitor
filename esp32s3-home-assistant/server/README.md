@@ -51,6 +51,13 @@ analysis is tracked with `POST /api/reports/<id>/analysis`. It sends
 CORS/private-network headers so the ESP-hosted dashboard can use it from
 another trusted LAN origin.
 
+The dashboard treats `/api/sessions` as an exhaustive recognition ledger. It
+adds each returned record to the review queue even when timestamp/transcript
+correlation cannot find a device log row, including `NO_AUDIO_AFTER_VAD`,
+`NO_FUZZY_MATCH`, `FUZZY_COST_TOO_HIGH`, and empty-transcript results. Those
+diagnostic-only rows retain WAV playback and all decoder/signal evidence; a
+later matching device record is merged into the same queue item.
+
 There is deliberately no age-based deletion. The service monitors the raw
 diagnostic directory and rolls it over only after it exceeds 200 records or
 256 MiB by default. It first takes a lock shared with review updates, embeds
@@ -76,6 +83,14 @@ The example binds to loopback-only alternate ports 11300 and 11200. This avoids
 colliding with the deployed services and prevents accidental LAN exposure.
 Create an ignored `.env` and change the bind addresses only if Home Assistant
 runs in another network namespace and explicitly needs LAN access.
+
+The deployed Home Assistant Container uses host networking for native LAN mDNS
+and ESPHome discovery. Its Wyoming config entries continue to use stable
+service hostnames, mapped inside the Home Assistant container to each
+service's loopback-published host port. Speech-to-Phrase remains bridge-networked
+and reaches Home Assistant through `host.docker.internal`; a narrow host
+firewall rule permits only that bridge subnet to TCP 8123. This preserves the
+normal Compose services without adding an mDNS reflector or proxy.
 
 ```sh
 cp .env.example .env

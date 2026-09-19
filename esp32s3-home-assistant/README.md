@@ -2,8 +2,8 @@
 
 Clean-room v2 firmware for the ESP32-S3-WROOM-1 N16R8 voice satellite. It uses
 ESPHome's ESP-IDF voice stack, on-device microWakeWord detection, a fresh Home
-Assistant Assist command pipeline after every wake, and a deliberately small
-diagnostics dashboard.
+Assistant Assist command pipeline after every wake, and a purpose-built local
+voice control dashboard.
 
 The previous custom Arduino/Wyoming implementation is preserved next to this
 directory as `esp32s3-home-assistant-legacy-2026-08-22/` for rollback and
@@ -17,14 +17,34 @@ into this project.
 | SSD1306 OLED | SDA | GPIO6 |
 | SSD1306 OLED | SCL | GPIO5 |
 | WS2812/NeoPixel LED ring | DI/DIN | GPIO4 |
+| MAX98357A | VIN | 3V3 no-solder option, or verified regulated 5V |
+| MAX98357A | SD/SD_MODE | 3V3 (enable) |
 | MAX98357A | BCLK | GPIO17 |
 | MAX98357A | LRC/WS | GPIO18 |
 | MAX98357A | DIN | GPIO8 |
-| MAX98357A | GAIN | GND (+12 dB) |
+| MAX98357A | GAIN | Unconnected (recommended 9 dB) |
+| MAX98357A | GND | GND |
 | INMP441 | SCK | GPIO15 |
 | INMP441 | WS | GPIO16 |
 | INMP441 | SD | GPIO7 |
 | BOOT button | input | GPIO0 |
+
+See [`HARDWARE.md`](HARDWARE.md) for the canonical connection guide. It has a
+separate, complete wiring table for the OLED, microphone, amplifier, speaker,
+and 12-pixel LED ring, followed by whole-system cross-check diagrams.
+Front/back photographs identify the fitted board as an ESP32-S3 `2025-V1.4`
+dual-USB-C N16R8 DevKitC-style clone. Its front-side `IN-OUT` solder jumper
+controls whether USB VBUS reaches the `5Vin` header. The operator has now closed
+that jumper and measured 4.8 V at `5Vin`, which is valid for the MAX98357A and
+LED ring. Its back-side `USB-OTG` jumper is not needed for this COM-powered
+arrangement. Never combine external `5Vin` power and USB while `IN-OUT` is
+closed.
+
+No solder modification is required to test or use the amplifier at reduced
+power: leave `5Vin` unused and connect MAX98357A `VIN` and `SD` to the healthy
+`3V3` rail. The amplifier's specified supply range includes 3.3 V. Begin at low
+speaker volume; if audio causes a reset, the shared regulator lacks sufficient
+headroom and the amplifier needs a dedicated or verified 5 V source.
 
 The optional code-defined carrier PCB is in `circuit/`. Its tscircuit CLI and
 TypeScript compiler are installed only in that directory and pinned by its npm
@@ -35,38 +55,54 @@ blocked from fabrication until the exact breakout-board bodies, pin orders,
 overhangs, and heights are measured; see `circuit/README.md` before ordering or
 starting an enclosure.
 
-Speaker software volume defaults to **50%**, is restored after reboot, and is
-applied consistently to the listening acknowledgement, speaker test, and every
-streamed response.
+Speaker software volume defaults to **50%**, spans a true **0–100% PCM
+amplitude** range, is restored after reboot, and is applied consistently to the
+listening acknowledgement, the bounded diagnostic tone, and every streamed
+response. There is no hidden response multiplier or half-volume ceiling.
 
 ## Supported dashboard capabilities
 
-Open `http://<device-ip>/`. The ESPHome v3 dashboard is stored on the device and
-has no cloud asset dependency. It intentionally exposes only:
+Open `http://<device-ip>/`. The dashboard is stored on the device and has no
+cloud asset dependency. Its visible control surface is purpose-built rather
+than a restyled ESPHome entity table. It provides:
 
-- a 300-row, vertically scrollable ESPHome log with automatic live following;
-  scrolling upward pauses following and **Back to live** resumes it;
-- a focused **Voice Assistant** card with state, wake word, exact transcript,
-  exact reply, matched command, action result, timing, error, and wake
-  enablement;
-- compact **Connection**, **Device Health**, and **Recovery** cards;
+- a large, plain-language live state surface for ready, listening, processing,
+  speaking, unavailable, and error states;
+- a touch-friendly 0–100% speaker slider with dedicated step buttons and a
+  prominent speaker-test action;
+- custom wake-word and wake-sound switches rather than the stock ESPHome
+  controls;
+- a touch-friendly **One-Breath Pre-roll** control from 180–340 ms, defaulting
+  to 260 ms, for real-room trim calibration without reflashing;
+- latest-heard and assistant-reply conversation cards;
+- compact pipeline, total-time, Wi-Fi, and free-memory health indicators;
+- deliberately separated restart and safe-mode actions with confirmation;
 - essential connectivity, reset, uptime, heap, PSRAM, and loop-time evidence;
-- wake-word enable/disable;
-- an enabled-by-default **Wake Sound** toggle controlling the immediate 35 ms
-  low-energy listening acknowledgement;
-- a persistent **One-Breath Pre-roll** control from 180–340 ms, defaulting to
-  260 ms, for real-room trim calibration without reflashing;
-- a persistent 10–60% **Speaker Volume** slider, defaulting to 50%;
 - explicit **Interaction Availability** and **Ready for Voice** entities;
+- a bounded two-line OLED status layout that keeps every state inside the
+  128×64 panel, uses the former RSSI footer space for status/last-heard text,
+  and leaves Wi-Fi strength available in the browser diagnostics only;
 - separate wake-to-pipeline, replay, speech detection, speech capture, STT,
   wake-to-action, and total-busy-time diagnostics;
-- a separate **Research Sessions** tab that packages up to 200 wake-to-ready
-  interactions into a master-detail review queue, keeps exactly one evidence
-  record selected, synchronizes human review labels and notes to the private
-  diagnostics service, and supports JSON/CSV export;
-- a distinct 250 ms speaker test that is easy to hear and exercises the same
-  physical output path as wake feedback and TTS;
-- normal restart and safe-mode restart.
+- a separate **Voice Lab** evidence inbox that packages up to 200 wake-to-ready
+  interactions into a master-detail review queue, shows explicit green
+  **Successful** and red **Error** outcome flags, and uses a blue dot only for
+  records that still need human review; the dot disappears as soon as a review
+  label is selected;
+- Voice Lab summary counts, a plain-language status guide, acoustic evidence,
+  synchronized review labels/notes, report retention, and JSON/CSV export;
+- a collection of bounded sound and stored-speech tests that honors the persistent
+  volume slider, temporarily removes the shared-power LED-ring load, and
+  independently exercises 16 kHz mono and matched dual-mono I2S output;
+- a 300-row ESPHome log that remains active behind the custom interface for
+  session capture and stock recovery.
+
+The bundled browser UI loads a tiny blocking stylesheet before its larger
+JavaScript bundle and shows a lightweight local connecting screen until the
+custom voice console is attached. The stock ESPHome controls continue running
+underneath as the local transport and recovery layer, but they are not the
+visible product UI. A 12-second JavaScript fail-open reveals that stock recovery
+surface if the custom console cannot start.
 
 It does not implement lamp controls, simulated voice commands, arbitrary OLED
 messages, firmware upload, or a second custom WebSocket log
@@ -112,6 +148,33 @@ Flash over USB only after configuration validation:
 ```
 
 ## Debugging
+
+### Startup readiness
+
+In a measured power-on trace, firmware setup completed in about 1 second and
+Wi-Fi connected in about 6.1 seconds, but Home Assistant did not reconnect its
+ESPHome API client until 33.5 seconds; local wake-word inference became ready at
+33.6 seconds. The dominant delay was therefore the Home Assistant client
+reconnect, not ESP32 initialization or RF quality.
+
+The deployed Home Assistant container now uses Docker host networking, the
+native topology documented for Home Assistant Container. Its former bridge
+could reach the device by IP but could not receive LAN multicast, so
+`aioesphomeapi` missed the ESP32's mDNS boot announcement and waited through an
+existing exponential reconnect interval. Narrow UFW allowances cover trusted
+LAN TCP 8123, LAN mDNS UDP 5353, and Speech-to-Phrase's bridge-to-host TCP 8123
+connection. Existing Wyoming integration hostnames resolve to their published
+loopback ports from the host-networked Home Assistant container, keeping Piper,
+openWakeWord, and Speech-to-Phrase available without another proxy or service.
+
+A later physical restart still reproduced about 21 seconds because Home
+Assistant's ESPHome config entry retained the device's numeric address, which
+bypassed the zeroconf wake path even after host networking was enabled. The
+entry was reconfigured through Home Assistant's native flow to
+`esp32s3-home-assistant.local`. On the controlled verification restart, Home
+Assistant applied its intentional five-second expected-reboot cooldown and
+then connected 7.1 seconds after disconnect/reboot began. This is the native
+fix and requires no proxy, broker, or additional service.
 
 The quickest debugging path is the dashboard's **Debug Log**. It follows new
 rows until you scroll upward; press **Back to live** to jump to the newest row
@@ -173,8 +236,14 @@ delay is command capture, Speech-to-Phrase, intent execution, or TTS.
 
 The acknowledgement waits for the asynchronous I2S speaker task before queuing
 PCM. Turn **Wake Sound** off to compare a completely silent wake transition.
-Local wake detection re-arms after Piper finishes; a guarded recovery script
-also restores it after a manual-button request or stopped pipeline path.
+Local wake detection re-arms when the direct Piper stream and Assist session
+finish. If that stream remains active for 10 seconds after the pipeline ends, a
+firmware watchdog hard-stops the speaker and lingering voice session, then
+re-arms the local wake word. The recovered timeout is emitted as a replacement
+record for the same session, so Research Sessions retains its WAV and
+recognition evidence while showing the TTS transport failure instead of a false
+success. Offline, disabled-wake-word, and unrecoverable states are reported
+separately rather than collapsing every recovery failure into "wake disabled."
 
 The deployed Speech-to-Phrase recognizer is trained from a finite Bedroom
 grammar. It accepts `lights on/off`, both verb orders (`turn lights off` and
@@ -187,16 +256,20 @@ fallback.
 
 ESPHome's software volume spans roughly -49 to 0 dB rather than scaling its
 control value linearly. The firmware converts the displayed percentage to true
-amplitude/dB, caps the dashboard at 60%, and applies a 0.50 amplitude scale.
-The default 50% position is therefore about -12 dB before the Assist pipeline's
-additional 0.65 response multiplier. This headroom is intentional because the
-fitted MAX98357A GAIN pin is grounded for +12 dB analog gain. Local tones and
-streamed Assist responses use the same
-16 kHz, signed 16-bit mono PCM format. Because ESPHome's Assist audio messages
-carry raw bytes without stream metadata, the firmware restores that format
-before every tone and every deferred Piper speaker start. This prevents a
-local tone from leaving stale sample-rate/channel metadata that tears, slows,
-or silences the following spoken response.
+amplitude/dB across the complete range: 0% is muted, 50% is half PCM amplitude
+(-6.02 dB), and 100% bypasses software attenuation. Direct Assist responses use
+the same one-stage control with no additional multiplier. During TTS playback,
+the shared-power LED ring turns fully off so the amplifier gets the greatest
+instantaneous rail headroom firmware can provide; the ready indication returns
+after the voice pipeline and buffered playback have closed.
+
+Voice responses use ESPHome's direct Assist speaker stream at its native
+protocol format: signed 16-bit, 16 kHz mono PCM. This restores the coupled
+`on_tts_stream_start` / `on_tts_stream_end` lifecycle, so the spoken
+confirmation is delivered before the session ends and local wake detection is
+re-armed immediately afterward. The brief wake acknowledgement uses the same
+format, and every TTS response explicitly restores that metadata before audio
+starts. A 10-second watchdog remains only as an emergency transport fail-safe.
 
 The MAX98357A runs in its native Philips-I2S mode with the required one-bit
 data delay. The retired MSB setting was left-justified; it became audible after
@@ -204,16 +277,25 @@ a USB power cycle but produced the reported torn/distorted output. The earlier
 standard-I2S silence result was invalid because the diagnostic buffer itself
 had been mislabeled.
 
-The test path logs accepted versus requested PCM bytes, making a successful
-test meaningful beyond a start/stop lifecycle log.
-The same test samples the physical GPIO17, GPIO18, and GPIO8 pads during
-playback and logs BCLK, LRC, and DIN transition counts. Nonzero counts on all
-three isolate continued silence to wiring, amplifier power/shutdown, the
-MAX98357A module, or the speaker beyond the ESP32 pins.
-The configured stereo slot mask lets the ESP-IDF mono transmitter reach either
-amplifier channel selection while Home Assistant retains its native mono Assist
-stream. The incompatible forced-stereo negotiation patch was removed. The
-acknowledgement also uses continuous phase plus attack/release fades.
+The dashboard's **Speaker sound tests** section plays a frequency sweep,
+doorbell chime, randomized melody, soft noise, rising level steps, and two
+stored speech samples through the physical speaker. All use 16 kHz signed
+16-bit PCM and the current volume slider. Counting speech also has an identical
+dual-mono stereo version to compare channel handling directly. Speech samples
+are peak-normalized to approximately -1 dBFS; level steps use 10%, 25%, 50%, and
+80% source amplitude. Start at a modest slider setting and stop if distorted.
+
+Tests pause wake detection and switch the ring off. A nonblocking PSRAM-backed
+player retains partial writes, waits for the output to drain, and then restores
+wake readiness. **Stop test** cancels playback. Tests are rejected during an
+active Assist session. Byte counts confirm delivery, not acoustic fidelity;
+even active GPIO transitions do not prove correct I2S timing or clean output.
+Quiet/distorted output at 100% remains unresolved pending listening comparisons.
+The samples can be regenerated on Windows with
+`powershell -NoProfile -File scripts/build-speaker-samples.ps1`; no cloud service
+or private recording is required. The normal wake acknowledgement uses
+continuous phase plus attack/release fades in the same 16 kHz mono format as
+Assist speech.
 
 ## Wake-word status
 
@@ -263,9 +345,17 @@ Wi-Fi signal, and all stage timings. **Overview** and **Research Sessions** use
 distinct `#overview` and `#sessions` URLs, so refreshing preserves the selected
 page. The reference-inspired operations console uses a persistent desktop rail,
 an oversized live-readiness state, sharp high-contrast panels, and a responsive
-top navigation on narrow screens. Research Sessions stores the newest 200
-device records locally in that browser as a compact queue with exactly one
-selected detail workspace at a time. The selected workspace separates
+top navigation on narrow screens. Research Sessions combines the newest 200
+device records with every returned raw record from the connected diagnostics
+service as a compact queue with exactly one selected detail workspace at a
+time. This union is deliberate: stored recognition attempts are imported even
+when their ESPHome log row never reached the browser, so decoder failures and
+empty transcripts are not hidden by correlation. If the matching device record
+arrives later, the dashboard merges it into the diagnostic-only row instead of
+showing a duplicate. Device failures that stop before recognition still appear
+from their structured log record; because Speech-to-Phrase never received those
+captures, they correctly show device evidence without claiming that a server
+WAV exists. The selected workspace separates
 conversation outcome, recognition decision, acoustic evidence, request timeline,
 and human-review fields. It shows the normalized transcript, the
 exact `on`/`off` token that selected the action, custom-versus-generic routing,
@@ -285,7 +375,9 @@ trailing silence, and possible active-tail truncation. The private diagnostics
 service exposes these records and their WAV player, accepts bounded review
 metadata from the dashboard, and tracks deterministic research reports. Enter
 its private URL in **Acoustic diagnostics service** once per browser; the
-setting survives refresh.
+setting survives refresh. The queue imports all returned decoder statuses, not
+only `OK`, and preserves the server record as the durable source for its audio
+and decoder evidence.
 
 Raw room-audio retention has no time expiry. It rolls over only after exceeding
 200 records or 256 MiB. Before any covered WAV/JSON pair is removed, the service
@@ -317,16 +409,26 @@ TFLite file is not compatible with this ESPHome microWakeWord path.
 
 ## Crisp-audio boundary
 
-Firmware now guarantees native Philips I2S, 16 kHz signed 16-bit mono stream
-metadata, complete PCM delivery, and conservative digital headroom. The live
-speaker probe accepted all 8,000 diagnostic bytes and observed transitions on
-BCLK, LRC, and DIN. If speech still tears above the new software ceiling, the
-remaining correction is physical: reduce the MAX98357A gain strap from the
-current +12 dB, place the datasheet-recommended 10 µF and 0.1 µF bypass
-capacitors directly across amplifier VIN/GND, and add local bulk capacitance
-when the USB/power leads are long. Also confirm a 4–8 Ω speaker with adequate
-power rating. Those changes prevent amplifier, supply, or speaker clipping that
-software cannot repair after the PCM leaves the ESP32.
+Firmware prioritizes the reliable conversational contract: Home Assistant
+streams the spoken confirmation directly as 16 kHz PCM, ESPHome exposes exact
+stream-start/end events, and wake detection resumes from true pipeline
+completion. Separate stored-speech and synthesized sound tests bypass Home
+Assistant/Piper to help distinguish source/stream problems from output-path
+problems. Successful byte delivery alone cannot establish the cause of distortion.
+
+The remaining physical quality baseline is equally important. Leave `GAIN`
+unconnected for the MAX98357A's 9 dB setting instead of grounding it for 12 dB;
+the extra analog gain only reduces clipping margin. Place 10 µF and 0.1 µF
+ceramic bypass capacitors directly between amplifier `VIN` and `GND`. Feed the
+amp and ring from separate short 5 V/GND branches at the board header rather
+than daisy-chaining through either module, and retain 470–1000 µF at the ring.
+Use a short, capable USB supply/cable, because a 4 Ω speaker plus a 12-pixel ring
+can exceed a weak computer port or cable during peaks even when a no-load meter
+shows 4.8 V. Measure the amp's VIN while the reference sweep plays; substantial
+sag or a reset is a power-distribution fault. Finally, confirm a 4–8 Ω speaker
+with adequate power rating and never connect either bridge-tied speaker lead to
+ground. Firmware cannot undo clipping after the PCM reaches the amplifier or
+speaker.
 
 ## TSCircuit PCB Carrier Board
 

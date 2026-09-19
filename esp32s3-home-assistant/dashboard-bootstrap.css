@@ -1,0 +1,21 @@
+html,
+body {
+  background: #020617;
+  min-height: 100%;
+}
+
+body::before {
+  align-items: center;
+  color: #e2e8f0;
+  content: "ESP32-S3 HOME ASSISTANT  •  CONNECTING";
+  display: flex;
+  font: 700 13px/1.4 ui-monospace, monospace;
+  inset: 0;
+  justify-content: center;
+  letter-spacing: 0.09em;
+  position: fixed;
+}
+
+esp-app {
+  visibility: hidden !important;
+}

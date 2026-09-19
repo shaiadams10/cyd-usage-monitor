@@ -17,6 +17,16 @@ endpoints and never creates, changes, or deletes an OpenRouter key.
 
 ## Credential boundaries
 
+Optional Windows message hooks use the official local Codex `account/read`
+operation solely to identify the signed-in managed ChatGPT account. They do
+not refresh tokens, read credential files, collect quota, or call private
+provider endpoints. This requires the desktop and local client to share the
+configured Codex authentication home. Email hashes and CYD profile mappings
+stay in `%USERPROFILE%\.cyd-usage-monitor\chat-switch.json`; the existing Windows
+user `CYD_API_TOKEN` is read at request time and is never copied into hook files.
+Antigravity currently uses one configured profile, without reading its account
+credentials. Keep all hook configuration, mappings, and backups outside Git.
+
 - `CLOUDFLARE_TUNNEL_TOKEN` belongs only in the ignored `.env` on the monitor
   server. It exposes the browser dashboard, not the device API.
 - `MONITOR_ADMIN_PASSWORD` protects the dashboard behind Cloudflare Access.

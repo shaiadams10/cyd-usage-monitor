@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![ESPHome](https://img.shields.io/badge/voice%20firmware-ESPHome-blue.svg)](esp32s3-home-assistant/device.yaml)
-[![ESP32-S3](https://img.shields.io/badge/hardware-ESP32--S3-blueviolet.svg)](docs/hardware.md)
+[![ESP32-S3](https://img.shields.io/badge/hardware-ESP32--S3-blueviolet.svg)](esp32s3-home-assistant/HARDWARE.md)
 [![CYD](https://img.shields.io/badge/hardware-ESP32--2432S028R-red.svg)](cyd-usage-monitor/README.md#hardware)
 
 A unified workspace of independent ESP32 firmware projects, self-hosted voice AI pipelines, and smart home automation tools.
@@ -14,7 +14,7 @@ A unified workspace of independent ESP32 firmware projects, self-hosted voice AI
 | Service / Device | URL / Endpoint | Purpose / Function | Documentation |
 | :--- | :--- | :--- | :--- |
 | **🎙️ ESP32-S3 Voice Satellite** | Device-local web server | On-device wake detection, Home Assistant Assist audio, and focused diagnostics | [`esp32s3-home-assistant`](esp32s3-home-assistant/README.md) |
-| **🏠 Home Assistant Dashboard** | Private operator configuration | Master smart home automation interface, device control, and voice pipelines | [`docs/hardware.md`](docs/hardware.md) |
+| **🏠 Home Assistant Dashboard** | Private operator configuration | Master smart home automation interface, device control, and voice pipelines | [`esp32s3-home-assistant/HARDWARE.md`](esp32s3-home-assistant/HARDWARE.md) |
 | **🗣️ Wyoming Piper TTS** | Private Wyoming endpoint | Local neural text-to-speech | [`esp32s3-home-assistant/server`](esp32s3-home-assistant/server/README.md) |
 | **🎙️ Wyoming Faster Whisper** | Private Wyoming endpoint | Local speech-to-text | [`esp32s3-home-assistant/server`](esp32s3-home-assistant/server/README.md) |
 | **📊 CYD Usage Monitor Dashboard** | `http://127.0.0.1:8000` | Self-hosted CLI quota monitor and interactive WebAssembly CYD preview | [`cyd-usage-monitor`](cyd-usage-monitor/README.md) |
@@ -51,7 +51,7 @@ A unified workspace of independent ESP32 firmware projects, self-hosted voice AI
 
 ## 📌 Pin Mapping Matrix & Schematics
 
-Full pin tables, visual Mermaid flowcharts, ASCII circuit diagrams, and interactive Wokwi visual layouts are available in [`docs/hardware.md`](docs/hardware.md).
+Full pin tables, wire colors, visual Mermaid flowcharts, and ASCII circuit diagrams for the primary voice satellite are available in [`esp32s3-home-assistant/HARDWARE.md`](esp32s3-home-assistant/HARDWARE.md).
 
 
 ## Quick start
@@ -139,3 +139,11 @@ Released under the widely used [MIT License](LICENSE). Provider names and the
 project's unofficial display artwork are addressed separately in
 [NOTICE.md](NOTICE.md); the project is independent and is not endorsed by the
 named providers.
+
+## Latest CYD release
+
+The public CYD homepage now covers local Codex Desktop account selection on
+message submission, Antigravity primary-profile selection, Stream Deck controls,
+shared LVGL animations, OpenRouter telemetry, and current LAN deployment/hardware.
+See the [CYD operator guide](cyd-usage-monitor/README.md) and
+[fresh-computer recovery guide](cyd-usage-monitor/instructions/CHAT_ACCOUNT_SWITCH_SETUP.md).

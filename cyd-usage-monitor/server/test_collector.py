@@ -15,6 +15,29 @@ except ImportError:
 
 
 class CollectorParserTests(unittest.TestCase):
+    def setUp(self):
+        # Every test must isolate all runtime paths, including optional SMTP
+        # secrets. Otherwise a read acquires a lock under the production path.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        data_dir = Path(directory.name)
+        paths = {
+            name: data_dir / value.relative_to(collector.DATA_DIR)
+            for name, value in vars(collector).items()
+            if isinstance(value, Path) and value.is_relative_to(collector.DATA_DIR)
+        }
+        patcher = patch.multiple(collector, **paths)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # Never use operator notification credentials during offline tests.
+        environment = patch.dict(os.environ, {
+            name: "" for name in os.environ
+            if name.startswith(("WAHA_", "CYD_MONITOR_SMTP_"))
+            or name == "CYD_MONITOR_ALERT_EMAIL_TO"
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def test_normalizes_openrouter_account_usage_and_completed_days(self):
         now = dt.datetime(2026, 8, 9, 12, tzinfo=dt.timezone.utc)
         snapshot = collector.normalize_openrouter(
@@ -162,6 +185,33 @@ Five Hour Limit Remaining
 """)
         self.assertEqual(snapshot["metrics"]["gemini"]["five_hour"], {"remaining_pct": 100, "reset": "Quota available"})
         self.assertEqual(snapshot["metrics"]["claude"]["five_hour"], {"remaining_pct": 100, "reset": "Quota available"})
+
+    def test_parses_antigravity_disabled_weekly_limit(self):
+        snapshot = parse_antigravity_usage("""
+Account: demo-account
+GEMINI MODELS
+  Models within this group: Gemini Flash, Gemini Pro
+
+  Weekly Limit Remaining
+    [bar] 27.92%
+    28% remaining · Refreshes in 106h 18m
+  Five Hour Limit Remaining
+    [bar] 100.00%
+    Quota available
+
+CLAUDE AND GPT MODELS
+  Models within this group: Claude Opus, Claude Sonnet, GPT-OSS
+
+  Weekly Limit Remaining
+    [bar] 0.00%
+    Refreshes in 11h 23m
+  Five Hour Limit Remaining
+    Disabled: You have hit your weekly limit, the 5-hour limit does not currently apply. Your weekly limit will fully re
+""")
+        self.assertEqual(snapshot["metrics"]["gemini"]["weekly"], {"remaining_pct": 28, "reset": "106h 18m"})
+        self.assertEqual(snapshot["metrics"]["gemini"]["five_hour"], {"remaining_pct": 100, "reset": "Quota available"})
+        self.assertEqual(snapshot["metrics"]["claude"]["weekly"], {"remaining_pct": 0, "reset": "11h 23m"})
+        self.assertEqual(snapshot["metrics"]["claude"]["five_hour"], {"remaining_pct": 0, "reset": "Weekly limit reached"})
 
     def test_reassembles_wrapped_oauth_url(self):
         transcript = """Open this URL:
@@ -450,6 +500,17 @@ If you are not redirected, paste the authorization code below:
         self.assertNotIn("CYD_API_TOKEN", env)
         self.assertIn("CODEX_HOME", env)
 
+    def test_profile_environment_propagates_timezone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous_root = collector.PROFILE_ROOT
+            collector.PROFILE_ROOT = Path(directory)
+            try:
+                with patch.dict(os.environ, {"CYD_MONITOR_TIMEZONE": "America/New_York"}, clear=False):
+                    env = collector.profile_environment({"id": "codex-0123456789", "provider": "codex"})
+                    self.assertEqual(env.get("TZ"), "America/New_York")
+            finally:
+                collector.PROFILE_ROOT = previous_root
+
     def test_login_input_is_consumed_once_and_deleted(self):
         request_id = "00000000-0000-4000-8000-000000000001"
         with tempfile.TemporaryDirectory() as directory:
@@ -490,6 +551,163 @@ If you are not redirected, paste the authorization code below:
                     collector.remove_profile_directory("../outside")
             finally:
                 collector.PROFILE_ROOT = previous_root
+
+
+class CollectionSchedulingTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        data_dir = Path(directory.name)
+        paths = {
+            name: data_dir / value.relative_to(collector.DATA_DIR)
+            for name, value in vars(collector).items()
+            if isinstance(value, Path) and value.is_relative_to(collector.DATA_DIR)
+        }
+        patcher = patch.multiple(collector, **paths)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        environment = patch.dict(os.environ, {
+            name: "" for name in os.environ
+            if name.startswith(("WAHA_", "CYD_MONITOR_SMTP_")) or name == "CYD_MONITOR_ALERT_EMAIL_TO"
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def test_failed_capture_keeps_the_last_healthy_values_for_the_display(self):
+        profile = {"id": "codex-a", "provider": "codex", "label": "Codex A"}
+        collector.write_json(collector.PROFILES_FILE, {"profiles": [profile]})
+        healthy = {
+            "profile_id": profile["id"], "provider": "codex", "status": "ok", "account_name": "user",
+            "metrics": {"five_hour": {"remaining_pct": 40, "reset": "10:00"}}, "collected_at": "2026-09-19T10:00:00Z",
+        }
+        with patch.object(collector, "deliver_waha_message", return_value=(True, "ok")):
+            collector.persist_snapshot(profile, healthy, interval_seconds=30)
+            stored = collector.read_json(collector.STATE_FILE, {})["profiles"][profile["id"]]
+            self.assertEqual(stored["refresh_interval_seconds"], 30)
+            self.assertEqual(stored["stale_after_seconds"], 30 * 2 + collector.COLLECTION_TIMEOUT_BUDGET)
+            self.assertNotIn("last_ok", stored)
+
+            failed = collector.error_snapshot(profile, RuntimeError("panel incomplete"))
+            collector.persist_snapshot(profile, failed, interval_seconds=30)
+            stored = collector.read_json(collector.STATE_FILE, {})["profiles"][profile["id"]]
+            self.assertEqual(stored["status"], "error")
+            self.assertEqual(stored["last_ok"]["metrics"]["five_hour"]["remaining_pct"], 40)
+            self.assertEqual(stored["last_ok"]["collected_at"], "2026-09-19T10:00:00Z")
+
+            # A second failure carries the same healthy result without nesting it.
+            failed_again = collector.error_snapshot(profile, RuntimeError("panel incomplete"))
+            collector.persist_snapshot(profile, failed_again, interval_seconds=30)
+            stored = collector.read_json(collector.STATE_FILE, {})["profiles"][profile["id"]]
+            self.assertEqual(stored["consecutive_failures"], 2)
+            self.assertEqual(stored["last_ok"]["collected_at"], "2026-09-19T10:00:00Z")
+            self.assertNotIn("last_ok", stored["last_ok"])
+
+            recovered = dict(healthy, collected_at="2026-09-19T10:02:00Z")
+            collector.persist_snapshot(profile, recovered, interval_seconds=30)
+            stored = collector.read_json(collector.STATE_FILE, {})["profiles"][profile["id"]]
+            self.assertEqual(stored["status"], "ok")
+            self.assertNotIn("last_ok", stored)
+
+    def test_scheduler_prioritizes_the_displayed_account_and_bounds_parallelism(self):
+        clock = {"now": 1000.0}
+        started: list[tuple[str, int]] = []
+        release = collector.threading.Event()
+
+        def runner(profile, interval):
+            started.append((profile["id"], interval))
+            release.wait(5)
+
+        def join_all(scheduler):
+            for thread in scheduler.threads.values():
+                thread.join(5)
+
+        config = {
+            "active_profile_id": "codex-b",
+            "profiles": [
+                {"id": "codex-a", "provider": "codex"},
+                {"id": "codex-b", "provider": "codex"},
+                {"id": "agy-c", "provider": "antigravity"},
+                {"id": "off", "provider": "codex", "enabled": False},
+            ],
+        }
+        with patch.object(collector, "MAX_PARALLEL_COLLECTIONS", 2), \
+             patch.object(collector, "ACTIVE_POLL_SECONDS", 30), patch.object(collector, "POLL_SECONDS", 90):
+            scheduler = collector.CollectionScheduler(clock=lambda: clock["now"], runner=runner, openrouter_runner=lambda: None)
+            scheduler.tick(config)
+            # Only two slots: the displayed account first, then the next enabled profile.
+            self.assertEqual([item[0] for item in started], ["codex-b", "codex-a"])
+            self.assertEqual(dict(started), {"codex-b": 30, "codex-a": 90})
+            schedule = scheduler.schedule(config)
+            self.assertTrue(schedule["collection_running"])
+            self.assertEqual(schedule["interval_seconds"], 30)
+            self.assertEqual(schedule["background_interval_seconds"], 90)
+            self.assertNotIn("off", schedule["profiles"])
+
+            scheduler.tick(config)
+            self.assertEqual(len(started), 2, "no free slot while both workers run")
+            release.set()
+            join_all(scheduler)
+            scheduler.tick(config)
+            self.assertEqual([item[0] for item in started], ["codex-b", "codex-a", "agy-c"])
+
+            # The displayed account is due again after its short interval; the
+            # background accounts are not.
+            clock["now"] += 31
+            join_all(scheduler)
+            scheduler.tick(config)
+            self.assertEqual([item[0] for item in started][3:], ["codex-b"])
+
+            # Selecting another account on the CYD makes it due immediately.
+            join_all(scheduler)
+            config["active_profile_id"] = "agy-c"
+            clock["now"] += 1
+            scheduler.tick(config)
+            self.assertEqual([item[0] for item in started][4:], ["agy-c"])
+            self.assertEqual(started[-1][1], 30)
+
+            # The displayed account never waits for a slot behind background work.
+            join_all(scheduler)
+            release.clear()
+            clock["now"] += 90
+            config["active_profile_id"] = "codex-b"
+            scheduler.tick(config)  # codex-b (active) + codex-a fill both slots
+            self.assertEqual([item[0] for item in started][5:], ["codex-b", "codex-a"])
+            clock["now"] += 30
+            scheduler.tick(config)  # agy-c is due but must wait; codex-b is running
+            self.assertEqual(len(started), 7)
+            release.set()
+            join_all(scheduler)
+            release.clear()
+            clock["now"] += 1
+            scheduler.tick(config)  # agy-c and codex-b were due; both start
+            self.assertEqual(sorted(item[0] for item in started[7:]), ["agy-c", "codex-b"])
+            clock["now"] += 30
+            scheduler.tick(config)  # only codex-b is due; no slots, but it is active
+            self.assertEqual(len(started), 9)
+            release.set()
+            join_all(scheduler)
+
+    def test_codex_status_is_requested_early_and_retried(self):
+        self.assertLessEqual(collector.CODEX_STATUS_INPUTS[0][0], 6.0)
+        self.assertTrue(all(item[1] == "/status\r" for item in collector.CODEX_STATUS_INPUTS))
+        self.assertLess(collector.CODEX_STATUS_INPUTS[-1][0], collector.COLLECTION_TIMEOUT_BUDGET)
+
+    def test_collect_all_runs_profiles_in_parallel(self):
+        profiles = [{"id": f"codex-{index}", "provider": "codex"} for index in range(3)]
+        collector.write_json(collector.PROFILES_FILE, {"profiles": profiles, "active_profile_id": "codex-0"})
+        barrier = collector.threading.Barrier(3, timeout=5)
+
+        def fake_collect(profile, include_transcript=False, progress=None):
+            barrier.wait()  # Fails unless all three captures overlap in time.
+            return {"profile_id": profile["id"], "provider": "codex", "status": "ok", "account_name": "u", "metrics": {}}
+
+        with patch.object(collector, "collect_profile", fake_collect), patch.object(collector, "collect_openrouter", lambda: None), \
+             patch.object(collector, "MAX_PARALLEL_COLLECTIONS", 3):
+            collector.collect_all()
+        state = collector.read_json(collector.STATE_FILE, {})["profiles"]
+        self.assertEqual(sorted(state), ["codex-0", "codex-1", "codex-2"])
+        self.assertEqual(state["codex-0"]["refresh_interval_seconds"], collector.ACTIVE_POLL_SECONDS)
+        self.assertEqual(state["codex-1"]["refresh_interval_seconds"], collector.POLL_SECONDS)
 
 
 if __name__ == "__main__":

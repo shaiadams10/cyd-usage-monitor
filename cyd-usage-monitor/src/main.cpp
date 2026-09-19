@@ -6,8 +6,11 @@
 #include <TFT_eSPI.h>
 #include <lvgl.h>
 #include <Preferences.h>
+#include <esp_system.h>
+#include <esp_heap_caps.h>
 #include "secrets.h"
 #include "mascot_img.h"
+#include "ui_motion.h"
 
 // Hosyond/LCDWiki E32R40T onboard common-anode RGB LED.
 #define LED_RED 22
@@ -16,6 +19,7 @@
 
 TFT_eSPI tft = TFT_eSPI();
 WiFiClient telemetryPlainClient;
+HTTPClient telemetryHttp; // Persistent owner preserves TCP reuse across requests.
 Preferences displayPreferences;
 
 // LVGL buffer (sized for 480x320 landscape)
@@ -24,12 +28,23 @@ static lv_color_t buf[480 * 20];
 
 unsigned long lastFetchTime = 0;
 // The host collector refreshes CLI data every few minutes.  A short local-LAN
-// poll makes a dashboard "Show" selection visible on the physical CYD within
-// three seconds, without triggering another provider CLI invocation.
+// quota refresh reads cached data without another provider CLI invocation.
+// Display commands use their own faster interval below.
 const unsigned long FETCH_INTERVAL = 3000;
+static unsigned long fetchRetryInterval = FETCH_INTERVAL;
+const unsigned long COMMAND_POLL_INTERVAL = 400;
+static unsigned long commandPollInterval = COMMAND_POLL_INTERVAL;
 const size_t MAX_TELEMETRY_BYTES = 16384;
-const unsigned long TELEMETRY_CONNECT_TIMEOUT_MS = 3000;
-const unsigned long TELEMETRY_READ_TIMEOUT_MS = 5000;
+const unsigned long TELEMETRY_CONNECT_TIMEOUT_MS = 500;
+const unsigned long TELEMETRY_READ_TIMEOUT_MS = 1500;
+// A LAN blip or a busy monitor host must not blank a screen that already shows
+// valid data. Transport failures replace the quota widgets only after this
+// many consecutive misses; auth and payload errors still surface immediately.
+const uint8_t TRANSIENT_FAILURE_LIMIT = 3;
+static uint8_t usageFailureStreak = 0;
+static uint8_t openRouterFailureStreak = 0;
+static bool usageDataShown = false;
+static bool openRouterDataShown = false;
 // Recovery is intentionally staged. Most AP interruptions clear on their own,
 // so do not disrupt a connection attempt until it has had time to settle.
 const unsigned long WIFI_EXPLICIT_RECONNECT_AFTER_MS = 30000;
@@ -41,6 +56,8 @@ static volatile bool openUsageRequested = false;
 static volatile bool openRouterRequested = false;
 static volatile bool homeRequested = false;
 static bool usageFetchPending = false;
+static String motionAccount;
+static unsigned long greenLedUntil;
 static bool touchInputReady = false;
 static unsigned long touchReleasedSince = 0;
 static unsigned long lastWifiUiUpdate = 0;
@@ -50,6 +67,9 @@ static bool wifiRadioRecoveryAttempted = false;
 static bool wifiEverConnected = false;
 static volatile uint8_t lastWifiDisconnectReason = 0;
 static volatile bool wifiDisconnectReasonPending = false;
+static volatile uint32_t wifiDisconnectCount = 0;
+static uint32_t httpRequestCount, httpTransportFailures, httpMaxMs;
+static uint32_t renderedFrames, renderTotalMs, renderMaxMs;
 static unsigned long lastDisplayCommandPoll = 0;
 static wl_status_t previousWifiStatus = WL_NO_SHIELD;
 static String lastDisplayCommandId;
@@ -84,6 +104,7 @@ static const AppDescriptor launcherApps[] = {
 
 void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+        ++wifiDisconnectCount;
         // The callback runs on the Arduino event task. Keep it non-blocking and
         // let loop() perform all logging and recovery work.
         lastWifiDisconnectReason = info.wifi_sta_disconnected.reason;
@@ -188,6 +209,85 @@ void showLauncherScreen();
 void showUsageMonitorScreen();
 void showOpenRouterScreen();
 
+
+// The worker only touches HTTP while loop() waits for its completion semaphore.
+// LVGL stays exclusively on loop(); requests remain serialized on one client.
+static TaskHandle_t telemetryWorkerTask;
+static SemaphoreHandle_t telemetryDone;
+static HTTPClient *workerHttp;
+static int workerOperation, workerCode;
+static String workerBody, workerResult;
+static void recordHttpResult(int code, uint32_t started) {
+    ++httpRequestCount;
+    httpMaxMs = max(httpMaxMs, static_cast<uint32_t>(millis() - started));
+    if (code < 0) ++httpTransportFailures;
+}
+static void displayMonitor(lv_disp_drv_t *, uint32_t time, uint32_t pixels) {
+    (void)pixels;
+    ++renderedFrames; renderTotalMs += time; renderMaxMs = max(renderMaxMs, time);
+}
+static void printDeviceDiagnostics() {
+    lv_mem_monitor_t memory;
+    lv_mem_monitor(&memory);
+    Serial.printf("[DIAG] uptime=%lu wifi=%d rssi=%d disconnects=%lu heap=%u minheap=%u largest=%u http_stack=%u lv_free=%u lv_largest=%u requests=%lu failures=%lu http_max_ms=%lu frames=%lu draw_avg_ms=%lu draw_max_ms=%lu\n",
+        millis(), (int)WiFi.status(), WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
+        (unsigned long)wifiDisconnectCount, ESP.getFreeHeap(), ESP.getMinFreeHeap(),
+        heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+        telemetryWorkerTask ? (unsigned)uxTaskGetStackHighWaterMark(telemetryWorkerTask) : 0,
+        (unsigned)memory.free_size, (unsigned)memory.free_biggest_size,
+        (unsigned long)httpRequestCount, (unsigned long)httpTransportFailures,
+        (unsigned long)httpMaxMs, (unsigned long)renderedFrames,
+        (unsigned long)(renderedFrames ? renderTotalMs / renderedFrames : 0), (unsigned long)renderMaxMs);
+    renderedFrames = renderTotalMs = renderMaxMs = httpMaxMs = 0;
+}
+static void telemetryWorker(void *) {
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (workerOperation == 0) workerCode = workerHttp->GET();
+        else if (workerOperation == 1) workerResult = workerHttp->getString();
+        else workerCode = workerHttp->POST(workerBody);
+        xSemaphoreGive(telemetryDone);
+    }
+}
+static void serviceUpdateLed() {
+    if (greenLedUntil && (int32_t)(millis() - greenLedUntil) >= 0) {
+        digitalWrite(LED_GREEN, HIGH); greenLedUntil = 0;
+    }
+}
+static void runTelemetryOperation(HTTPClient &http, int operation) {
+    workerHttp = &http; workerOperation = operation;
+    xTaskNotifyGive(telemetryWorkerTask);
+    while (xSemaphoreTake(telemetryDone, 0) != pdTRUE) {
+        lv_timer_handler();
+        serviceUpdateLed();
+        delay(5);
+    }
+}
+static int animatedGet(HTTPClient &http) {
+    uint32_t started = millis();
+    int code;
+    if (!telemetryWorkerTask) code = http.GET();
+    else { runTelemetryOperation(http, 0); code = workerCode; }
+    recordHttpResult(code, started);
+    return code;
+}
+static String animatedBody(HTTPClient &http) {
+    if (!telemetryWorkerTask) return http.getString();
+    runTelemetryOperation(http, 1);
+    String result = workerResult; workerResult = ""; return result;
+}
+static int animatedPost(HTTPClient &http, const String &body) {
+    uint32_t started = millis();
+    int code;
+    if (!telemetryWorkerTask) code = http.POST(body);
+    else {
+        workerBody = body; runTelemetryOperation(http, 2);
+        workerBody = ""; code = workerCode;
+    }
+    recordHttpResult(code, started);
+    return code;
+}
+
 void printSimulatorKeybinds() {
     Serial.println();
     Serial.println("[KEYS] Wokwi touch shortcuts");
@@ -196,6 +296,7 @@ void printSimulatorKeybinds() {
     Serial.println("[KEYS] H  Return Home");
     Serial.println("[KEYS] N  Next account");
     Serial.println("[KEYS] ?  Show this help");
+    Serial.println("[KEYS] D  Print device/network/render diagnostics");
     Serial.println();
 }
 
@@ -243,7 +344,7 @@ void triggerNextAccount() {
     digitalWrite(LED_BLUE, LOW);
 
     if (WiFi.status() == WL_CONNECTED) {
-        HTTPClient http;
+        HTTPClient &http = telemetryHttp;
         String nextUrl = String(TELEMETRY_SERVER_URL);
         nextUrl.replace("/api/v1/cyd-status", "/api/v1/next-account");
         if (!beginTelemetryRequest(http, telemetryPlainClient, nextUrl)) {
@@ -254,11 +355,11 @@ void triggerNextAccount() {
         http.setConnectTimeout(TELEMETRY_CONNECT_TIMEOUT_MS);
         http.setTimeout(TELEMETRY_READ_TIMEOUT_MS);
         addTelemetryAuth(http);
-        int response = http.GET();
+        int response = animatedGet(http);
         if (response >= 200 && response < 300) {
             // The server returns the newly selected display state. Reuse that
             // payload directly instead of issuing a second HTTP request.
-            prefetchedTelemetryPayload = http.getString();
+            prefetchedTelemetryPayload = animatedBody(http);
             http.end();
             fetchQuotaData();
         } else if (response == HTTP_CODE_UNAUTHORIZED) {
@@ -268,7 +369,7 @@ void triggerNextAccount() {
             Serial.printf("[NET] LAN request failed: HTTPClient=%d (%s)\n",
                           response, HTTPClient::errorToString(response).c_str());
             http.end();
-            showTelemetryError("Local monitor connection failed. Check LAN address and server.");
+            showTelemetryError(WiFi.status() == WL_CONNECTED ? "Wi-Fi connected; monitor server unreachable. Retrying." : "Wi-Fi disconnected. Reconnecting automatically.");
         } else {
             http.end();
             showTelemetryError("Account switch failed with HTTP " + String(response) + ".");
@@ -404,16 +505,7 @@ void drawLauncherIcon(lv_obj_t *canvas, AppId id) {
     accentArc.rounded = true;
     lv_canvas_draw_arc(canvas, 28, 27, 20, 40, 165, &accentArc);
 
-    const uint32_t barColors[] = {0xFBCFE8, 0xBAE6FD, 0xFDE68A};
-    const lv_coord_t barHeights[] = {8, 14, 20};
-    for (int i = 0; i < 3; ++i) {
-        lv_draw_rect_dsc_t bar;
-        lv_draw_rect_dsc_init(&bar);
-        bar.bg_color = lv_color_hex(barColors[i]);
-        bar.bg_opa = LV_OPA_COVER;
-        bar.radius = 2;
-        lv_canvas_draw_rect(canvas, 17 + i * 9, 45 - barHeights[i], 6, barHeights[i], &bar);
-    }
+
 }
 
 lv_obj_t *createLauncherTile(lv_obj_t *parent, const AppDescriptor *app) {
@@ -430,7 +522,6 @@ lv_obj_t *createLauncherTile(lv_obj_t *parent, const AppDescriptor *app) {
     lv_obj_set_style_shadow_width(tile, 18, LV_PART_MAIN);
     lv_obj_set_style_shadow_opa(tile, LV_OPA_20, LV_PART_MAIN);
     lv_obj_set_style_pad_all(tile, 0, LV_PART_MAIN);
-    lv_obj_set_style_transform_zoom(tile, 242, LV_STATE_PRESSED);
     lv_obj_set_style_bg_color(tile, lv_color_hex(0x332D42), LV_STATE_PRESSED);
     lv_obj_add_event_cb(tile, launcherTileEvent, LV_EVENT_CLICKED, const_cast<AppDescriptor *>(app));
 
@@ -439,6 +530,7 @@ lv_obj_t *createLauncherTile(lv_obj_t *parent, const AppDescriptor *app) {
         lv_obj_clear_flag(canvas, LV_OBJ_FLAG_CLICKABLE);
         drawLauncherIcon(canvas, app->id);
         lv_obj_align(canvas, LV_ALIGN_TOP_MID, 0, 16);
+        cyd_motion_equalizer(canvas);
     } else {
         lv_obj_t *icon = lv_obj_create(tile);
         lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
@@ -453,8 +545,10 @@ lv_obj_t *createLauncherTile(lv_obj_t *parent, const AppDescriptor *app) {
         lv_obj_set_style_line_color(route, lv_color_hex(0xA7F3D0), LV_PART_MAIN);
         lv_obj_set_style_line_width(route, 5, LV_PART_MAIN);
         lv_obj_set_style_line_rounded(route, true, LV_PART_MAIN);
+        unsigned nodeIndex = 0;
         for (const lv_point_t &point : openRouterRoutePoints) {
             lv_obj_t *node = lv_obj_create(icon);
+            cyd_nodes[nodeIndex++] = node;
             lv_obj_clear_flag(node, LV_OBJ_FLAG_CLICKABLE);
             lv_obj_set_size(node, 9, 9);
             lv_obj_set_pos(node, point.x - 4, point.y - 4);
@@ -485,7 +579,7 @@ lv_obj_t *createLauncherTile(lv_obj_t *parent, const AppDescriptor *app) {
     lv_obj_set_style_text_font(openLabel, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_align(openLabel, LV_ALIGN_BOTTOM_MID, 0, -14);
 
-    lv_obj_fade_in(tile, 220, 60);
+    cyd_motion_card_init(tile);
     return tile;
 }
 
@@ -569,13 +663,13 @@ void showLauncherScreen() {
     activeScreen = AppScreen::MainMenu;
     usageFetchPending = false;
     nextAccountRequested = false;
-    lv_scr_load_anim(scr_launcher, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 180, 0, false);
+    cyd_motion_show(scr_launcher, true);
     displayStateReportPending = true;
 }
 
 void showUsageMonitorScreen() {
     activeScreen = AppScreen::UsageMonitor;
-    lv_scr_load_anim(scr_dashboard, LV_SCR_LOAD_ANIM_MOVE_LEFT, 180, 0, false);
+    cyd_motion_show(scr_dashboard, false);
     displayStateReportPending = true;
     if (WiFi.status() == WL_CONNECTED) {
         usageFetchPending = true;
@@ -586,7 +680,7 @@ void showUsageMonitorScreen() {
 
 void showOpenRouterScreen() {
     activeScreen = AppScreen::OpenRouter;
-    lv_scr_load_anim(scr_openrouter, LV_SCR_LOAD_ANIM_MOVE_LEFT, 180, 0, false);
+    cyd_motion_show(scr_openrouter, false);
     displayStateReportPending = true;
     if (WiFi.status() == WL_CONNECTED) {
         usageFetchPending = true;
@@ -596,6 +690,7 @@ void showOpenRouterScreen() {
 }
 
 void showTelemetryError(const String &detail) {
+    motionAccount = "";
     lv_obj_add_flag(card_primary, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(card_details, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(lbl_col_gemini, LV_OBJ_FLAG_HIDDEN);
@@ -642,7 +737,6 @@ void buildDashboardUI() {
     lv_obj_set_style_border_color(btn_home, lv_color_hex(0xC4B5FD), LV_PART_MAIN);
     lv_obj_set_style_border_width(btn_home, 1, LV_PART_MAIN);
     lv_obj_set_style_pad_all(btn_home, 0, LV_PART_MAIN);
-    lv_obj_set_style_transform_zoom(btn_home, 238, LV_STATE_PRESSED);
     lv_obj_add_event_cb(btn_home, homeButtonEvent, LV_EVENT_CLICKED, NULL);
     lv_obj_t *homeIcon = lv_label_create(btn_home);
     lv_label_set_text(homeIcon, LV_SYMBOL_HOME);
@@ -665,6 +759,7 @@ void buildDashboardUI() {
 
     // --- ChatGPT Card 1: Primary Quota ---
     card_primary = lv_obj_create(scr_dashboard);
+    lv_obj_clear_flag(card_primary, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(card_primary, 460, 118);
     lv_obj_set_pos(card_primary, 10, 40);
     lv_obj_set_style_bg_color(card_primary, lv_color_hex(0x18181B), LV_PART_MAIN);
@@ -680,6 +775,7 @@ void buildDashboardUI() {
     lv_obj_set_pos(lbl_primary_val, 10, 4);
 
     lv_obj_t *badge1 = lv_obj_create(card_primary);
+    lv_obj_clear_flag(badge1, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(badge1, 125, 26);
     lv_obj_align(badge1, LV_ALIGN_TOP_RIGHT, -6, 2);
     lv_obj_set_style_bg_color(badge1, lv_color_hex(0x27272A), LV_PART_MAIN);
@@ -720,6 +816,7 @@ void buildDashboardUI() {
 
     // --- ChatGPT Card 2: Weekly quota plus plan / credits footer ---
     card_details = lv_obj_create(scr_dashboard);
+    lv_obj_clear_flag(card_details, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(card_details, 460, 110);
     lv_obj_set_pos(card_details, 10, 168);
     lv_obj_set_style_bg_color(card_details, lv_color_hex(0x18181B), LV_PART_MAIN);
@@ -745,6 +842,8 @@ void buildDashboardUI() {
     lv_obj_set_pos(bar_weekly, 8, 36);
     lv_bar_set_range(bar_weekly, 0, 100);
     lv_obj_set_style_bg_color(bar_weekly, lv_color_hex(0x27272A), LV_PART_MAIN);
+    lv_obj_set_style_border_color(bar_weekly, lv_color_hex(0x3F3F46), LV_PART_MAIN);
+    lv_obj_set_style_border_width(bar_weekly, 1, LV_PART_MAIN);
     lv_obj_set_style_bg_color(bar_weekly, lv_color_hex(0x10B981), LV_PART_INDICATOR);
     lv_obj_set_style_radius(bar_weekly, 5, LV_PART_MAIN);
     lv_obj_set_style_radius(bar_weekly, 5, LV_PART_INDICATOR);
@@ -770,6 +869,7 @@ void buildDashboardUI() {
 
     // --- Collector Error Screen ---
     card_error = lv_obj_create(scr_dashboard);
+    lv_obj_clear_flag(card_error, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(card_error, 460, 236);
     lv_obj_set_pos(card_error, 10, 42);
     lv_obj_set_style_bg_color(card_error, lv_color_hex(0x211316), LV_PART_MAIN);
@@ -1107,15 +1207,25 @@ void buildOpenRouterUI() {
     lv_obj_align(or_state_label, LV_ALIGN_BOTTOM_MID, 0, -4);
 }
 
+// Returns true once a transient failure has repeated enough to be shown.
+static bool transientUsageFailure() {
+    if (usageFailureStreak < 255) ++usageFailureStreak;
+    return !usageDataShown || usageFailureStreak >= TRANSIENT_FAILURE_LIMIT;
+}
+static bool transientOpenRouterFailure() {
+    if (openRouterFailureStreak < 255) ++openRouterFailureStreak;
+    return !openRouterDataShown || openRouterFailureStreak >= TRANSIENT_FAILURE_LIMIT;
+}
+
 void fetchQuotaData() {
     if (WiFi.status() != WL_CONNECTED) {
-        showTelemetryError("Wi-Fi is disconnected. The device will retry automatically.");
+        if (transientUsageFailure()) showTelemetryError("Wi-Fi is disconnected. The device will retry automatically.");
         return;
     }
 
     lv_obj_set_style_text_color(lbl_next_icon, lv_color_hex(0x10B981), LV_PART_MAIN);
 
-    HTTPClient http;
+    HTTPClient &http = telemetryHttp;
     String payload;
     int httpCode = HTTP_CODE_OK;
     if (prefetchedTelemetryPayload.length() > 0) {
@@ -1129,9 +1239,10 @@ void fetchQuotaData() {
         http.setConnectTimeout(TELEMETRY_CONNECT_TIMEOUT_MS);
         http.setTimeout(TELEMETRY_READ_TIMEOUT_MS);
         addTelemetryAuth(http);
-        httpCode = http.GET();
+        httpCode = animatedGet(http);
     }
 
+    fetchRetryInterval = httpCode == HTTP_CODE_OK ? FETCH_INTERVAL : min(fetchRetryInterval * 2UL, 30000UL);
     if (httpCode == HTTP_CODE_OK) {
         int payloadSize = payload.length() > 0 ? static_cast<int>(payload.length()) : http.getSize();
         if (payloadSize > static_cast<int>(MAX_TELEMETRY_BYTES)) {
@@ -1140,7 +1251,7 @@ void fetchQuotaData() {
             return;
         }
         if (payload.length() == 0) {
-            payload = http.getString();
+            payload = animatedBody(http);
         }
         if (payload.length() > MAX_TELEMETRY_BYTES) {
             http.end();
@@ -1162,6 +1273,10 @@ void fetchQuotaData() {
             }
             String default_ticker = "* " + accountName;
             String ticker = doc["status_ticker"] | default_ticker;
+
+            String identity = provider + ":" + accountName;
+            bool motionReset = motionAccount != identity;
+            motionAccount = identity;
 
             // Apply Header
             lv_label_set_text(lbl_account_name, accountName.c_str());
@@ -1216,25 +1331,25 @@ void fetchQuotaData() {
                 // Update Gemini 5H Box (Progress bar = % remaining)
                 String g5_val_str = String(g_5h) + "%";
                 lv_label_set_text(lbl_g5_val, g5_val_str.c_str());
-                lv_bar_set_value(bar_g5, g_5h, LV_ANIM_ON);
+                cyd_motion_bar(bar_g5, g_5h, motionReset);
                 lv_label_set_text(lbl_g5_sub, g_5h_sub.c_str());
 
                 // Update Gemini Weekly Box
                 String gw_val_str = String(g_wk) + "%";
                 lv_label_set_text(lbl_gw_val, gw_val_str.c_str());
-                lv_bar_set_value(bar_gw, g_wk, LV_ANIM_ON);
+                cyd_motion_bar(bar_gw, g_wk, motionReset);
                 lv_label_set_text(lbl_gw_sub, g_wk_sub.c_str());
 
                 // Update Claude 5H Box
                 String c5_val_str = String(c_5h) + "%";
                 lv_label_set_text(lbl_c5_val, c5_val_str.c_str());
-                lv_bar_set_value(bar_c5, c_5h, LV_ANIM_ON);
+                cyd_motion_bar(bar_c5, c_5h, motionReset);
                 lv_label_set_text(lbl_c5_sub, c_5h_sub.c_str());
 
                 // Update Claude Weekly Box
                 String cw_val_str = String(c_wk) + "%";
                 lv_label_set_text(lbl_cw_val, cw_val_str.c_str());
-                lv_bar_set_value(bar_cw, c_wk, LV_ANIM_ON);
+                cyd_motion_bar(bar_cw, c_wk, motionReset);
                 lv_label_set_text(lbl_cw_sub, c_wk_sub.c_str());
 
             } else {
@@ -1275,19 +1390,22 @@ void fetchQuotaData() {
                 lv_obj_set_style_text_color(lbl_primary_tag, lv_color_hex(0xE4E4E7), LV_PART_MAIN);
                 lv_obj_set_style_text_font(lbl_primary_val, &lv_font_montserrat_32, LV_PART_MAIN);
 
-                lv_obj_set_size(bar_primary, 296, 14);
-                lv_obj_set_pos(bar_primary, 4, 52);
-                lv_bar_set_value(bar_primary, left_pct, LV_ANIM_ON);
+                lv_obj_set_size(bar_primary, 440, 16);
+                lv_obj_set_pos(bar_primary, 8, 54);
+                cyd_motion_bar(bar_primary, left_pct, motionReset);
 
                 lv_label_set_text(lbl_primary_sub, p_sub.c_str());
                 lv_obj_set_style_text_font(lbl_primary_sub, &lv_font_montserrat_14, LV_PART_MAIN);
-                lv_obj_set_pos(lbl_primary_sub, 6, 80);
+                lv_obj_set_pos(lbl_primary_sub, 10, 80);
 
                 String weekly_value = String(weekly_left) + "% left";
                 lv_label_set_text(lbl_weekly_val, weekly_value.c_str());
                 lv_label_set_text(lbl_weekly_tag, "Weekly Limit");
-                lv_bar_set_value(bar_weekly, weekly_left, LV_ANIM_ON);
+                lv_obj_set_size(bar_weekly, 440, 12);
+                lv_obj_set_pos(bar_weekly, 8, 36);
+                cyd_motion_bar(bar_weekly, weekly_left, motionReset);
                 lv_label_set_text(lbl_weekly_sub, weekly_sub.c_str());
+                lv_obj_set_pos(lbl_weekly_sub, 10, 52);
                 const int weekly_used = 100 - weekly_left;
                 const uint32_t weekly_color = weekly_used > 80 ? 0xF43F5E : weekly_used > 50 ? 0xF59E0B : 0x10B981;
                 lv_obj_set_style_text_color(lbl_weekly_val, lv_color_hex(weekly_color), LV_PART_MAIN);
@@ -1319,45 +1437,58 @@ void fetchQuotaData() {
                 lv_obj_set_style_text_color(lbl_server_status, lv_color_hex(0x10B981), LV_PART_MAIN);
             }
 
-            // Flash Green LED on update
+            if (motionReset) {
+                if (provider == "antigravity") {
+                    cyd_motion_enter(box_gemini_5h, 0); cyd_motion_enter(box_claude_5h, 60);
+                    cyd_motion_enter(box_gemini_wk, 120); cyd_motion_enter(box_claude_wk, 180);
+                } else if (provider != "error") {
+                    cyd_motion_enter(card_primary, 0); cyd_motion_enter(card_details, 90);
+                }
+            }
             digitalWrite(LED_GREEN, LOW);
-            delay(20);
-            digitalWrite(LED_GREEN, HIGH);
+            greenLedUntil = millis() + 20;
+            usageFailureStreak = 0;
+            usageDataShown = true;
         } else {
-            showTelemetryError("Monitor returned invalid telemetry JSON.");
+            if (transientUsageFailure()) showTelemetryError("Monitor returned invalid telemetry JSON.");
         }
     } else if (httpCode == HTTP_CODE_UNAUTHORIZED) {
         showTelemetryError("Device token was rejected by the monitor server.");
     } else if (httpCode > 0) {
-        showTelemetryError("Monitor request failed with HTTP " + String(httpCode) + ".");
+        if (transientUsageFailure()) showTelemetryError("Monitor request failed with HTTP " + String(httpCode) + ".");
     } else {
-        Serial.printf("[NET] LAN request failed: HTTPClient=%d (%s)\n",
-                      httpCode, HTTPClient::errorToString(httpCode).c_str());
-        showTelemetryError("Local monitor connection failed. Check LAN address and server.");
+        Serial.printf("[NET] LAN request failed: HTTPClient=%d (%s) streak=%u\n",
+                      httpCode, HTTPClient::errorToString(httpCode).c_str(), usageFailureStreak + 1);
+        if (transientUsageFailure()) showTelemetryError(WiFi.status() == WL_CONNECTED ? "Wi-Fi connected; monitor server unreachable. Retrying." : "Wi-Fi disconnected. Reconnecting automatically.");
     }
     http.end();
 }
 
 void pollDisplayCommand() {
-    if (WiFi.status() != WL_CONNECTED || millis() - lastDisplayCommandPoll < FETCH_INTERVAL) return;
+    if (WiFi.status() != WL_CONNECTED || millis() - lastDisplayCommandPoll < commandPollInterval) return;
     lastDisplayCommandPoll = millis();
     String url = String(TELEMETRY_SERVER_URL);
     url.replace("/api/v1/cyd-status", "/api/v1/display-command");
-    HTTPClient http;
+    url += "?after=" + lastDisplayCommandId;
+    commandPollInterval = min(commandPollInterval * 2UL, 10000UL);
+    HTTPClient &http = telemetryHttp;
     if (!beginTelemetryRequest(http, telemetryPlainClient, url)) return;
     http.setReuse(true);
     http.setConnectTimeout(TELEMETRY_CONNECT_TIMEOUT_MS);
     http.setTimeout(TELEMETRY_READ_TIMEOUT_MS);
     addTelemetryAuth(http);
-    const int code = http.GET();
+    const int code = animatedGet(http);
     if (code != HTTP_CODE_OK || http.getSize() > static_cast<int>(MAX_TELEMETRY_BYTES)) {
         http.end();
         return;
     }
-    JsonDocument doc;
-    const DeserializationError error = deserializeJson(doc, http.getString());
+    const String payload = animatedBody(http);
     http.end();
+    if (payload.length() > MAX_TELEMETRY_BYTES) return;
+    JsonDocument doc;
+    const DeserializationError error = deserializeJson(doc, payload);
     if (error) return;
+    commandPollInterval = COMMAND_POLL_INTERVAL;
     displayCommandSeen = true;
     String commandId = doc["id"] | "";
     String app = doc["app"] | "";
@@ -1365,6 +1496,10 @@ void pollDisplayCommand() {
     applyDisplayRotation(rotation);
     if (commandId.length() == 0 || commandId == lastDisplayCommandId) return;
     lastDisplayCommandId = commandId;
+    prefetchedTelemetryPayload = "";
+    if (app == "usage" && doc["telemetry"].is<JsonObject>()) {
+        serializeJson(doc["telemetry"], prefetchedTelemetryPayload);
+    }
     if (app == "openrouter") {
         homeRequested = false;
         Serial.println("[REMOTE] Dashboard -> OpenRouter");
@@ -1396,7 +1531,7 @@ void reportDisplayState() {
 
     String url = String(TELEMETRY_SERVER_URL);
     url.replace("/api/v1/cyd-status", "/api/v1/display-state");
-    HTTPClient http;
+    HTTPClient &http = telemetryHttp;
     if (!beginTelemetryRequest(http, telemetryPlainClient, url)) return;
     http.setReuse(true);
     http.setConnectTimeout(TELEMETRY_CONNECT_TIMEOUT_MS);
@@ -1409,7 +1544,7 @@ void reportDisplayState() {
     doc["rotation"] = displayRotationDegrees;
     String payload;
     serializeJson(doc, payload);
-    const int code = http.POST(payload);
+    const int code = animatedPost(http, payload);
     http.end();
     if (code == HTTP_CODE_OK) {
         displayStateReportPending = false;
@@ -1418,6 +1553,7 @@ void reportDisplayState() {
 }
 
 void showOpenRouterError(const String &detail) {
+    cyd_motion_openrouter_error();
     lv_label_set_text(or_balance_value, "--");
     lv_arc_set_value(or_balance_arc, 0);
     lv_label_set_text(or_today_value, "--");
@@ -1432,21 +1568,22 @@ void showOpenRouterError(const String &detail) {
 
 void fetchOpenRouterData() {
     if (WiFi.status() != WL_CONNECTED) {
-        showOpenRouterError("Wi-Fi is disconnected");
+        if (transientOpenRouterFailure()) showOpenRouterError("Wi-Fi is disconnected");
         return;
     }
     String url = String(TELEMETRY_SERVER_URL);
     url.replace("/api/v1/cyd-status", "/api/v1/openrouter-status");
-    HTTPClient http;
+    HTTPClient &http = telemetryHttp;
     if (!beginTelemetryRequest(http, telemetryPlainClient, url)) return;
     http.setReuse(true);
     http.setConnectTimeout(TELEMETRY_CONNECT_TIMEOUT_MS);
     http.setTimeout(TELEMETRY_READ_TIMEOUT_MS);
     addTelemetryAuth(http);
-    const int code = http.GET();
+    const int code = animatedGet(http);
+    fetchRetryInterval = code == HTTP_CODE_OK ? FETCH_INTERVAL : min(fetchRetryInterval * 2UL, 30000UL);
     if (code != HTTP_CODE_OK) {
         if (code == HTTP_CODE_UNAUTHORIZED) showOpenRouterError("Device token rejected");
-        else showOpenRouterError(code > 0 ? "Monitor returned HTTP " + String(code) : "Local monitor connection failed");
+        else if (transientOpenRouterFailure()) showOpenRouterError(code > 0 ? "Monitor returned HTTP " + String(code) : "Local monitor connection failed");
         http.end();
         return;
     }
@@ -1455,7 +1592,7 @@ void fetchOpenRouterData() {
         showOpenRouterError("Response exceeded safe size");
         return;
     }
-    String payload = http.getString();
+    String payload = animatedBody(http);
     http.end();
     if (payload.length() > MAX_TELEMETRY_BYTES) {
         showOpenRouterError("Response exceeded safe size");
@@ -1463,39 +1600,43 @@ void fetchOpenRouterData() {
     }
     JsonDocument doc;
     if (deserializeJson(doc, payload)) {
-        showOpenRouterError("Monitor returned invalid JSON");
+        if (transientOpenRouterFailure()) showOpenRouterError("Monitor returned invalid JSON");
         return;
     }
     String status = doc["status"] | "error";
     String label = doc["account_label"] | "OpenRouter";
     lv_label_set_text(or_account_label, label.c_str());
     if (status != "ok") {
+        // The server already applied its own stale/failure policy; honour it.
         String detail = status == "unconfigured" ? "Configure OpenRouter in dashboard" : String(doc["error"] | "Waiting for collector");
         showOpenRouterError(detail);
         return;
     }
+    openRouterFailureStreak = 0;
+    openRouterDataShown = true;
     const float balance = doc["remaining_credits"] | 0.0f;
     const int percent = constrain(static_cast<int>(roundf(doc["remaining_pct"] | 0.0f)), 0, 100);
     const String balanceText = "$" + String(balance, 2);
     const String today = "$" + String(static_cast<float>(doc["usage_today"] | 0.0f), 2);
     const String week = "$" + String(static_cast<float>(doc["usage_week"] | 0.0f), 2);
     const String month = "$" + String(static_cast<float>(doc["usage_month"] | 0.0f), 2);
-    lv_label_set_text(or_balance_value, balanceText.c_str());
-    lv_arc_set_value(or_balance_arc, percent);
-    lv_label_set_text(or_today_value, today.c_str());
-    lv_label_set_text(or_week_value, week.c_str());
-    lv_label_set_text(or_month_value, month.c_str());
+    cyd_motion_money(or_balance_value, balanceText.c_str(), false);
+    cyd_motion_arc(percent, false);
+    cyd_motion_money(or_today_value, today.c_str(), false);
+    cyd_motion_money(or_week_value, week.c_str(), false);
+    cyd_motion_money(or_month_value, month.c_str(), false);
     String model = doc["top_model"]["name"] | "No completed usage";
     lv_label_set_text(or_top_model, model.c_str());
     JsonArray daily = doc["daily_usage"].as<JsonArray>();
     float maximum = 0.0f;
     for (JsonObject point : daily) maximum = max(maximum, static_cast<float>(point["usage"] | 0.0f));
+    int chartValues[7];
     for (uint16_t i = 0; i < 7; ++i) {
         float value = i < daily.size() ? static_cast<float>(daily[i]["usage"] | 0.0f) : 0.0f;
         int normalized = maximum > 0.0f ? static_cast<int>(roundf(value * 100.0f / maximum)) : 0;
-        lv_chart_set_value_by_id(or_chart, or_chart_series, i, normalized);
+        chartValues[i] = normalized;
     }
-    lv_chart_refresh(or_chart);
+    cyd_motion_chart(chartValues, false);
     lv_label_set_text(or_state_label, "Cached OpenRouter API - refreshes every 90s");
     lv_obj_set_style_text_color(or_state_label, lv_color_hex(0x94A3B8), LV_PART_MAIN);
 }
@@ -1581,6 +1722,7 @@ void serviceWifiState() {
 void setup() {
     Serial.begin(115200);
     delay(300);
+    Serial.printf("[BOOT] reset_reason=%d\n", (int)esp_reset_reason());
 
     // RGB Setup
     pinMode(LED_RED, OUTPUT);
@@ -1619,6 +1761,7 @@ void setup() {
     disp_drv.hor_res = 480;
     disp_drv.ver_res = 320;
     disp_drv.flush_cb = my_disp_flush;
+    disp_drv.monitor_cb = displayMonitor;
     disp_drv.draw_buf = &draw_buf;
     lv_disp_drv_register(&disp_drv);
 
@@ -1633,6 +1776,21 @@ void setup() {
     buildLauncherUI();
     buildDashboardUI();
     buildOpenRouterUI();
+    cyd_motion_bar_init(bar_primary, 0); cyd_motion_bar_init(bar_weekly, 90);
+    cyd_motion_bar_init(bar_g5, 0); cyd_motion_bar_init(bar_c5, 60);
+    cyd_motion_bar_init(bar_gw, 120); cyd_motion_bar_init(bar_cw, 180);
+    cyd_motion_arc_init(or_balance_arc);
+    cyd_motion_money_init(or_balance_value, 0); cyd_motion_money_init(or_today_value, 60);
+    cyd_motion_money_init(or_week_value, 120); cyd_motion_money_init(or_month_value, 180);
+    cyd_motion_chart_init(or_chart, or_chart_series);
+    cyd_motion_screen_init(scr_launcher); cyd_motion_screen_init(scr_dashboard); cyd_motion_screen_init(scr_openrouter);
+    lv_obj_t *cards[] = {card_primary, card_details, box_gemini_5h, box_claude_5h, box_gemini_wk, box_claude_wk,
+        lv_obj_get_parent(or_today_value), lv_obj_get_parent(or_week_value), lv_obj_get_parent(or_month_value), lv_obj_get_parent(or_chart)};
+    for (lv_obj_t *card : cards) cyd_motion_card_init(card);
+    cyd_motion_init();
+    telemetryDone = xSemaphoreCreateBinary();
+    if (telemetryDone && xTaskCreate(telemetryWorker, "cyd-http", 6144, NULL, 1, &telemetryWorkerTask) != pdPASS)
+        telemetryWorkerTask = nullptr;
     lv_scr_load(scr_launcher);
     lv_timer_handler();
 
@@ -1653,6 +1811,9 @@ void setup() {
 }
 
 void loop() {
+    static unsigned long lastDiagnostics;
+    if (millis() - lastDiagnostics >= 30000) { lastDiagnostics = millis(); printDeviceDiagnostics(); }
+    serviceUpdateLed();
     lv_timer_handler();
     delay(5);
 
@@ -1680,6 +1841,8 @@ void loop() {
             } else {
                 Serial.println("[KEY] Open Usage Monitor before switching accounts.");
             }
+        } else if (c == 'd' || c == 'D') {
+            printDeviceDiagnostics();
         } else if (c == '?') {
             printSimulatorKeybinds();
         }
@@ -1709,23 +1872,22 @@ void loop() {
     serviceWifiState();
     pollDisplayCommand();
 
-    if (!homeRequested && !openUsageRequested && !openRouterRequested) {
-        reportDisplayState();
-    }
 
     if (nextAccountRequested && activeScreen == AppScreen::UsageMonitor) {
         nextAccountRequested = false;
         triggerNextAccount();
     }
 
-    if (usageFetchPending && activeScreen != AppScreen::MainMenu) {
+    if (!homeRequested && !openUsageRequested && !openRouterRequested && usageFetchPending && activeScreen != AppScreen::MainMenu) {
         usageFetchPending = false;
         if (activeScreen == AppScreen::UsageMonitor) fetchQuotaData();
         else fetchOpenRouterData();
         lastFetchTime = millis();
-    } else if (activeScreen != AppScreen::MainMenu && millis() - lastFetchTime >= FETCH_INTERVAL) {
+    } else if (!homeRequested && !openUsageRequested && !openRouterRequested && activeScreen != AppScreen::MainMenu && millis() - lastFetchTime >= fetchRetryInterval) {
         lastFetchTime = millis();
         if (activeScreen == AppScreen::UsageMonitor) fetchQuotaData();
         else fetchOpenRouterData();
     }
+    lv_timer_handler();
+    if (!homeRequested && !openUsageRequested && !openRouterRequested) reportDisplayState();
 }

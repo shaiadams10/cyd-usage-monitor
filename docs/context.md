@@ -12,80 +12,259 @@ schematics, and comprehensive pin mapping documentation.
 Project Brain Protocol v1.1.0 is active and healthy at the repository root.
 
 ## Recent Changes
-### 2026-08-27 — CYD Wi-Fi Prevention & Staged Recovery
-- Reduced avoidable Wi-Fi interruptions on the continuously powered CYD by disabling ESP32 modem sleep, while retaining station-only mode, non-persistent credentials, and the framework's passive auto-reconnect.
-- Added serial disconnect-reason names/numbers plus connected RSSI/channel evidence so future AP, RF, authentication, and driver failures can be distinguished instead of inferred from the screen.
-- Added conservative fallback stages: explicit reconnect after 30 seconds, one station-radio reinitialization after two minutes, and a full ESP restart only after five minutes when that boot previously held a healthy connection. This avoids reboot loops during an AP outage or invalid configuration.
-- Updated the launcher to show `Recovering`, documented the power/reliability tradeoff and recovery timing, and completed a clean PlatformIO firmware build at 37.5% RAM / 63.5% flash.
-- Flashed the verified 1,255,056-byte image to the attached CH340 CYD on COM9. Controlled-reboot serial evidence captured one transient `ASSOC_FAIL` followed by a healthy connection at -53 dBm on channel 1, remote Usage Monitor routing, and synchronized 180-degree display state; the strong signal makes persistent weak RF unlikely at the current placement.
-- Files affected: `docs/{context.md,map.md}` and `cyd-usage-monitor/{CHANGELOG.md,README.md,src/main.cpp}`.
 
-### 2026-08-27 — Dashboard Favicon & High-Res App Icon Assets
-- Generated a high-contrast cybernetic CYD monitor master icon (1024x1024) featuring the dark squircle chassis, glowing emerald-teal quota gauge arc meter, and gold/amber status accents.
-- Created full multi-resolution raster and vector favicon suite: `cyd-monitor-icon-1024.png`, `icon-512.png`, `icon-192.png`, `apple-touch-icon.png` (180x180), `favicon-32x32.png`, `favicon-16x16.png`, multi-size `favicon.ico` (16/32/48/64px), and crisp scalable `favicon.svg`. Added complete cycle, cycle-badge, and sync action-icon families for Stream Deck and launcher shortcuts.
-- Updated `dashboard.html` `<head>` with SVG, PNG, and Apple Touch Icon `<link>` tags, and added direct public `/favicon.ico` routing in `server.py`.
-- Added automated server tests in `test_server.py` covering unauthenticated public favicon, SVG, and raster asset serving (all 47 tests passing).
-- Deployed live to the operator-configured private host, rebuilt production containers, and verified healthy live responses (`200 OK`) across all favicon routes.
-- Files affected: `docs/{context.md,map.md}`, `cyd-usage-monitor/CHANGELOG.md`, `cyd-usage-monitor/server/{dashboard.html,server.py,test_server.py,static/{apple-touch-icon.png,cyd-monitor-*-icon-*.png,cyd-monitor-icon-1024.png,favicon-16x16.png,favicon-32x32.png,favicon.ico,favicon.svg,icon-192.png,icon-512.png}}`.
+### 2026-09-18 — Antigravity Disabled Quota Support
+- Diagnosed persistent Antigravity CLI collection failures (258 consecutive failures
+  on the active profile) when Claude models reached their weekly limit (0.00% remaining).
+  The CLI renders `Disabled: You have hit your weekly limit, the 5-hour limit does not
+  currently apply...` without a numerical percentage, causing `parse_antigravity_usage`
+  to raise a ValueError and time out.
+- Added parsing support for disabled limit layouts in `parse_antigravity_usage`:
+  reports 0% remaining quota and "Weekly limit reached" (or "Limit reached") reset status.
+- Hardened server `usage_sub` to format non-duration reset strings cleanly without
+  awkward "Refresh in: " prefixes.
+- Added comprehensive unit tests in `test_collector.py` and `test_server.py`; verified
+  all 55 server tests and 21 helper tests pass.
+- Files: cyd-usage-monitor/server/{collector.py,server.py,test_collector.py,test_server.py},
+  cyd-usage-monitor/CHANGELOG.md, docs/{context.md,map.md}.
 
-### 2026-08-27 — Stream Deck Usage-Account Cycling
-- Added a Windows Stream Deck helper that calls the existing private Bearer-protected next-account endpoint without storing its token in Stream Deck arguments or repository files.
-- Added a windowless WScript launcher so Stream Deck can invoke the PowerShell helper without briefly flashing a console window.
-- Configured the operator's Windows user environment from the already-flashed CYD's ignored private endpoint/token values. Each press rotates enabled Codex/Antigravity profiles and forces both the physical CYD and dashboard preview into Usage Monitor; OpenRouter is excluded.
-- Files affected: `docs/{context.md,map.md}` and `cyd-usage-monitor/{CHANGELOG.md,README.md,scripts/stream-deck-next-account.{ps1,vbs}}`.
+### 2026-09-13 — CYD Fixed-Address Recovery
+- Diagnosed a healthy monitor application published on a stale LAN address
+  after the Wi-Fi host received a different DHCP lease. The physical CYD kept
+  its Wi-Fi association but could not reach its private device API.
+- Reserved the original server address for the host in the gateway, restarted
+  only the affected Wi-Fi radio, restored the private Compose bind, and
+  recreated only the monitor app. Collector and Tunnel containers remained
+  running; no application source, image, or firmware behavior changed.
+- Verified the host returned on its reservation, the app was healthy, the
+  unauthenticated API returned 401, the authenticated API returned 200, and a
+  fresh physical-device route report plus sustained polling traffic confirmed
+  end-to-end CYD recovery without USB serial access.
+- Files: docs/{context.md,map.md,map.local.md}; ignored private deployment and
+  firmware configuration plus remote rollback backups.
 
-### 2026-08-27 — Dashboard-Controlled 180° CYD Rotation
-- Added a persisted dashboard control that switches the physical E32R40T between normal and 180-degree-flipped landscape orientations through the existing private display-command poll. The 480x320 layout is unchanged, and resistive-touch coordinates invert with the panel so controls stay aligned upside down.
-- Kept the browser LVGL preview upright and added a physical `0°`/`180°` indicator. The physical CYD now stores its last orientation in Preferences/NVS, so it restores immediately on reboot before networking is available.
-- Added bidirectional launcher/Usage Monitor/OpenRouter synchronization: browser preview navigation commands the physical CYD, while physical touch navigation reports its state through a Bearer-only device endpoint and the browser follows it. Home and account selection participate in the same persisted route.
-- Passed 46 server tests and completed fresh WebAssembly and PlatformIO builds at 37.5% RAM and 63.2% flash.
-- Flashed the 1,249,728-byte firmware image to the attached CH340 CYD on COM9 with verified segment hashes. Serial boot confirmed that the new firmware restored the saved 180-degree orientation from NVS before networking, received remote Launcher/Usage routes, and reported synchronized app state back to the server.
-- Visually tested the upright launcher and OpenRouter preview, the 180-degree indicator, an unchanged CSS canvas transform, and device-to-browser route following. Backed up the live source/private state, deployed the rebuilt application, and preserved all configured profiles while leaving the collector and Tunnel running. All three services are healthy; production device-route isolation returned `401` unauthenticated, `200` with Bearer authentication, and `404` for a dashboard-only route on the device listener.
-- Kept root microphone diagnostic WAV captures out of version control as private runtime artifacts.
-- Files affected: `.gitignore`, `docs/{context.md,map.md}`, and `cyd-usage-monitor/{CHANGELOG.md,README.md,server/{dashboard.html,server.py,static/lvgl/{cyd_lvgl.js,cyd_lvgl.wasm},test_server.py},simulator/{build-wasm.ps1,lvgl_cyd_sim.c},src/main.cpp}`.
+### 2026-09-09 — Codex Desktop Hook Update Recovery
+- Diagnosed live Codex hook callbacks failing at identity startup while the
+  server, CYD route, mappings, trust and Antigravity watcher remained healthy.
+  Codex Desktop had replaced its versioned bundled CLI directory, leaving the
+  private helper configuration pointed at a removed executable.
+- Added a fail-closed fallback that rediscovers the newest bundled `codex.exe`
+  only under the standard Codex Desktop installation directory when the saved
+  path no longer exists. Installed matching helpers into shared-home and the
+  already-trusted compatibility path without changing hook registration.
+- Passed all 18 switching tests and a live Codex identity, mapping and server
+  selection check returned `selected`; no prompt, credential or identity data
+  was retained or exposed.
+- Files: cyd-usage-monitor/{scripts/chat-account-switch.py,
+  scripts/test_chat_account_switch.py,README.md,CHANGELOG.md},
+  docs/{context.md,map.md}; ignored private runtime helpers and backups.
 
-### 2026-08-27 — Dashboard-Managed Email Integration & Draft Preservation
-- Added a protected Alerts email setup flow with Gmail/Google Workspace and custom TLS SMTP modes. Gmail presets the official SMTP endpoint and accepts whitespace-formatted app passwords; custom mode supports STARTTLS or implicit TLS, host, port, sender, recipient, username, and provider credential.
-- Stored dashboard-submitted SMTP credentials atomically in private mode-`0600` runtime data. Status responses expose only safe setup metadata; passwords and usernames never return to the browser. Existing host environment SMTP settings take precedence and make the dashboard form read-only.
-- Chose app-password/provider SMTP setup over Gmail OAuth because alert-only OAuth would add a Google Cloud project, consent/redirect configuration, Gmail scopes, verification considerations, and a refresh-token lifecycle. Added save, test, health, and remove controls plus server-side address, hostname, port, and TLS validation.
-- Passed 44 server tests, Compose and JavaScript validation, visually tested Gmail/custom dashboard states, and deployed the rebuilt application and collector to the configured private host. Production correctly reports email unconfigured until the operator supplies a credential through the new form.
-- Fixed the live email form losing earlier values as focus moved between fields: the 1.2-second telemetry renderer now hydrates the form only when server-side email configuration actually changes, and focus/input/change events keep the complete browser draft authoritative until Save succeeds. Revalidated 44 tests and redeployed the dashboard application.
-- Files affected: `docs/{context.md,map.md}` and `cyd-usage-monitor/{CHANGELOG.md,README.md,instructions/{DEPLOYMENT_RUNBOOK.md,TOKEN_GUIDE.md},server/{collector.py,dashboard.html,server.py,test_collector.py,test_server.py}}`.
+### 2026-09-09 — CYD Server Network Recovery
+- Diagnosed unreachable device API: app was internally healthy but Docker had
+  no active network attachments or published ports after an earlier host reboot.
+  The configured private LAN address still matched the host. Restart alone did
+  not repair it; recreated only the app through existing remote Compose config.
+- Verified restored LAN port, authenticated device API HTTP 200, unauthenticated
+  HTTP 401, and dashboard listener authentication. Collector remained running.
+  Physical screen recovery was not independently confirmed; no USB serial device
+  was available. The cause of the lost Docker attachment remains unproven.
+- No firmware, application source, image build, or configuration change.
+- Files: docs/{context.md,map.md}.
 
-### 2026-08-26 — Dual Codex Quotas, Durable Identity & Independent Alert Fallback
-- Updated the common Codex collection path to parse the current rolling 5-hour and weekly quota windows while retaining the one-shot update-prompt Skip responder for every existing or future Codex profile. Successful CLI-visible identities are now persisted on the profile, so later collection errors, incidents, alerts, dashboard cards, and CYD payloads continue to identify the affected account.
-- Added physical and WebAssembly LVGL Codex dual-limit layouts plus protected dashboard-to-device app commands. The OpenRouter overview now has **Show on CYD**, and CLI profile selection switches both the live preview and physical display back to Usage Monitor.
-- Added host-only STARTTLS/TLS SMTP as an independent, deduplicated fallback when WAHA delivery fails, with dashboard health and a test action. The production deployment has no SMTP credentials yet, so the transport is installed but intentionally reports unconfigured until the operator provides a dedicated SMTP account or app password.
-- Browser-tested healthy, error-identity, Codex dual-limit, and OpenRouter/Usage preview states; deployed the rebuilt app/collector, verified all configured profiles healthy with both Codex accounts carrying 5-hour/weekly telemetry and durable identity, flashed COM7, and serial-confirmed both remote routes. Passed 42 server tests, Compose validation, JavaScript syntax, PlatformIO, and Emscripten builds.
-- Files affected: `docs/{context.md,map.md}` and `cyd-usage-monitor/{.env.example,CHANGELOG.md,README.md,docker-compose.yml,instructions/{DEPLOYMENT_RUNBOOK.md,TOKEN_GUIDE.md},server/{collector.py,dashboard.html,server.py,static/lvgl/{cyd_lvgl.js,cyd_lvgl.wasm},test_collector.py,test_server.py},simulator/{build-wasm.ps1,lvgl_cyd_sim.c},src/main.cpp}`.
 
-### 2026-08-26 — CYD Navigation, Codex Collection & Alert Delivery Repair
-- Fixed the Hosyond E32R40T launcher by applying TFT_eSPI's complete five-value resistive calibration, making decorative launcher children click-through, clearing competing route flags, enlarging Home targets, and adding navigation serial diagnostics. Usage Monitor, OpenRouter, and Home now have independent reliable routes in firmware and the browser simulator.
-- Traced both live Codex failures to version 0.147.0's startup self-update prompt intercepting scheduled `/status`. The collector now detects the ANSI-rendered prompt and selects Skip once without mutating the read-only container; both configured Codex accounts and Antigravity returned to fresh `ok` telemetry after deployment.
-- Made failed WAHA sends durable and retryable, suppressed recovery messages for outages whose failure alert was never delivered, and exposed delivery errors as a red dashboard Overview status. The failed private WAHA session was restarted and is waiting for the operator to scan its QR code before a test alert can be delivered.
-- Rebuilt the firmware and WebAssembly preview, deployed the collector repair to the configured private host, and passed 35 server tests plus the PlatformIO and simulator builds.
-- Files affected: `docs/{context.md,map.md}` and `cyd-usage-monitor/{CHANGELOG.md,README.md,server/{collector.py,dashboard.html,static/lvgl/cyd_lvgl.wasm,test_collector.py},simulator/lvgl_cyd_sim.c,src/main.cpp}`.
+### 2026-09-06 — Desktop Restart Recovery and Switch History
+- Proved Codex MSIX redirected the old helper directory into private package
+  storage; Windows Task Scheduler could not see it at its configured path.
+  Migrated mappings/state to shared user-home storage, preserved the trusted
+  live Codex command via its compatibility copy, and installed a per-user task.
+- Task supports logon, one-minute recovery, batteries and unlimited runtime.
+  Verified scheduled launch and automatic recovery after terminating only the
+  verified watcher; operator confirmed a real Antigravity selection. No reboot
+  was performed. On-demand diagnostics now verify process and heartbeat age.
+- Added bounded local outcome/phase/timing history and 200 server selection/route
+  events with allowlisted source tags and hashed task/account references.
+  Stream Deck helpers tag requests; no message text or credentials are logged.
+- Antigravity 2.12.2 contains hooks and a JSON-hooks flag; global schema matches
+  official docs, but the old hook path was inaccessible outside Codex. Installed
+  a metadata-only corrected-path probe; no native callback on the operator test.
+  Effective feature-flag value and app-reload requirement remain unestablished.
+- Passed 16 switching, 3 Windows transport and 53 server tests. Deployed only the
+  server layer with source/state/image rollback backups; matching source hashes,
+  dashboard/API success and private-history 401/public-route 404 checks passed.
+- Files: cyd-usage-monitor/{scripts/chat-account-switch.py,
+  scripts/watch-antigravity-messages.py,scripts/install-chat-account-switch.py,
+  scripts/install-antigravity-startup.ps1,scripts/test_chat_account_switch.py,
+  scripts/stream-deck-next-account.ps1,scripts/stream-deck-next-account.vbs,
+  server/server.py,server/test_server.py,AGENTS.md,README.md,CHANGELOG.md,
+  instructions/CHAT_ACCOUNT_SWITCH_SETUP.md,instructions/TOKEN_GUIDE.md},
+  docs/{context.md,map.md}; ignored operator runtime and map.local.md.
 
-### 2026-08-26 — Hosyond E32R40T Hardware Correction & Verified Flash
-- Identified the connected Hosyond 4.0-inch ESP32-32E module behind reseller listing ASIN B0G1M857NL as the E32R40T hardware family. Although the listing title incorrectly says ILI9341 240×320, its detailed specification and the manufacturer documentation identify an ST7796S 320×480 display with XPT2046 resistive touch.
-- Corrected the mixed-board configuration: backlight GPIO27, red LED GPIO22, and XPT2046 sharing LCD SPI on GPIO14/13/12 with CS GPIO33 and IRQ GPIO36. Removed incompatible GT911 probing and separate-touch-bus setup, and reduced CH340C upload speed to 460800 baud.
-- Built and flashed the 1,214,224-byte image to COM7 with verified hashes. Serial boot confirmed the display path, E32R40T touch initialization, live touch coordinates, and repeated launcher account-switch actions. The pre-existing 4 MiB factory backup remains intact with SHA-256 `445F6FCB210442777F04028F3AD2022BD1C7231B5D9907309D8514F863978315`.
-- Files affected: `docs/{context.md,map.md}` and `cyd-usage-monitor/{CHANGELOG.md,README.md,instructions/FLASHING_GUIDE.md,platformio.ini,src/main.cpp}`.
 
-### 2026-08-26 — CYD ST7796 480x320 Responsive Layout & Dual-Touch Integration
-- Upgraded the CYD Usage Monitor LVGL UI layout to full native 480×320 screen geometry for the 3.5-inch ST7796 display, expanding Launcher tiles, ChatGPT metrics, Antigravity 2x2 grid, and OpenRouter spend/charts edge-to-edge.
-- Integrated dual-touch hardware autodetection supporting both capacitive (GT911 on I2C `SDA=33, SCL=32`) and resistive (XPT2046 on shared SPI `CS=33, IRQ=36`) touch controllers with real-time ADC pressure tracking.
-- Removed `-D TFT_INVERSION_ON=1` to restore the correct dark-mode UI palette.
-- Files affected: `docs/{context.md,map.md}`, `cyd-usage-monitor/{platformio.ini,src/main.cpp}`.
+### 2026-09-06 — GitHub Homepage Refresh
+- Updated the public root README to cover recent CYD features and link directly
+  to desktop recovery, Stream Deck controls, detailed setup, and the changelog.
+- Corrected obsolete HTTPS firmware setup and ILI9341 hardware statements using
+  the current private-LAN implementation and E32R40T configuration.
+- Checked local link targets and source consistency; no runtime changes.
+- Files: README.md, cyd-usage-monitor/CHANGELOG.md, docs/{context.md,map.md}.
 
-### 2026-08-26 — Physical CYD Backup, Driver Setup & Usage Monitor Flash
-- Provisioned the physical ESP32-2432S028R Cheap Yellow Display over COM7 after installing the WCH CH340 USB-to-serial driver.
-- Performed a full 4MB raw flash dump saved to `cyd-usage-monitor/data/factory_backup.bin` before modifying flash, preserving the factory vendor hardware selftest and LVGL 8 `lv_demo_widgets()` benchmark suite (analytics, shop, profile, and performance meters).
-- Configured local Wi-Fi credentials in `cyd-usage-monitor/include/secrets.h`, compiled the release firmware with PlatformIO, and flashed the two-app CYD Usage Monitor and OpenRouter UI image. Verified boot and touch navigation startup on physical hardware.
-- Files affected: `docs/{context.md,map.md}`, `.gitignore`, and `cyd-usage-monitor/{include/secrets.h,data/factory_backup.bin}`.
+
+### 2026-09-06 — CYD Public Release Security Audit
+- CI follow-up: isolated all collector test paths and inherited notification
+  credentials after clean Linux exposed two accidental production-path reads.
+  Files: cyd-usage-monitor/{server/test_collector.py,README.md,CHANGELOG.md}.
+- Published commit `7a308608f9c5605a9d8302f6e6339b70c60ed5de` directly to
+  GitHub main; followed by test-isolation fix `147ff8b`. Verified remote SHA.
+  Final GitHub CI run `34043993243` passed both server and firmware/WASM jobs;
+  clean Linux tests and all 66 local Python tests passed.
+- Prepared a CYD-only release from upstream main in an isolated worktree because
+  two unpublished local commits contain unrelated projects. Preserve local work.
+- Hardened both Stream Deck transports against redirects/proxies/automatic Windows
+  authentication and noncanonical endpoints; synthetic-token Windows tests pass.
+- Gitleaks scanned 15 historical commits and the release tree without leaks;
+  private-value and binary-asset checks also found no matches. All 51 server and
+  15 helper tests, firmware, LVGL motion, WASM and dashboard syntax checks passed.
+- CI now runs Windows helper and real LVGL motion checks; affected workflow:
+  .github/workflows/ci.yml.
+- Files: cyd-usage-monitor/{scripts/stream-deck-next-account.ps1,
+  scripts/stream-deck-next-account.vbs,scripts/test_stream_deck_security.py,
+  .gitignore,README.md,CHANGELOG.md}, docs/{context.md,map.md}.
+
+### 2026-09-06 — Desktop Switching Recovery Runbook
+- Audited the selector, installer and Windows watcher against setup docs. Added
+  a fresh-computer sequence covering prerequisites, private settings/mappings,
+  custom labels, installer constraints, trust, startup and acceptance checks.
+- Validation: all 12 switching tests and 51 server tests passed; Brain healthy.
+- Initially found integration scripts untracked; the subsequent CYD public
+  release includes them and their recovery guide. No clean-machine test claimed.
+- Files: cyd-usage-monitor/{instructions/CHAT_ACCOUNT_SWITCH_SETUP.md,README.md,
+  CHANGELOG.md}, docs/{context.md,map.md}.
+
+### 2026-09-06 — Transition Redraws and Server Reachability
+- Follow-up: Stream Deck still used the former LAN address in the Windows user
+  setting CYD_USAGE_MONITOR_NEXT_ACCOUNT_URL. Backed up and corrected that
+  private setting; account discovery and the actual VBS direct-selection helper
+  succeeded while retaining the current account. Helpers read User settings on
+  every invocation, so restarting Stream Deck is not required.
+- Found post-arrival zero resets/card movement and costly full-screen redraws
+  (initial observed maxima 236–289 ms). Replaced slides with directional masked
+  strip reveals, coalesced navigation, stable values and no pressed zoom.
+- Device associated at strong RSSI with zero disconnects while HTTP failed.
+  Server listener worked inside Docker but its published IP was no longer on
+  the host. Operator subsequently confirmed the host was off, then restarted it.
+  Docker failed startup with cannot-assign-address until private LAN binding
+  and firmware endpoint were corrected. Cause of host power-off is unproven.
+- Added reset/network/memory/render diagnostics and periodic-fetch backoff.
+  Passed 51 server tests, real LVGL motion tests and browser frame checks.
+  Firmware hash verification and matching hosted assets/API checks passed.
+  Sequential live route acknowledgments passed for all three routes plus both
+  provider-selection API checks. Observed 116 requests with zero HTTP failures,
+  Wi-Fi disconnects or crash signatures; heap/worker-stack headroom stayed ample.
+  Redraw averages remained about 47–57 ms with occasional long frames; no fixed
+  frame-rate or universal flicker-elimination claim. Optimized opaque reveal strips.
+- Files: cyd-usage-monitor/src/{main.cpp,ui_motion.h}, simulator/{lvgl_cyd_sim.c,
+  test_motion.c}, server/static/lvgl/{cyd_lvgl.js,cyd_lvgl.wasm}, README.md,
+  CHANGELOG.md, docs/{context.md,map.md}; private config and map.local.md.
+
+### 2026-09-05 — Animated CYD Screens
+- Added shared bounded LVGL motion for all four layouts: launcher icon activity,
+  eased/staggered quota bars with refresh sweeps, card entrances, and OpenRouter
+  arc, exact-cent counters, and seven-column chart transitions.
+- Serialized HTTP work on a worker while the UI task pumps LVGL; preserved
+  request ordering/timeouts and replaced the blocking 20 ms update LED delay.
+  Navigation still waits for the current bounded operation to finish.
+- Passed 51 server tests, firmware and production WASM builds, real LVGL motion
+  checks, and browser rendering of all four layouts. Saved device flash rollback,
+  installed firmware with hash verification (37.7% static RAM / 63.7% flash),
+  and deployed matching hosted assets with old assets/image retained. Hosted
+  asset hashes, authenticated dashboard/APIs, and unauthenticated denial passed.
+  Device-origin acknowledgments passed for OpenRouter, Home, and Usage; Codex
+  and Antigravity selection API checks passed and the account/route were restored.
+
 
 ## History Summary
+
+- 2026-09-05 — Desktop Message Account Selection: added and verified credential-safe
+  Windows desktop message hooks and background file watcher to switch active CYD
+  accounts based on Codex and Antigravity chat activity.
+
+- 2026-09-05 — Replaced PowerShell startup in Stream Deck controls with direct
+  windowless HTTP, accelerated CYD command polling, and verified server,
+  firmware, physical switching, and security behavior.
+
+- 2026-09-05 — Propagated the configured local timezone through isolated CLI
+  profiles and containers, correcting Codex quota reset times; validated all
+  accounts on the live deployment.
+
+- 2026-09-04 — Repeatable speaker sound/speech tests; acoustic comparison remains pending. Details retained in the voice project changelog.
+
+- 2026-09-04 — Stream Deck Direct Account Selection (details retained in project changelogs).
+
+- 2026-09-04 — Full-Scale Speaker Volume Control (details retained in prior history and project changelogs).
+
+- 2026-09-04 — Voice Lab Evidence Inbox Rework (details retained in the voice satellite changelog).
 <!-- Compressed summaries of older changes go here -->
+- 2026-09-04 — Restored and physically verified direct Assist PCM TTS and normal
+  wake re-arm after URL-player lockups; retained bounded timeout recovery.
+  Details in the voice satellite changelog.
+- 2026-09-04 — Native-Rate Lossless Voice Playback Rebuild (details in project changelogs).
+
+- 2026-09-04 — Exhaustive Voice Research Review Queue (details retained in project changelogs).
+
+- Built the purpose-designed ESP32-S3 voice console on 2026-09-04 with live
+  status, controls, session diagnostics, and verified embedded deployment; later
+  entries describe subsequent refinements.
+- Aligned physical and simulator Codex quota bars and disabled accidental card scrolling on 2026-09-03; firmware and 47 server tests passed.
+- Diagnosed voice satellite boot time and speaker hardware on 2026-09-03: host
+  networking restored native Home Assistant Assist zeroconf reconnection in 7.1s,
+  shortened OLED state text, corrected the speaker diagnostic, and identified the
+  `2025-V1.4` open `IN-OUT` jumper.
+
+- Added consistent wire-color emojis across the satellite hardware guide on
+  2026-09-02, including peripheral tables, cross-checks, and Mermaid flows.
+
+- Reorganized and cross-checked the voice satellite per-device wiring tables
+  and whole-system diagrams on 2026-08-30.
+
+- Colocated the canonical Home Assistant wiring guide in the voice-satellite
+  project and updated all workspace links on 2026-08-29.
+
+- Disabled CYD Wi-Fi modem sleep and added reason-aware staged reconnect,
+  station reinitialization, and guarded restart recovery on 2026-08-27; a
+  physical controlled-reboot test confirmed healthy strong-signal recovery.
+
+- Added and deployed a complete high-resolution CYD dashboard favicon/app-icon
+  suite with public asset routes and automated coverage on 2026-08-27.
+
+- Added a credential-safe, windowless Windows Stream Deck helper for cycling
+  enabled Codex/Antigravity accounts on the physical CYD and dashboard on
+  2026-08-27.
+
+- Added dashboard-controlled 180-degree CYD rotation with synchronized
+  device/browser routing, persisted orientation, and verified physical/live
+  deployment on 2026-08-27.
+
+- Added dashboard-managed Gmail/custom SMTP alerts, private credential storage,
+  test/removal controls, and browser-draft preservation on 2026-08-27;
+  validated and deployed the protected workflow.
+
+- Supported dual Codex rolling 5-hour and weekly quotas, durable account identity,
+  dashboard-to-device app commands, and host-only TLS SMTP alert fallback on
+  2026-08-26; validated server tests, simulator, and physical CYD firmware.
+
+- Repaired CYD resistive-touch navigation, handled Codex CLI update prompts in
+  scheduled collection, and made WAHA delivery failures durable and visible on
+  2026-08-26; validated the firmware, simulator, server tests, and live
+  deployment.
+
+- Identified the connected Hosyond 4.0-inch ESP32-32E module as the E32R40T family (ST7796S 320×480 with XPT2046 resistive touch), corrected shared LCD/touch SPI pins, and verified flashing to COM7 on 2026-08-26.
+
+- Upgraded the CYD to its native ST7796 480×320 layout, added capacitive and
+  resistive touch autodetection, and corrected dark-mode inversion on
+  2026-08-26; later E32R40T identification selected the resistive path and
+  corrected the final board-specific pins.
+
+- Backed up the original 4 MB CYD factory firmware, provisioned local Wi-Fi, and completed the first verified Usage Monitor/OpenRouter flash and touch-navigation boot on 2026-08-26.
 
 - Identified the purchased voice-satellite modules and corrected the carrier's INMP441 footprint to the real 14 mm round 2x3 geometry on 2026-08-24; amplifier/OLED bodies and exact ESP32-S3 board dimensions still gate fabrication and case CAD.
 
@@ -190,5 +369,6 @@ Project Brain Protocol v1.1.0 is active and healthy at the repository root.
 ## Known Issues
 <!-- Active bugs, tech debt, or blockers -->
 
-*None currently identified in the clean-room voice path; physical confirmation
-of perceived earcon/TTS loudness remains an operator acceptance check.*
+- Speaker output remains quiet and distorted according to the operator even
+  at 100% volume. Matched stored-speech and level tests are intended to isolate
+  source/stream, channel-format, and output-stage causes; no cause is proven yet.

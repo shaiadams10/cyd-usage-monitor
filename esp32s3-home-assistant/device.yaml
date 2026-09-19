@@ -5,6 +5,8 @@ substitutions:
   led_ring_count: "12"
 
 esphome:
+  includes:
+    - audio/
   name: ${device_name}
   friendly_name: ${friendly_name}
   min_version: 2026.7.0
@@ -18,10 +20,11 @@ esphome:
         - speaker.volume_set:
             id: speaker_out
             volume: !lambda |-
-              // GAIN is strapped to GND (+12 dB). Keep enough digital
-              // headroom that Piper peaks cannot overdrive the amp/USB rail.
-              const float requested = fmaxf(0.10f, fminf(0.60f, id(speaker_volume).state / 100.0f));
-              const float level = requested * 0.50f;
+              // Convert the displayed linear amplitude percentage into the
+              // I2S speaker's -49 dB..0 dB control. This makes 0..100% honest:
+              // 50% is half PCM amplitude and 100% is unattenuated PCM.
+              const float level = fmaxf(0.0f, fminf(1.0f, id(speaker_volume).state / 100.0f));
+              if (level <= 0.0f) return 0.0f;
               const float target_db = 20.0f * log10f(level);
               return fmaxf(0.0f, fminf(1.0f, (target_db + 49.0f) / 49.0f));
         - text_sensor.template.publish:
@@ -107,6 +110,10 @@ wifi:
 web_server:
   port: 80
   version: 3
+  # Load the tiny blocking stylesheet before the much larger JavaScript bundle
+  # so the stock ESPHome shell cannot paint while the custom UI downloads.
+  css_url: ""
+  css_include: dashboard-bootstrap.css
   # The pinned ESPHome v3 UI and our log controls are bundled together so the
   # dashboard stays available without access to oi.esphome.io.
   js_url: ""
@@ -263,8 +270,8 @@ speaker:
     # amplifier receives audio regardless of its L/R-select strap.
     channel: stereo
     # ESPHome's Assist API streams signed 16-bit, 16 kHz mono PCM. Keep local
-    # tones in that same format so a tone cannot leave stale stream metadata
-    # behind and corrupt the following Piper response.
+    # wake feedback in that same format so it cannot leave stale stream
+    # metadata behind and corrupt the following spoken confirmation.
     sample_rate: 16000
     bits_per_sample: 16bit
     # MAX98357A native I2S uses the Philips one-bit delay. The former MSB mode
@@ -295,13 +302,57 @@ display:
     lambda: |-
       it.printf(64, 0, id(font_small), TextAlign::TOP_CENTER, "HEY BURDEN");
       it.line(0, 13, 127, 13);
-      it.printf(64, 18, id(font_state), TextAlign::TOP_CENTER, "%s", id(voice_state).state.c_str());
-      if (id(last_request).has_state() && !id(last_request).state.empty()) {
-        std::string request = id(last_request).state;
-        if (request.size() > 21) request = request.substr(0, 18) + "...";
-        it.printf(0, 42, id(font_small), "Heard: %s", request.c_str());
+
+      // The raw diagnostic states are useful in Home Assistant but several are
+      // wider than a 128 px OLED. Render a deliberately bounded, human-facing
+      // two-line status instead of allowing the display driver to clip text.
+      const std::string state = id(voice_state).state;
+      std::string line_one;
+      std::string line_two;
+      if (state == "WAITING FOR HOME ASSISTANT") {
+        line_one = "CONNECTING";
+        line_two = "HOME ASSISTANT";
+      } else if (state == "WAITING FOR WAKE WORD") {
+        line_one = "READY";
+        line_two = "SAY HEY BURDEN";
+      } else if (state == "WAKE WORD DISABLED") {
+        line_one = "WAKE WORD";
+        line_two = "DISABLED";
+      } else if (state == "HOME ASSISTANT OFFLINE") {
+        line_one = "HOME ASSISTANT";
+        line_two = "OFFLINE";
+      } else if (state == "STARTING COMMAND") {
+        line_one = "STARTING";
+        line_two = "COMMAND";
+      } else if (state == "HEARING SPEECH") {
+        line_one = "HEARING";
+        line_two = "SPEECH";
+      } else if (state == "MATCHING COMMAND") {
+        line_one = "MATCHING";
+        line_two = "COMMAND";
+      } else {
+        line_one = state;
+        if (line_one.size() > 17) {
+          size_t split = line_one.rfind(' ', 17);
+          if (split == std::string::npos) split = 17;
+          line_two = line_one.substr(split + (line_one[split] == ' ' ? 1 : 0));
+          line_one = line_one.substr(0, split);
+          if (line_two.size() > 17) line_two = line_two.substr(0, 14) + "...";
+        }
       }
-      it.printf(0, 54, id(font_small), "WiFi %.0f dBm", id(wifi_signal_db).state);
+
+      const bool has_request = id(last_request).has_state() && !id(last_request).state.empty();
+      if (line_two.empty()) {
+        it.printf(64, has_request ? 25 : 29, id(font_state), TextAlign::TOP_CENTER, "%s", line_one.c_str());
+      } else {
+        it.printf(64, has_request ? 17 : 21, id(font_state), TextAlign::TOP_CENTER, "%s", line_one.c_str());
+        it.printf(64, has_request ? 33 : 39, id(font_state), TextAlign::TOP_CENTER, "%s", line_two.c_str());
+      }
+      if (has_request) {
+        std::string request = id(last_request).state;
+        if (request.size() > 14) request = request.substr(0, 11) + "...";
+        it.printf(64, 53, id(font_small), TextAlign::TOP_CENTER, "Heard: %s", request.c_str());
+      }
 
 binary_sensor:
   - platform: status
@@ -379,10 +430,11 @@ number:
     name: "Speaker Volume"
     icon: mdi:volume-high
     unit_of_measurement: "%"
-    min_value: 10
-    # The MAX98357A GAIN pin is strapped to GND (+12 dB). The 60% UI ceiling
-    # maps to 30% PCM amplitude; Piper receives another 0.65 multiplier.
-    max_value: 60
+    # GAIN is now unconnected (9 dB), so expose the complete digital range.
+    # The value is true PCM amplitude: 0% mutes and 100% is bit-perfect full
+    # scale with no hidden attenuation.
+    min_value: 0
+    max_value: 100
     step: 5
     initial_value: 50
     restore_value: true
@@ -391,8 +443,8 @@ number:
       - speaker.volume_set:
           id: speaker_out
           volume: !lambda |-
-            const float requested = fmaxf(0.10f, fminf(0.60f, x / 100.0f));
-            const float level = requested * 0.50f;
+            const float level = fmaxf(0.0f, fminf(1.0f, x / 100.0f));
+            if (level <= 0.0f) return 0.0f;
             const float target_db = 20.0f * log10f(level);
             return fmaxf(0.0f, fminf(1.0f, (target_db + 49.0f) / 49.0f));
     web_server:
@@ -454,10 +506,50 @@ button:
     name: "Test Speaker"
     icon: mdi:volume-medium
     on_press:
-      - script.execute: test_feedback_tone
+      - script.execute:
+          id: run_speaker_test
+          kind: 0
     web_server:
       sorting_group_id: dashboard_voice
       sorting_weight: 26
+  - platform: template
+    name: "Test Chime"
+    on_press:
+      - script.execute: {id: run_speaker_test, kind: 1}
+  - platform: template
+    name: "Test Random Sound"
+    on_press:
+      - script.execute: {id: run_speaker_test, kind: 2}
+  - platform: template
+    name: "Test Soft Noise"
+    on_press:
+      - script.execute: {id: run_speaker_test, kind: 3}
+  - platform: template
+    name: "Test Speech A"
+    on_press:
+      - script.execute: {id: run_speaker_test, kind: 4}
+  - platform: template
+    name: "Test Speech B"
+    on_press:
+      - script.execute: {id: run_speaker_test, kind: 5}
+  - platform: template
+    name: "Test Speech Stereo"
+    on_press:
+      - script.execute: {id: run_speaker_test, kind: 6}
+  - platform: template
+    name: "Test Level Steps"
+    on_press:
+      - script.execute: {id: run_speaker_test, kind: 7}
+  - platform: template
+    name: "Stop Test Sound"
+    on_press:
+      - if:
+          condition:
+            script.is_running: run_speaker_test
+          then:
+            - script.stop: run_speaker_test
+            - lambda: speaker_tests::stop(id(speaker_out));
+            - script.execute: resume_local_wake_word
   - platform: restart
     name: "Restart Device"
     entity_category: diagnostic
@@ -732,7 +824,38 @@ sensor:
         sorting_group_id: dashboard_health
         sorting_weight: 30
 
+interval:
+  - interval: 10ms
+    then:
+      - lambda: speaker_tests::tick(id(speaker_out));
+
 script:
+  - id: run_speaker_test
+    mode: single
+    parameters:
+      kind: int
+    then:
+      - if:
+          condition:
+            lambda: return !id(assistant).is_running() && id(speaker_out).is_stopped();
+          then:
+            - micro_wake_word.stop:
+            - binary_sensor.template.publish: {id: ready_for_voice, state: OFF}
+            - text_sensor.template.publish: {id: voice_state, state: "TESTING SPEAKER"}
+            - text_sensor.template.publish: {id: interaction_availability, state: "BUSY - SPEAKER TEST"}
+            - light.turn_off:
+                id: led_ring
+                transition_length: 0s
+            - delay: 30ms
+            - lambda: speaker_tests::start(id(speaker_out), kind);
+            - wait_until:
+                condition:
+                  lambda: return !speaker_tests::active;
+                timeout: 16s
+            - lambda: speaker_tests::stop(id(speaker_out));
+            - script.execute: resume_local_wake_word
+          else:
+            - logger.log: "Speaker test unavailable while audio or Assist is active"
   - id: ring_ready
     mode: restart
     then:
@@ -784,8 +907,8 @@ script:
       - speaker.volume_set:
           id: speaker_out
           volume: !lambda |-
-            const float requested = fmaxf(0.10f, fminf(0.60f, id(speaker_volume).state / 100.0f));
-            const float level = requested * 0.50f;
+            const float level = fmaxf(0.0f, fminf(1.0f, id(speaker_volume).state / 100.0f));
+            if (level <= 0.0f) return 0.0f;
             const float target_db = 20.0f * log10f(level);
             return fmaxf(0.0f, fminf(1.0f, (target_db + 49.0f) / 49.0f));
       # Raw speaker.play data has no format metadata. Keep it identical to the
@@ -818,14 +941,14 @@ script:
               const float envelope = attack * release;
               float frequency;
               if (pattern == 0) {
-              frequency = i < 249 ? 900.0f : 1200.0f;
+                frequency = i < 249 ? 900.0f : 1200.0f;
               } else if (pattern == 1) {
                 frequency = 820.0f + 180.0f * static_cast<float>(i) / sample_count;
               } else {
-              frequency = i < 280 ? 1200.0f : 900.0f;
+                frequency = i < 280 ? 1200.0f : 900.0f;
               }
               phase += 2.0f * 3.14159265f * frequency / 16000.0f;
-            const int16_t sample = static_cast<int16_t>(8000.0f * envelope * sinf(phase));
+              const int16_t sample = static_cast<int16_t>(8000.0f * envelope * sinf(phase));
               const size_t frame = i * 2;
               audio[frame] = static_cast<uint8_t>(sample & 0xFF);
               audio[frame + 1] = static_cast<uint8_t>((sample >> 8) & 0xFF);
@@ -840,87 +963,73 @@ script:
             speaker.is_stopped:
               id: speaker_out
           timeout: 2s
-  - id: test_feedback_tone
-    # Ignore extra dashboard clicks until the current diagnostic tone has
-    # stopped. Restarting I2S while its ISR queue is active can tear the tone
-    # and overflow the speaker event queue.
-    mode: single
-    then:
-      - speaker.volume_set:
-          id: speaker_out
-          volume: !lambda |-
-            const float requested = fmaxf(0.10f, fminf(0.60f, id(speaker_volume).state / 100.0f));
-            const float level = requested * 0.50f;
-            const float target_db = 20.0f * log10f(level);
-            return fmaxf(0.0f, fminf(1.0f, (target_db + 49.0f) / 49.0f));
-      - lambda: |-
-          id(speaker_out).set_audio_stream_info(esphome::audio::AudioStreamInfo(16, 1, 16000));
-      - lambda: id(speaker_out).start();
-      - wait_until:
-          condition:
-            lambda: return id(speaker_out).is_running();
-          timeout: 2500ms
-      - lambda: |-
-            // A clearly audible 250 ms diagnostic tone. This is deliberately
-            // much longer than the wake acknowledgement.
-            const size_t sample_count = 4000;
-            std::vector<uint8_t> audio(sample_count * 2);
-            float phase = 0.0f;
-            for (size_t i = 0; i < sample_count; i++) {
-              const float attack = fminf(1.0f, static_cast<float>(i) / 220.0f);
-              const float release = fminf(1.0f, static_cast<float>(sample_count - 1 - i) / 440.0f);
-              const float envelope = attack * release;
-              phase += 2.0f * 3.14159265f * 880.0f / 16000.0f;
-              const int16_t sample = static_cast<int16_t>(14000.0f * envelope * sinf(phase));
-              const size_t frame = i * 2;
-              audio[frame] = static_cast<uint8_t>(sample & 0xFF);
-              audio[frame + 1] = static_cast<uint8_t>((sample >> 8) & 0xFF);
-            }
-            const size_t accepted = id(speaker_out).play(audio.data(), audio.size());
-            ESP_LOGI("speaker_probe", "Test tone PCM accepted: %u/%u bytes (16 kHz, 16-bit, mono)",
-                     (unsigned) accepted, (unsigned) audio.size());
-            // Read the actual GPIO pads while the I2S peripheral is sending
-            // the tone. Enabling pad input does not disconnect the peripheral
-            // output, and lets us distinguish a dead ESP/I2S path from a fault
-            // downstream of the header pins.
-            gpio_input_enable(GPIO_NUM_17);
-            gpio_input_enable(GPIO_NUM_18);
-            gpio_input_enable(GPIO_NUM_8);
-            int last_bclk = gpio_get_level(GPIO_NUM_17);
-            int last_lrc = gpio_get_level(GPIO_NUM_18);
-            int last_din = gpio_get_level(GPIO_NUM_8);
-            uint32_t bclk_edges = 0;
-            uint32_t lrc_edges = 0;
-            uint32_t din_edges = 0;
-            const int64_t probe_end = esp_timer_get_time() + 80000;
-            while (esp_timer_get_time() < probe_end) {
-              const int bclk = gpio_get_level(GPIO_NUM_17);
-              const int lrc = gpio_get_level(GPIO_NUM_18);
-              const int din = gpio_get_level(GPIO_NUM_8);
-              if (bclk != last_bclk) bclk_edges++;
-              if (lrc != last_lrc) lrc_edges++;
-              if (din != last_din) din_edges++;
-              last_bclk = bclk;
-              last_lrc = lrc;
-              last_din = din;
-            }
-            ESP_LOGI("speaker_probe", "GPIO pad transitions in 80ms: BCLK=%u LRC=%u DIN=%u",
-                     (unsigned) bclk_edges, (unsigned) lrc_edges, (unsigned) din_edges);
-      - speaker.finish:
-          id: speaker_out
-      - wait_until:
-          condition:
-            speaker.is_stopped:
-              id: speaker_out
-          timeout: 2s
   - id: resume_local_wake_word
     mode: restart
     then:
       - wait_until:
           condition:
             not:
-              voice_assistant.is_running
-          timeout: 30s
+              voice_assistant.is_running:
+                id: assistant
+          timeout: 10s
+      # The direct Assist stream normally closes Voice Assistant as soon as
+      # its PCM stream ends. Keep a generous fail-safe for transport failures,
+      # without making it part of the normal confirmation lifecycle.
+      - if:
+          condition:
+            voice_assistant.is_running:
+              id: assistant
+          then:
+            - lambda: |-
+                id(last_error).publish_state("tts_stream_timeout: direct Assist stream did not finish within 10s; recovered locally");
+                ESP_LOGE("voice_trace", "TTS STREAM WATCHDOG | session=%s | speaker_running=%s | forcing stop",
+                         id(current_session_id).state.c_str(), id(speaker_out).is_running() ? "yes" : "no");
+                const std::string record = json::build_json([&](JsonObject root) {
+                  root["v"] = 1;
+                  root["id"] = id(current_session_id).state;
+                  root["wake"] = "Hey Burden";
+                  root["heard"] = id(last_request).state;
+                  root["reply"] = id(last_response).state;
+                  root["matched"] = id(matched_command).state;
+                  root["result"] = id(action_result).state;
+                  root["error"] = "tts_stream_timeout: direct Assist stream did not finish within 10s; recovered locally";
+                  root["outcome"] = "TTS STREAM TIMEOUT RECOVERED";
+                  root["ok"] = false;
+                  root["one_breath"] = id(speech_started_ms) &&
+                    id(speech_started_ms) - id(wake_detected_ms) <= 1800;
+                  root["wake_pipeline_ms"] = id(pipeline_started_ms) - id(wake_detected_ms);
+                  root["replay_ms"] = id(command_microphone).get_last_replay_duration_ms();
+                  root["replay_bytes"] = id(command_microphone).get_last_replay_bytes();
+                  root["wake_speech_ms"] = id(speech_started_ms)
+                    ? id(speech_started_ms) - id(wake_detected_ms) : 0U;
+                  root["capture_ms"] = id(speech_started_ms) && id(speech_ended_ms)
+                    ? id(speech_ended_ms) - id(speech_started_ms) : 0U;
+                  root["stt_ms"] = id(speech_ended_ms) && id(transcript_ready_ms)
+                    ? id(transcript_ready_ms) - id(speech_ended_ms) : 0U;
+                  root["action_ms"] = id(action_reported) && id(wake_to_action_latency).has_state()
+                    ? static_cast<uint32_t>(id(wake_to_action_latency).state) : 0U;
+                  root["total_ms"] = millis() - id(pipeline_started_ms);
+                  root["pre_roll_ms"] = static_cast<uint32_t>(id(command_pre_roll).state);
+                  root["rssi_dbm"] = static_cast<int32_t>(id(wifi_signal_db).state);
+                  root["wake_sound"] = id(wake_sound_enabled).state;
+                });
+                ESP_LOGI("voice_session", "SESSION_JSON %s", record.c_str());
+            - speaker.stop:
+                id: speaker_out
+            - delay: 100ms
+            - if:
+                condition:
+                  voice_assistant.is_running:
+                    id: assistant
+                then:
+                  - voice_assistant.stop:
+                      id: assistant
+            - wait_until:
+                condition:
+                  not:
+                    voice_assistant.is_running:
+                      id: assistant
+                timeout: 3s
       - if:
           condition:
             lambda: return id(pipeline_failed);
@@ -935,7 +1044,8 @@ script:
               - voice_assistant.connected
               - switch.is_on: wake_word_enabled
               - not:
-                  voice_assistant.is_running
+                  voice_assistant.is_running:
+                    id: assistant
           then:
             - micro_wake_word.start
             - text_sensor.template.publish:
@@ -951,16 +1061,10 @@ script:
           else:
             - if:
                 condition:
-                  voice_assistant.connected
+                  not:
+                    voice_assistant.connected:
+                      id: assistant
                 then:
-                  - text_sensor.template.publish:
-                      id: interaction_availability
-                      state: "UNAVAILABLE - WAKE WORD DISABLED"
-                  - binary_sensor.template.publish:
-                      id: ready_for_voice
-                      state: OFF
-                  - script.execute: ring_disabled
-                else:
                   - text_sensor.template.publish:
                       id: interaction_availability
                       state: "UNAVAILABLE - HOME ASSISTANT OFFLINE"
@@ -968,6 +1072,29 @@ script:
                       id: ready_for_voice
                       state: OFF
                   - script.execute: ring_unavailable
+                else:
+                  - if:
+                      condition:
+                        switch.is_off: wake_word_enabled
+                      then:
+                        - text_sensor.template.publish:
+                            id: interaction_availability
+                            state: "UNAVAILABLE - WAKE WORD DISABLED"
+                        - binary_sensor.template.publish:
+                            id: ready_for_voice
+                            state: OFF
+                        - script.execute: ring_disabled
+                      else:
+                        - text_sensor.template.publish:
+                            id: voice_state
+                            state: "RECOVERY FAILED"
+                        - text_sensor.template.publish:
+                            id: interaction_availability
+                            state: "ERROR - RESTART DEVICE"
+                        - binary_sensor.template.publish:
+                            id: ready_for_voice
+                            state: OFF
+                        - script.execute: ring_unavailable
 
 micro_wake_word:
   id: hey_burden_wake
@@ -1040,8 +1167,9 @@ voice_assistant:
   use_wake_word: false
   noise_suppression_level: 2
   auto_gain: 31dBFS
-  # Additional peak margin for the GAIN=GND (+12 dB) MAX98357A module.
-  volume_multiplier: 0.65
+  # Preserve the full Home Assistant PCM signal; the user-facing speaker
+  # control is the only attenuation stage.
+  volume_multiplier: 1.0
   conversation_timeout: 120s
   on_client_connected:
     - if:
@@ -1169,7 +1297,7 @@ voice_assistant:
     - lambda: |-
         // Voice Assistant audio messages contain raw PCM bytes but no stream
         // metadata. Restore the protocol's fixed format before its deferred
-        // speaker start, especially after a local feedback tone.
+        // speaker start, especially after a local diagnostic sweep.
         id(speaker_out).set_audio_stream_info(esphome::audio::AudioStreamInfo(16, 1, 16000));
         ESP_LOGI("voice_trace", "ASSISTANT EXACT | \"%s\" | output=16kHz/16-bit/mono", x.c_str());
     - text_sensor.template.publish:
@@ -1179,8 +1307,8 @@ voice_assistant:
     - speaker.volume_set:
         id: speaker_out
         volume: !lambda |-
-          const float requested = fmaxf(0.10f, fminf(0.60f, id(speaker_volume).state / 100.0f));
-          const float level = requested * 0.50f;
+          const float level = fmaxf(0.0f, fminf(1.0f, id(speaker_volume).state / 100.0f));
+          if (level <= 0.0f) return 0.0f;
           const float target_db = 20.0f * log10f(level);
           return fmaxf(0.0f, fminf(1.0f, (target_db + 49.0f) / 49.0f));
     - text_sensor.template.publish:
@@ -1189,7 +1317,10 @@ voice_assistant:
     - text_sensor.template.publish:
         id: interaction_availability
         state: "BUSY - ASSISTANT SPEAKING"
-    - script.execute: ring_processing
+    # The ring shares the USB-derived rail with the amplifier. Turn it fully
+    # off only while PCM is playing to reserve maximum instantaneous current
+    # for clean speaker peaks.
+    - light.turn_off: led_ring
     - lambda: ESP_LOGI("voice_trace", "SPEAKER STREAM START");
   on_tts_stream_end:
     - lambda: ESP_LOGI("voice_trace", "SPEAKER STREAM END");

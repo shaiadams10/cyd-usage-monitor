@@ -4,6 +4,125 @@
 
 ### Changed
 
+- Replaced the brief low-level speaker probe with dashboard sound tests:
+  sweep, chime, random melody, soft noise, rising levels, and two embedded
+  peak-normalized speech samples, including an identical mono/stereo comparison.
+  A bounded nonblocking PSRAM player handles partial writes and output draining;
+  tests pause wake detection and the ring, reject active Assist sessions, and
+  expose a stop button. Normal direct Assist transport remains unchanged.
+- Corrected diagnostic guidance: accepted PCM bytes and GPIO transitions do
+  not establish acoustic quality or rule out firmware/format problems. The
+  operator still reports quiet, distorted sound at 100% volume.
+
+- Expanded speaker control to a true 0–100% PCM-amplitude range, removed the
+  obsolete hidden 0.50 speaker scale and 0.65 Assist-response multiplier, and
+  reserve shared USB-rail headroom by switching the LED ring fully off during
+  TTS playback. The floating 9 dB MAX98357A gain setting remains the clean
+  hardware baseline; 100% now means unattenuated digital full scale.
+- Completely reworked Voice Lab as a responsive evidence inbox with clearer
+  hierarchy, touch-friendly record cards, at-a-glance totals, and a focused
+  selected-record workspace. Successful and failed requests now carry explicit
+  green **Successful** and red **Error** flags; review state is independent and
+  shown only as a blue dot that disappears once a human label is selected.
+  Added an always-visible plain-language guide so color is never the sole cue.
+- Restored ESPHome's direct 16 kHz PCM Assist speaker transport after the
+  experimental lossless-WAV announcement media player broke spoken
+  confirmations and left Voice Assistant in `SPEAKING`. Restored explicit TTS
+  stream-start/end handling and matching wake-tone metadata. A 10-second
+  emergency guard now records `TTS
+  STREAM TIMEOUT RECOVERED`, stops the speaker/session, and re-arms the wake
+  word only when the direct stream genuinely fails to close. Recovery status
+  distinguishes Home Assistant offline, an intentionally disabled wake word,
+  and a genuine recovery failure.
+- Replaced the 16 kHz mono speaker probe with a bounded 22.05 kHz dual-mono
+  300 Hz–5 kHz logarithmic sweep. The reference test temporarily switches off
+  the shared-5-V LED ring, retains GPIO transition evidence, and restores the
+  ready indication afterward. Updated the hardware baseline to recommend the
+  MAX98357A's unconnected 9 dB gain setting, local 10 µF + 0.1 µF amplifier
+  bypass, separate short power branches, under-playback voltage checks, and an
+  adequately rated USB source/cable.
+
+- Made the Research Sessions review queue exhaustive across its two evidence
+  sources. Every stored Speech-to-Phrase diagnostic is now imported even when
+  no matching ESPHome log row reached the browser, so empty-transcript,
+  no-audio-after-VAD, fuzzy-match, high-cost, and other decoder failures remain
+  visible with their saved WAV, signal metrics, candidates, timing, and review
+  controls. Device-only failures that stop before recognition remain visible
+  with their device outcome and timing evidence, and a late device record
+  replaces its temporary diagnostic-only row without creating a duplicate.
+
+- Replaced the visible ESPHome entity-table dashboard with a purpose-built,
+  responsive voice console. Added a plain-language animated assistant state,
+  touch-friendly speaker volume with step and test controls, custom wake-word
+  and acknowledgement switches, a one-breath buffer control, latest
+  conversation cards, compact health metrics, and confirmed recovery actions.
+  The lightweight controls use ESPHome's local REST routes, while the hidden
+  stock entity/log surface remains active for telemetry, session capture, and
+  the existing 12-second recovery fail-open.
+
+- Kept the MAX98357A on native Philips I2S with explicit 16 kHz, 16-bit mono
+  source metadata and restored the speaker diagnostic to a slider-controlled
+  250 ms tone that fits within the 300 ms ring buffer. This removed an
+  accidental full-volume override and long blocking feed; the flashed device
+  accepted all 8,000 bytes, showed active BCLK/LRC/DIN transitions, logged no
+  I2S/queue/buffer failure, and reduced the observed test loop stall from 729 ms
+  to 148 ms. Identified the fitted dual-USB-C N16R8 board as the
+  photographed `2025-V1.4` DevKitC-style variant and confirmed that its
+  front-side `IN-OUT` pads are open, isolating USB VBUS from `5Vin`; the
+  back-side `USB-OTG` pads are also open but are not required for COM-powered
+  5 V output. Documented the measured 1.3–1.98 V floating `5Vin`, healthy 3.3 V
+  rails, exact jumper choice, safe USB/external supply constraints, and the
+  MAX98357A-supported no-solder alternative of powering `VIN` from 3.3 V at
+  reduced output. The amplifier cannot operate from the measured floating
+  voltage.
+
+- Moved the dashboard loading mask into ESPHome's small `css_include` resource
+  so it blocks the stock UI before the large JavaScript bundle downloads, then
+  removes the stylesheet only after the custom shell is ready. Retained a
+  12-second fail-open to expose ESPHome's stock recovery UI if custom
+  enhancement fails after download.
+
+- Deployed and smoke-tested Home Assistant's native host-network topology after
+  adding narrow UFW allowances for LAN TCP 8123, LAN mDNS, and bridged
+  Speech-to-Phrase access to host TCP 8123. Preserved the existing Wyoming
+  config-entry hostnames through loopback mappings to their published ports;
+  the active Speech-to-Phrase/Piper pipeline remained available. After a later
+  physical restart reproduced a 21-second connection, reconfigured the ESPHome
+  config entry from its retained numeric address to
+  `esp32s3-home-assistant.local`. A controlled restart then connected in 7.1
+  seconds, including Home Assistant's intentional five-second expected-reboot
+  cooldown, instead of the original bridge-network trace's 33.6 seconds.
+
+- Reworked the 128×64 OLED into a bounded, state-specific two-line layout,
+  removed the on-device Wi-Fi RSSI footer, and shortened the last-heard footer
+  so long status/transcript text no longer renders beyond the panel edges.
+
+- Added an early branded dashboard bootstrap screen and reveal-on-ready handoff
+  so the stock ESPHome entity layout no longer flashes underneath the custom
+  operations console while its shadow-DOM enhancements attach.
+
+- Documented a measured startup trace that isolates the long readiness wait to
+  Home Assistant's ESPHome API reconnect backoff when its bridged container
+  cannot receive LAN mDNS announcements, plus a voltage/resistance checklist
+  for a silent MAX98357A after the ESP32 I2S probe succeeds.
+
+- Added color emojis to the Suggested Wire columns across all peripheral
+  connection tables (SSD1306 OLED, INMP441 microphone, MAX98357A amplifier,
+  box speaker, and 12-pixel LED ring) in `HARDWARE.md` to visually match the
+  pinout cross-check table and Mermaid flowcharts.
+
+- Reorganized `HARDWARE.md` into one complete connection table per device and
+  corrected the whole-system tables and diagrams to show the confirmed
+  MAX98357A wiring: 5 V to `VIN`, 3.3 V to `SD/SD_MODE`, and ground to both
+  `GND` and `GAIN`. Added explicit power-rail, bridge-tied speaker, microphone,
+  and LED-ring safety notes so every physical connection can be checked without
+  inferring omitted module pins.
+
+- Moved the complete wiring, wire-color, pinout, and LED-ring connection guide
+  from the workspace-level `docs/` directory to this project as `HARDWARE.md`,
+  and updated the project and workspace links so the hardware documentation is
+  self-contained with the firmware it describes.
+
 - Matched the carrier to the supplied AliExpress component listings. Replaced
   the incorrect generic 1x6 INMP441 socket with the purchased HZWDONE 14 mm
   round 2x3 footprint, exact labeled pad arrangement, body outline, and

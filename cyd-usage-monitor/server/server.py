@@ -7,6 +7,7 @@ import copy
 import datetime as dt
 import hmac
 import html
+import hashlib
 import json
 import os
 import re
@@ -46,6 +47,21 @@ FLASHING_GUIDE_FILE = PACKAGED_FLASHING_GUIDE if PACKAGED_FLASHING_GUIDE.is_file
 DEVICE_TOKEN = os.environ.get("CYD_API_TOKEN", "").strip()
 MAX_REQUEST_BYTES = 32 * 1024
 DISPLAY_APPS = {"launcher", "usage", "openrouter"}
+SELECTION_SOURCES = {"codex-hook", "antigravity-watch", "antigravity-hook", "stream-deck"}
+
+
+def selection_history(settings: dict, *, source: str, action: str, app: str,
+                      profile_id: str | None = None) -> None:
+    """Bounded metadata in the existing atomic settings write; no polling I/O."""
+    provider = next((p for p in ("codex", "antigravity")
+                     if isinstance(profile_id, str) and profile_id.startswith(p + "-")), "none")
+    entry = {"time": utcnow(), "source": source, "action": action, "app": app,
+             "provider": provider,
+             "account_ref": hashlib.sha256(profile_id.encode()).hexdigest()[:12] if profile_id else ""}
+    history = settings.setdefault("selection_history", [])
+    entry["sequence"] = history[-1].get("sequence", 0) + 1 if history else 1
+    history.append(entry)
+    settings["selection_history"] = history[-200:]
 
 
 def bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -58,7 +74,7 @@ def bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
     return value
 
 
-POLL_SECONDS = bounded_int_env("CYD_MONITOR_POLL_SECONDS", 90, 60, 86400)
+POLL_SECONDS = bounded_int_env("CYD_MONITOR_POLL_SECONDS", 90, 30, 86400)
 if DEVICE_TOKEN and len(DEVICE_TOKEN) < 24:
     raise RuntimeError("CYD_API_TOKEN must contain at least 24 characters")
 
@@ -108,6 +124,7 @@ def display_settings() -> dict:
 def set_display_control(
     settings: dict, app: str, *, profile_id: str | None = None,
     source: str = "dashboard", observed_rotation: int | None = None,
+    audit_source: str | None = None, action: str = "display-command",
 ) -> None:
     """Persist the desired route and the latest known physical display state."""
     rotation = 180 if settings.get("display_rotation") == 180 else 0
@@ -124,6 +141,8 @@ def set_display_control(
         "source": source,
         "updated_at": utcnow(),
     }
+    selection_history(settings, source=audit_source or source, action=action, app=app,
+                      profile_id=command.get("profile_id"))
 
 
 def display_state() -> dict:
@@ -177,12 +196,45 @@ def profile_by_id(profile_id: str | None):
     return None
 
 
-def is_stale(snapshot: dict) -> bool:
+def snapshot_age_seconds(snapshot: dict) -> float | None:
     try:
         collected = dt.datetime.fromisoformat(snapshot["collected_at"].replace("Z", "+00:00"))
-        return (dt.datetime.now(dt.timezone.utc) - collected).total_seconds() > POLL_SECONDS * 2
-    except (KeyError, ValueError, TypeError):
-        return True
+        return (dt.datetime.now(dt.timezone.utc) - collected).total_seconds()
+    except (KeyError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def stale_budget(snapshot: dict) -> float:
+    # The collector stamps each result with its own refresh cadence; a result
+    # without one (older collector, OpenRouter) falls back to two poll periods.
+    budget = snapshot.get("stale_after_seconds")
+    if isinstance(budget, (int, float)) and not isinstance(budget, bool) and budget > 0:
+        return float(budget)
+    return float(POLL_SECONDS * 2)
+
+
+def is_stale(snapshot: dict, budget: float | None = None) -> bool:
+    age = snapshot_age_seconds(snapshot)
+    return age is None or age > (budget if budget is not None else stale_budget(snapshot))
+
+
+def displayable_snapshot(snapshot: dict) -> tuple[dict | None, str]:
+    """Pick the values the CYD should render and why.
+
+    A single failed capture keeps the previous healthy values on screen. The
+    error card appears only once the collector confirms the outage (the alert
+    threshold) or the last healthy result exceeds the profile's stale budget.
+    """
+    if snapshot.get("status") == "ok":
+        return (None, "stale") if is_stale(snapshot) else (snapshot, "ok")
+    last_ok = snapshot.get("last_ok")
+    if not isinstance(last_ok, dict) or last_ok.get("status") != "ok":
+        return None, "error"
+    if snapshot.get("alert_confirmed", True):
+        return None, "error"
+    if is_stale(last_ok, stale_budget(snapshot)):
+        return None, "stale"
+    return last_ok, "degraded"
 
 
 def unavailable(provider: str, message: str, account_name: str = "Telemetry unavailable") -> dict:
@@ -214,9 +266,9 @@ def openrouter_public_status() -> dict:
     return result
 
 
-def cyd_payload() -> dict:
-    config = profiles_config()
-    profile_id = config.get("active_profile_id")
+def cyd_payload(profile_id: str | None = None) -> dict:
+    if profile_id is None:
+        profile_id = profiles_config().get("active_profile_id")
     profile = profile_by_id(profile_id)
     if not profile:
         return unavailable("collector", "No CLI profile is configured")
@@ -226,22 +278,33 @@ def cyd_payload() -> dict:
             profile.get("provider", "collector"), "Waiting for the CLI collector",
             profile.get("last_account_name") or profile.get("label") or "Telemetry unavailable",
         )
-    if snapshot.get("status") != "ok":
+    shown, reason = displayable_snapshot(snapshot)
+    if shown is None:
         return unavailable(
-            profile.get("provider", "collector"), snapshot.get("error", "CLI collection failed"),
+            profile.get("provider", "collector"),
+            "Last CLI result is stale" if reason == "stale" else snapshot.get("error", "CLI collection failed"),
             snapshot.get("account_name") or profile.get("last_account_name") or profile.get("label") or "Telemetry unavailable",
         )
-    if is_stale(snapshot):
-        return unavailable(
-            profile.get("provider", "collector"), "Last CLI result is stale",
-            snapshot.get("account_name") or profile.get("last_account_name") or profile.get("label") or "Telemetry unavailable",
-        )
+    payload = render_snapshot(shown)
+    if reason == "degraded":
+        # Tell the operator the values are carried over while the collector retries.
+        payload["degraded"] = True
+        payload["degraded_error"] = str(snapshot.get("error", "CLI collection failed"))[:120]
+        payload["status_ticker"] += " · retrying"
+    return payload
 
+
+def render_snapshot(snapshot: dict) -> dict:
     if snapshot.get("provider") == "antigravity":
         metrics = snapshot["metrics"]
         def usage_sub(metric: dict) -> str:
-            reset = metric["reset"]
-            return reset if reset.lower().startswith("quota") else "Refresh in: " + reset
+            reset = str(metric.get("reset") or "").strip()
+            if not reset:
+                return "Reset unavailable"
+            lower = reset.lower()
+            if lower.startswith(("quota", "weekly", "limit", "disabled", "reset", "refresh")):
+                return reset
+            return "Refresh in: " + reset
         return {
             "provider": "antigravity", "status": "ok", "account_name": snapshot["account_name"],
             "plan_type": snapshot.get("plan_type", "Antigravity"),
@@ -285,6 +348,16 @@ def display_command() -> dict:
         "id": str(command.get("id", ""))[:64], "app": app, "rotation": rotation,
         "profile_id": str(command.get("profile_id", ""))[:80],
     }
+
+
+def display_command_response(after: str | None = None) -> dict:
+    # Read command and its profile snapshot under the same storage lock.
+    with data_lock(DATA_DIR):
+        command = display_command()
+        if after is not None and command["id"] and command["id"] != after:
+            if command["app"] == "usage":
+                command["telemetry"] = cyd_payload(command.get("profile_id") or None)
+        return command
 
 
 def append_request(kind: str, profile_id: str | None = None) -> str:
@@ -429,6 +502,24 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
         if self.is_device_surface():
+            if path == "/api/v1/selection-history":
+                if not self.device_authorized():
+                    return self.send_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                return self.send_json({"events": read_json(SETTINGS_FILE, {}).get("selection_history", [])})
+            if path == "/api/v1/accounts":
+                if not self.device_authorized():
+                    return self.send_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                config = profiles_config()
+                snapshots = read_json(STATE_FILE, {"profiles": {}}).get("profiles", {})
+                return self.send_json({"accounts": [
+                    {"id": profile["id"], "provider": profile.get("provider"),
+                     "label": (profile.get("label") or profile.get("last_account_name")
+                               or snapshots.get(profile["id"], {}).get("account_name")
+                               or profile.get("provider")),
+                     "enabled": profile.get("enabled", True),
+                     "active": profile["id"] == config.get("active_profile_id")}
+                    for profile in config.get("profiles", [])
+                ]})
             if path == "/api/v1/cyd-status":
                 if not self.device_authorized():
                     return self.send_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
@@ -440,7 +531,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/v1/display-command":
                 if not self.device_authorized():
                     return self.send_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
-                return self.send_json(display_command())
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query, keep_blank_values=True)
+                after = query.get("after", [None])[0]
+                return self.send_json(display_command_response(after))
             if path == "/api/v1/next-account":
                 if not self.device_authorized():
                     return self.send_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
@@ -453,12 +546,14 @@ class Handler(BaseHTTPRequestHandler):
                     current = config.get("active_profile_id")
                     config["active_profile_id"] = ids[(ids.index(current) + 1) % len(ids)] if current in ids else ids[0]
                     selected["id"] = config["active_profile_id"]
-                update_json(PROFILES_FILE, {"profiles": [], "active_profile_id": None}, rotate)
-                if not selected["id"]:
-                    return self.send_json({"error": "no profiles"}, HTTPStatus.NOT_FOUND)
-                update_json(SETTINGS_FILE, {}, lambda settings: set_display_control(
-                    settings, "usage", profile_id=selected["id"], source="device",
-                ))
+                with data_lock(DATA_DIR):
+                    update_json(PROFILES_FILE, {"profiles": [], "active_profile_id": None}, rotate)
+                    if not selected["id"]:
+                        return self.send_json({"error": "no profiles"}, HTTPStatus.NOT_FOUND)
+                    update_json(SETTINGS_FILE, {}, lambda settings: set_display_control(
+                        settings, "usage", profile_id=selected["id"], source="device",
+                        audit_source=self.selection_source(), action="cycle-account",
+                    ))
                 return self.send_json(cyd_payload())
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         if path.startswith("/static/"):
@@ -491,7 +586,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if path in {"/api/v1/cyd-status", "/api/v1/next-account", "/api/v1/openrouter-status", "/api/v1/display-command"}:
+        if path in {"/api/v1/cyd-status", "/api/v1/next-account", "/api/v1/openrouter-status", "/api/v1/display-command", "/api/v1/selection-history"}:
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         if path == "/api/v1/collector-status":
             if not self.require_admin():
@@ -526,10 +621,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.flashing_guide()
         return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
+    def selection_source(self):
+        # Attribution is a client claim, not an authentication boundary.
+        value = self.headers.get("X-CYD-Source", "")
+        return value if value in SELECTION_SOURCES else "device-api"
+
     def do_POST(self):
         if self.is_device_surface():
             path = urllib.parse.urlparse(self.path).path
-            if path != "/api/v1/display-state":
+            if path not in {"/api/v1/display-state", "/api/v1/select-account"}:
                 return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
             if not self.device_authorized():
                 return self.send_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
@@ -541,6 +641,26 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "request body is too large"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
             except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
                 return self.send_json({"error": "invalid request"}, HTTPStatus.BAD_REQUEST)
+            if path == "/api/v1/select-account":
+                profile_id = body.get("profile_id")
+                if not isinstance(profile_id, str) or not profile_id:
+                    return self.send_json({"error": "profile_id is required"}, HTTPStatus.BAD_REQUEST)
+                selected = {"ok": False}
+                def select_enabled(config: dict) -> None:
+                    for profile in config.get("profiles", []):
+                        if profile.get("id") == profile_id and profile.get("enabled", True):
+                            config["active_profile_id"] = profile_id
+                            selected["ok"] = True
+                            return
+                with data_lock(DATA_DIR):
+                    update_json(PROFILES_FILE, {"profiles": [], "active_profile_id": None}, select_enabled)
+                    if not selected["ok"]:
+                        return self.send_json({"error": "unknown or disabled profile"}, HTTPStatus.NOT_FOUND)
+                    update_json(SETTINGS_FILE, {}, lambda settings: set_display_control(
+                        settings, "usage", profile_id=profile_id, source="device",
+                        audit_source=self.selection_source(), action="select-account",
+                    ))
+                return self.send_json({"status": "ok", "profile_id": profile_id})
             app = body.get("app")
             rotation = body.get("rotation")
             if app not in DISPLAY_APPS:
@@ -549,6 +669,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "rotation must be 0 or 180"}, HTTPStatus.BAD_REQUEST)
             update_json(SETTINGS_FILE, {}, lambda settings: set_display_control(
                 settings, app, source="device", observed_rotation=rotation,
+                audit_source="device-report", action="reported-route",
             ))
             return self.send_json({"status": "ok", "display_state": display_state()})
         if not self.require_admin():
@@ -615,12 +736,14 @@ class Handler(BaseHTTPRequestHandler):
                 if profile_id in {profile.get("id") for profile in config.get("profiles", [])}:
                     config["active_profile_id"] = profile_id
                     found["value"] = True
-            update_json(PROFILES_FILE, {"profiles": [], "active_profile_id": None}, select_profile)
-            if not found["value"]:
-                return self.send_json({"error": "unknown profile"}, HTTPStatus.NOT_FOUND)
-            update_json(SETTINGS_FILE, {}, lambda settings: set_display_control(
-                settings, "usage", profile_id=profile_id,
-            ))
+            with data_lock(DATA_DIR):
+                update_json(PROFILES_FILE, {"profiles": [], "active_profile_id": None}, select_profile)
+                if not found["value"]:
+                    return self.send_json({"error": "unknown profile"}, HTTPStatus.NOT_FOUND)
+                update_json(SETTINGS_FILE, {}, lambda settings: set_display_control(
+                    settings, "usage", profile_id=profile_id,
+                    action="select-account",
+                ))
             return self.send_json({"status": "ok"})
         if path == "/api/admin/display-app":
             app = body.get("app")
@@ -770,6 +893,9 @@ class Handler(BaseHTTPRequestHandler):
                 config["profiles"] = remaining
                 if config.get("active_profile_id") == profile_id:
                     config["active_profile_id"] = remaining[0]["id"] if remaining else None
+                    update_json(SETTINGS_FILE, {}, lambda settings: selection_history(
+                        settings, source="dashboard", action="remove-active-profile", app="usage",
+                        profile_id=config["active_profile_id"]))
                 state = read_json_unlocked(STATE_FILE, {"profiles": {}})
                 state.get("profiles", {}).pop(profile_id, None)
                 control = read_json_unlocked(CONTROL_FILE, {"requests": []})

@@ -1,7 +1,185 @@
 # Changelog
 
+## 2026-09-19 — Faster, steadier usage refresh
+
+- Collect CLI profiles in parallel on per-profile worker threads (bounded by
+  `CYD_MONITOR_MAX_PARALLEL_COLLECTIONS`, default 3) instead of one sequential
+  90-second cycle. The account selected for the CYD refreshes every
+  `CYD_MONITOR_ACTIVE_POLL_SECONDS` (default 30 s) and becomes due immediately
+  when selected; other profiles keep `CYD_MONITOR_POLL_SECONDS` (floor lowered
+  to 30 s). The dashboard countdown shows both cadences.
+- Request Codex `/status` from six seconds after launch with more retries,
+  cutting a warm Codex capture from about twenty seconds to about ten.
+- Keep the last healthy result (`last_ok`) with each failed snapshot and stamp
+  every snapshot with its refresh interval and stale budget. The CYD and
+  dashboard preview keep showing the last good values through unconfirmed
+  failures (`degraded` payload flag, `retrying` ticker suffix) and show the
+  error card only once the alert threshold confirms the outage or the values
+  exceed the stale budget. This removes the intermittent error card caused by
+  a single missed capture.
+- Firmware: raise the LAN read timeout from 750 ms to 1.5 s and show the
+  telemetry/OpenRouter error state only after three consecutive transport
+  failures when data is already on screen. Token rejection and server-reported
+  errors still surface immediately.
+- WhatsApp failure alerts now quote the failed account's own refresh interval.
+
+## 2026-09-18
+
+- Support Antigravity disabled 5-hour quota when weekly limit is reached (0.00%
+  remaining) for Claude and Gemini model groups. Parse the disabled state as
+  0% remaining with "Weekly limit reached" subtext, avoiding collection failures
+  and timeout errors.
+
+## 2026-09-09
+
+- Repair Codex message selection after Codex Desktop updates replace its
+  versioned bundled-CLI directory. The hook now rediscovers the newest standard
+  desktop `codex.exe` when its configured executable no longer exists.
+
+## 2026-09-06 — Restart recovery and switch diagnostics
+
+- Move Windows helpers/private mappings to the user home to avoid Codex MSIX
+  LocalAppData redirection, which made the old helper invisible to Windows
+  startup and Antigravity. Preserve existing mappings and trusted live commands.
+- Install a per-user scheduled watcher with logon and one-minute recovery,
+  unlimited runtime, battery support and single-instance handling. Refresh
+  heartbeat status and exit on receiver failure so it can recover.
+- Add bounded local outcome/phase/timing history and private server source
+  history for accepted selections and device route reports. Tag desktop and
+  Stream Deck requests; retain no prompts, credentials or raw routing IDs.
+- Add on-demand `--diagnose` with process/heartbeat health and an optional
+  metadata-only native Antigravity hook probe. Document the verified path
+  defect and remaining native discovery/feature-flag uncertainty.
+- Verified Windows scheduled launch, recovery after forced process termination,
+  and an operator-confirmed Antigravity message. Full reboot remains untested.
+
+
+## 2026-09-06 — Refresh GitHub homepage documentation
+
+- Summarize desktop message selection, recovery, Stream Deck, animations,
+  OpenRouter and alerts in the repository homepage. Correct outdated firmware
+  HTTPS and display-hardware instructions to match the current implementation.
+
+
+## 2026-09-06 — Isolate collector test runtime
+
+- Place every collector runtime path, including optional SMTP secrets, in
+  temporary test storage and clear inherited notification credentials. This
+  fixes clean Linux CI permissions and keeps tests out of operator data.
+
+
+## 2026-09-06 — Public release security review
+
+- Harden both Windows Stream Deck helpers with canonical private IPv4 validation,
+  direct connections, redirect rejection, no automatic Windows authentication,
+  bounded requests, and generic network errors. Reject malformed profile IDs.
+- Include desktop account-switching helpers and the fresh-computer recovery guide.
+- Run Windows helper regression tests and real LVGL motion checks in CI.
+
+
+## 2026-09-06 — Desktop switching recovery documentation
+
+- Add a source-audited fresh Windows runbook covering prerequisites, private
+  settings, custom-label identity mappings, installer limitations, hook trust,
+  startup recovery, diagnostics, and changed-login/steering/reboot acceptance.
+- Explicitly distinguish supported local Codex Desktop selection from browser
+  ChatGPT and Antigravity primary-profile selection; record validation limits.
+
+## 2026-09-06 — Stream Deck endpoint repair
+
+- Correct the private Windows helper endpoint left on the former server LAN
+  address. Verify account discovery and VBS selection without changing accounts.
+- Document updating the shared Windows setting when the server address changes.
+
+## 2026-09-06 — Stable transitions and connection diagnostics
+
+- Replace costly full-screen movement with narrow-strip directional reveals.
+  Coalesce navigation and preserve values on arrival/account changes.
+- Remove post-arrival card jumps and pressed-control zoom allocations.
+- Add reset, Wi-Fi, heap/stack, HTTP and redraw diagnostics plus failed telemetry
+  backoff and clearer Wi-Fi-connected/server-unreachable messages.
+- Repair private deployment binding/firmware endpoint after the server LAN
+  address changed; no addresses or credentials are stored in tracked files.
+
+## 2026-09-05 — Animated CYD screens
+
+- Share bounded LVGL motion across the device and browser: launcher equalizer
+  and node motion, ChatGPT drains, staggered Antigravity bars/cards, OpenRouter
+  arc sweeps, exact-cent counters and seven-column chart growth.
+- Throttle highlights on unchanged cached readings; preserve exact targets and
+  immediately cancel unavailable OpenRouter readings.
+- Keep LVGL drawing/touch sampling active during serialized HTTP worker waits;
+  replace the blocking update LED delay and remove small container scrollbars.
+- Add real LVGL/WASM motion checks and propagate compiler failures.
+
+## 2026-09-05 — Steering-message selection and event ordering
+
+- Select on every Codex UserPromptSubmit invocation: steering messages reuse
+  turn IDs and were incorrectly discarded as duplicates.
+- Order Antigravity events by message timestamp rather than transcript detection
+  time, preventing delayed writes from overriding newer Codex submissions.
+- Twelve helper tests pass, including same-turn account changes and delayed events.
+
+## 2026-09-05 — Antigravity file-event fallback
+
+- Replace the non-invoking Antigravity hook on this desktop with a windowless
+  Windows directory-notification helper, automatically started at sign-in.
+  No polling, screen access, or model requests; Codex hooks remain unchanged.
+- Ignore historical messages at startup and deduplicate assistant continuations.
+  Native file-event/live selection and continuation-isolation smoke checks pass.
+- Retain only fixed diagnostic codes and hashed event markers. Disable only
+  the old CYD Antigravity hook; preserve other customizations and the launcher.
+
+## 2026-09-05 — Separate message-hook diagnostics
+
+- Preserve each platform's latest fixed-code result independently, so a Codex
+  reply cannot overwrite Antigravity troubleshooting evidence. Document a full
+  Antigravity restart after initial hook installation.
+- Use quoted forward-slash Windows paths for Antigravity hook command parsing;
+  actual app invocation remains under verification.
+
+## 2026-09-05 — Desktop message account selection
+
+- Added optional Windows hooks that select an existing CYD profile on message
+  submission, without a resident watcher, model call, or firmware change.
+- Resolve managed local ChatGPT/Codex identity through official `account/read`
+  on each submission; skip unknown or ambiguous mappings and non-desktop hooks.
+- Select a configured Antigravity primary account on new explicit user-message
+  metadata, deduplicating subsequent model invocations and stale activity.
+- Added a private installer with configuration backups, preserved unrelated
+  hooks, LAN-only requests, bounded failures, and tests for identity changes,
+  ordering, deduplication, and network boundaries. Codex hook trust requires
+  app review; actual cross-login desktop behavior needs a live switched-account test.
+
+## 2026-09-05 — Faster Stream Deck account switching
+
+- Send button requests directly with WinHTTP, preserving windowless launch, stable IDs, and private settings. Keep PowerShell discovery.
+- Poll CYD commands at 400 ms with persistent TCP ownership, bounded LAN timeouts, and failure backoff; keep quota refresh at 3 seconds.
+- Inline cached usage only for unseen commands, serialize selection writes, and fetch/render after route transitions before reporting state.
+- Preserve legacy API clients and firmware fallback. Browser refresh remains independent; no measured end-to-end latency guarantee.
+
 ## Unreleased
 
+- Propagated `CYD_MONITOR_TIMEZONE` into CLI profile execution environments (`TZ`)
+  and Docker Compose service containers, ensuring OpenAI Codex 5-hour and
+  weekly quota reset times render in the operator's configured local timezone
+  rather than defaulting to container UTC.
+
+- Account discovery now falls back to collected/remembered account names when
+  no custom label is configured, so Stream Deck listings identify each account
+  without manual labels. Custom labels retain priority.
+
+- Added private authenticated account discovery and selection by stable profile
+  ID for individual Stream Deck buttons. The existing windowless helper accepts
+  an optional account ID, and its PowerShell companion lists current accounts.
+  Existing cycling buttons retain their behavior; disabled/deleted accounts
+  cannot be selected through the new route.
+
+- Fixed ChatGPT usage quota bar length mismatch on the physical CYD: corrected
+  `updateDashboard()` overwriting the 5-hour primary quota bar (`bar_primary`)
+  with stale 296 px dimensions, restoring identical 440 px lengths and aligned
+  bounds (x=8) for both 5-hour and weekly progress bars. Cleared scrollable
+  flags on quota cards and added matching track border styling to the weekly bar.
 - Improved physical CYD Wi-Fi reliability by disabling modem sleep on the
   continuously powered LAN display, recording disconnect reasons plus
   connected RSSI/channel diagnostics, and adding conservative staged recovery:
