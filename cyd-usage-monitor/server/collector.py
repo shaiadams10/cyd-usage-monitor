@@ -576,8 +576,86 @@ CODEX_STATUS_INPUTS: list[tuple[float, str, str]] = [
 ]
 
 
-def collect_profile(profile: dict, include_transcript: bool = False, progress: Callable[[str], None] | None = None):
+# A quota panel that suddenly reports far less than the previous healthy
+# reading is treated as unconfirmed until a later panel in the same capture
+# repeats it. Codex occasionally paints a transient panel that it corrects a
+# few seconds later, while a real limit hit is repeated by every later panel.
+ABRUPT_DROP_POINTS = 30
+
+
+def remaining_values(metrics: object, prefix: str = "") -> dict[str, int]:
+    """Flatten nested metric groups into {"gemini.weekly": pct, ...}."""
+    values: dict[str, int] = {}
+    if not isinstance(metrics, dict):
+        return values
+    if "remaining_pct" in metrics:
+        try:
+            values[prefix.rstrip(".")] = int(metrics["remaining_pct"])
+        except (TypeError, ValueError):
+            pass
+        return values
+    for key, item in metrics.items():
+        if key != "primary":
+            values.update(remaining_values(item, f"{prefix}{key}."))
+    return values
+
+
+def abrupt_drops(parsed: dict, previous: dict | None) -> list[str]:
+    """Name the limits whose remaining quota fell implausibly since the last healthy read."""
+    if not previous:
+        return []
+    before = remaining_values(previous.get("metrics"))
+    after = remaining_values(parsed.get("metrics"))
+    return [
+        f"{name} {before[name]}% -> {after[name]}%"
+        for name in after if name in before
+        and (before[name] - after[name] >= ABRUPT_DROP_POINTS or (after[name] == 0 and before[name] >= 10))
+    ]
+
+
+class PanelConfirmation:
+    """Completion check that demands a repeated panel for abrupt quota drops."""
+
+    def __init__(self, parser: Callable[[str], dict], previous: dict | None, progress: Callable[[str], None] | None = None):
+        self.parser = parser
+        self.previous = previous
+        self.progress = progress
+        self.suspect: tuple[int, dict[str, int]] | None = None
+        self.drops: list[str] = []
+
+    @staticmethod
+    def panel_count(text: str) -> int:
+        """Count quota lines seen so far; a new panel raises the count."""
+        return len(re.findall(r"limit(?: remaining)?:?\s", strip_terminal(text), re.I))
+
+    def __call__(self, text: str) -> bool:
+        try:
+            parsed = self.parser(text)
+        except (ValueError, KeyError, IndexError, AttributeError):
+            return False
+        drops = abrupt_drops(parsed, self.previous)
+        if not drops:
+            self.suspect = None
+            return True
+        count, values = self.panel_count(text), remaining_values(parsed.get("metrics"))
+        if self.suspect is None:
+            self.suspect, self.drops = (count, values), drops
+            if self.progress:
+                self.progress("The quota panel shows an abrupt drop (" + ", ".join(drops) + "). Waiting for a second panel to confirm it.")
+            return False
+        if count > self.suspect[0]:
+            if values == self.suspect[1]:
+                self.suspect = None  # A later panel repeated the drop, so it is real.
+                return True
+            self.suspect, self.drops = (count, values), drops
+        return False
+
+
+def collect_profile(profile: dict, include_transcript: bool = False, progress: Callable[[str], None] | None = None,
+                    previous: dict | None = None):
     provider = profile["provider"]
+    if previous is None:
+        previous = last_good_snapshot(read_json(STATE_FILE, {"profiles": {}}).get("profiles", {}).get(profile["id"]))
     executable = cli_executable(provider)
     if not executable:
         raise RuntimeError(f"{'codex' if provider == 'codex' else 'agy'} is not installed on the collector host")
@@ -594,7 +672,7 @@ def collect_profile(profile: dict, include_transcript: bool = False, progress: C
             [executable, "--no-alt-screen", "--sandbox", "read-only", "--ask-for-approval", "never"], env,
             CODEX_STATUS_INPUTS,
             timeout=COLLECTION_TIMEOUT_BUDGET, cwd=str(profile_workdir(profile)),
-            complete=lambda text: _panel_parses(parse_codex_status, text), progress=progress,
+            complete=(confirmation := PanelConfirmation(parse_codex_status, previous, progress)), progress=progress,
             responders=[(
                 r"Update now\s*\(runs .*?\)\s*2\.?\s*Skip",
                 "2\r",
@@ -606,21 +684,29 @@ def collect_profile(profile: dict, include_transcript: bool = False, progress: C
         except Exception as error:
             raise CollectionError(str(error), clean_terminal_transcript(raw)) from error
     else:
-        # /usage is a scrollable panel. Retry once, then stop as soon as all
-        # four provider quota fields parse rather than using a blind timeout.
+        # /usage is a scrollable panel. Retry, then stop as soon as all four
+        # provider quota fields parse rather than using a blind timeout.
         raw = pty_command(
             [executable], env,
             [
                 (3.0, "/usage\r", "Antigravity started. Opening /usage…"),
                 (10.0, "/usage\r", "Refreshing Antigravity's /usage panel…"),
+                (17.0, "/usage\r", "Confirming Antigravity's /usage panel…"),
             ],
             timeout=25, cwd=str(profile_workdir(profile)),
-            complete=lambda text: _panel_parses(parse_antigravity_usage, text), progress=progress,
+            complete=(confirmation := PanelConfirmation(parse_antigravity_usage, previous, progress)), progress=progress,
         )
         try:
             parsed = parse_antigravity_usage(raw)
         except Exception as error:
             raise CollectionError(str(error), clean_terminal_transcript(raw)) from error
+    if confirmation.suspect is not None:
+        # The capture ended on a single unrepeated cliff. Report it instead of
+        # publishing it; the display keeps the previous healthy values.
+        raise CollectionError(
+            f"{provider.title()} panel reported an abrupt quota drop (" + ", ".join(confirmation.drops)
+            + ") that no later panel confirmed; the previous reading was kept", clean_terminal_transcript(raw),
+        )
     parsed.update({"profile_id": profile["id"], "label": profile.get("label", ""), "status": "ok", "collected_at": utcnow(), "source": f"{provider} CLI"})
     return (parsed, clean_terminal_transcript(raw)) if include_transcript else parsed
 

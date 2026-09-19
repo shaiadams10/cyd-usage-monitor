@@ -181,6 +181,13 @@ one 60-second capture). The firmware applies the same idea to its own LAN
 polling: a transport failure replaces the quota widgets only after three
 consecutive misses, while token rejection still shows immediately.
 
+Quota values are also sanity-checked against the previous healthy reading. A
+panel that reports a limit at least 30 points lower (or 0% where 10% or more
+remained) is not accepted until a later panel in the same capture repeats it;
+a real limit hit is repeated by every later panel and is accepted within the
+same capture, while a transient wrong panel is discarded and recorded as an
+unconfirmed reading in the incident history.
+
 ## Hardware & Pin Mapping
 
 The physical firmware target is the Hosyond/LCDWiki E32R40T 4.0-inch

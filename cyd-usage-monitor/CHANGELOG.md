@@ -22,6 +22,14 @@
   failures when data is already on screen. Token rejection and server-reported
   errors still surface immediately.
 - WhatsApp failure alerts now quote the failed account's own refresh interval.
+- Require a repeated panel before accepting an abrupt quota drop. When a
+  Codex `/status` or Antigravity `/usage` panel reports a limit at least 30
+  points below the last healthy reading (or 0% from 10%+), the capture keeps
+  asking for the panel until a later one repeats the value. A capture that
+  ends on an unrepeated cliff is recorded as an unconfirmed reading and the
+  display keeps the previous values, so a transient wrong panel can no longer
+  show a full weekly limit for a poll cycle. Antigravity gets a third
+  `/usage` request at 17 s to allow confirmation within its capture window.
 
 ## 2026-09-18
 

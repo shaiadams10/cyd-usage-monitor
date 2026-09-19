@@ -687,6 +687,75 @@ class CollectionSchedulingTests(unittest.TestCase):
             release.set()
             join_all(scheduler)
 
+    def test_abrupt_quota_drop_needs_a_second_panel(self):
+        previous = {"status": "ok", "metrics": {"five_hour": {"remaining_pct": 70, "reset": "x"}, "weekly": {"remaining_pct": 80, "reset": "y"}}}
+        panel = "Account: demo (Plus)\n5h limit: [bar] {five}% left (resets 05:00)\nWeekly limit: [bar] {weekly}% left (resets Fri)\n"
+        normal = panel.format(five=60, weekly=78)
+        cliff = panel.format(five=65, weekly=0)
+
+        self.assertEqual(collector.abrupt_drops(collector.parse_codex_status(cliff), previous), ["weekly 80% -> 0%"])
+        self.assertEqual(collector.abrupt_drops(collector.parse_codex_status(normal), previous), [])
+
+        # A normal panel completes immediately.
+        check = collector.PanelConfirmation(collector.parse_codex_status, previous)
+        self.assertTrue(check(normal))
+        self.assertIsNone(check.suspect)
+
+        # A cliff waits; the same cliff on a later panel confirms it.
+        check = collector.PanelConfirmation(collector.parse_codex_status, previous)
+        self.assertFalse(check(cliff))
+        self.assertFalse(check(cliff), "the same panel must not confirm itself")
+        self.assertTrue(check(cliff + cliff))
+
+        # A cliff followed by a corrected panel completes with the corrected values
+        # (the parser keeps the latest panel's numbers).
+        check = collector.PanelConfirmation(collector.parse_codex_status, previous)
+        self.assertFalse(check(cliff))
+        self.assertTrue(check(cliff + normal))
+        self.assertIsNone(check.suspect)
+        self.assertEqual(collector.parse_codex_status(cliff + normal)["metrics"]["weekly"]["remaining_pct"], 78)
+
+        # Without a previous healthy reading nothing is suspicious.
+        self.assertTrue(collector.PanelConfirmation(collector.parse_codex_status, None)(cliff))
+
+        # Antigravity's nested groups are compared per model group.
+        ag_previous = {"status": "ok", "metrics": {"gemini": {"weekly": {"remaining_pct": 90}, "five_hour": {"remaining_pct": 50}},
+                                                     "claude": {"weekly": {"remaining_pct": 40}, "five_hour": {"remaining_pct": 45}}}}
+        ag_parsed = {"metrics": {"gemini": {"weekly": {"remaining_pct": 88}, "five_hour": {"remaining_pct": 0}},
+                                 "claude": {"weekly": {"remaining_pct": 38}, "five_hour": {"remaining_pct": 44}}}}
+        self.assertEqual(collector.abrupt_drops(ag_parsed, ag_previous), ["gemini.five_hour 50% -> 0%"])
+
+    def test_unconfirmed_drop_is_reported_instead_of_published(self):
+        profile = {"id": "codex-drop", "provider": "codex", "label": ""}
+        previous = {"profile_id": profile["id"], "provider": "codex", "status": "ok", "account_name": "demo",
+                    "metrics": {"five_hour": {"remaining_pct": 70, "reset": "x"}, "weekly": {"remaining_pct": 80, "reset": "y"}},
+                    "collected_at": "2026-09-19T10:00:00Z"}
+        collector.write_json(collector.PROFILES_FILE, {"profiles": [profile]})
+        collector.write_json(collector.STATE_FILE, {"profiles": {profile["id"]: previous}})
+        cliff = "Account: demo (Plus)\n5h limit: [bar] 65% left (resets 05:00)\nWeekly limit: [bar] 0% left (resets Fri)\n"
+
+        def fake_pty(command, env, inputs, timeout=20.0, cwd=None, complete=None, progress=None, responders=None):
+            self.assertFalse(complete(cliff))  # one cliff panel, then the capture times out
+            return cliff
+
+        with patch.object(collector, "cli_executable", return_value="codex"), patch.object(collector, "profile_environment", return_value={}), \
+             patch.object(collector, "profile_workdir", return_value=Path(".")), patch.object(collector, "pty_command", fake_pty):
+            with self.assertRaises(collector.CollectionError) as raised:
+                collector.collect_profile(profile)
+        self.assertIn("weekly 80% -> 0%", str(raised.exception))
+        self.assertIn("previous reading was kept", str(raised.exception))
+
+        # The confirmed cliff (repeated panel) is accepted as real.
+        def fake_pty_confirmed(command, env, inputs, timeout=20.0, cwd=None, complete=None, progress=None, responders=None):
+            self.assertFalse(complete(cliff))
+            self.assertTrue(complete(cliff + cliff))
+            return cliff + cliff
+
+        with patch.object(collector, "cli_executable", return_value="codex"), patch.object(collector, "profile_environment", return_value={}), \
+             patch.object(collector, "profile_workdir", return_value=Path(".")), patch.object(collector, "pty_command", fake_pty_confirmed):
+            snapshot = collector.collect_profile(profile)
+        self.assertEqual(snapshot["metrics"]["weekly"]["remaining_pct"], 0)
+
     def test_codex_status_is_requested_early_and_retried(self):
         self.assertLessEqual(collector.CODEX_STATUS_INPUTS[0][0], 6.0)
         self.assertTrue(all(item[1] == "/status\r" for item in collector.CODEX_STATUS_INPUTS))
