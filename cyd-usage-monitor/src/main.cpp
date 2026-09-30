@@ -160,6 +160,7 @@ static lv_obj_t *lbl_weekly_tag;
 static lv_obj_t *bar_weekly;
 static lv_obj_t *lbl_weekly_sub;
 static lv_obj_t *lbl_extra_credits;
+static lv_obj_t *lbl_available_resets;
 static lv_obj_t *lbl_server_status;
 
 // Dedicated collector-error screen. It replaces quota widgets when the server
@@ -239,6 +240,12 @@ static void printDeviceDiagnostics() {
         (unsigned long)httpMaxMs, (unsigned long)renderedFrames,
         (unsigned long)(renderedFrames ? renderTotalMs / renderedFrames : 0), (unsigned long)renderMaxMs);
     renderedFrames = renderTotalMs = renderMaxMs = httpMaxMs = 0;
+    if (lbl_available_resets && activeScreen == AppScreen::UsageMonitor &&
+        !lv_obj_has_flag(card_details, LV_OBJ_FLAG_HIDDEN)) {
+        Serial.printf("[DIAG] codex_footer=Resets: %s\n", lv_label_get_text(lbl_available_resets));
+        Serial.printf("[DIAG] codex_quota five_hour=%s weekly=%s\n",
+                      lv_label_get_text(lbl_primary_val), lv_label_get_text(lbl_weekly_val));
+    }
 }
 static void telemetryWorker(void *) {
     for (;;) {
@@ -805,6 +812,10 @@ void buildDashboardUI() {
     lv_label_set_text(lbl_primary_warn, "100% QUOTA EXHAUSTED");
     lv_obj_set_style_text_color(lbl_primary_warn, lv_color_hex(0xF43F5E), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_primary_warn, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(lbl_primary_warn, lv_color_hex(0x18181B), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(lbl_primary_warn, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(lbl_primary_warn, 3, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(lbl_primary_warn, 2, LV_PART_MAIN);
     lv_obj_align_to(lbl_primary_warn, bar_primary, LV_ALIGN_CENTER, 0, 0);
     lv_obj_add_flag(lbl_primary_warn, LV_OBJ_FLAG_HIDDEN);
 
@@ -817,7 +828,7 @@ void buildDashboardUI() {
     // --- ChatGPT Card 2: Weekly quota plus plan / credits footer ---
     card_details = lv_obj_create(scr_dashboard);
     lv_obj_clear_flag(card_details, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(card_details, 460, 110);
+    lv_obj_set_size(card_details, 460, 112);
     lv_obj_set_pos(card_details, 10, 168);
     lv_obj_set_style_bg_color(card_details, lv_color_hex(0x18181B), LV_PART_MAIN);
     lv_obj_set_style_border_color(card_details, lv_color_hex(0x27272A), LV_PART_MAIN);
@@ -854,18 +865,46 @@ void buildDashboardUI() {
     lv_obj_set_style_text_font(lbl_weekly_sub, &lv_font_montserrat_12, LV_PART_MAIN);
     lv_obj_set_pos(lbl_weekly_sub, 10, 52);
 
+    lv_obj_t *creditsTitle = lv_label_create(card_details);
+    lv_label_set_text(creditsTitle, "Credits:");
+    lv_obj_set_style_text_color(creditsTitle, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_style_text_font(creditsTitle, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_pos(creditsTitle, 10, 78);
+
+    lv_obj_t *resetsTitle = lv_label_create(card_details);
+    lv_label_set_text(resetsTitle, "Resets:");
+    lv_obj_set_style_text_color(resetsTitle, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_style_text_font(resetsTitle, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_pos(resetsTitle, 150, 78);
+
     lbl_extra_credits = lv_label_create(card_details);
-    lv_label_set_recolor(lbl_extra_credits, true);
-    lv_label_set_text(lbl_extra_credits, "Credits: #38bdf8 None#");
-    lv_obj_set_style_text_color(lbl_extra_credits, lv_color_hex(0xE4E4E7), LV_PART_MAIN);
-    lv_obj_set_style_text_font(lbl_extra_credits, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_set_pos(lbl_extra_credits, 10, 78);
+    lbl_available_resets = lv_label_create(card_details);
+    lv_obj_t *footerBadges[] = {lbl_extra_credits, lbl_available_resets};
+    const int badgeX[] = {66, 207};
+    const int badgeMaxWidth[] = {76, 120};
+    for (int i = 0; i < 2; ++i) {
+        lv_obj_set_style_text_color(footerBadges[i], lv_color_hex(0x38BDF8), LV_PART_MAIN);
+        lv_obj_set_style_text_font(footerBadges[i], &lv_font_montserrat_12, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(footerBadges[i], lv_color_hex(0x152C40), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(footerBadges[i], LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_radius(footerBadges[i], 4, LV_PART_MAIN);
+        lv_obj_set_style_pad_hor(footerBadges[i], 4, LV_PART_MAIN);
+        lv_obj_set_style_pad_ver(footerBadges[i], 2, LV_PART_MAIN);
+        lv_obj_set_pos(footerBadges[i], badgeX[i], 76);
+        lv_obj_set_style_max_width(footerBadges[i], badgeMaxWidth[i], LV_PART_MAIN);
+        lv_label_set_long_mode(footerBadges[i], LV_LABEL_LONG_DOT);
+    }
+    lv_label_set_text(lbl_extra_credits, "None");
+    lv_label_set_text(lbl_available_resets, "Not reported");
 
     lbl_server_status = lv_label_create(card_details);
     lv_label_set_text(lbl_server_status, "ChatGPT Plus");
     lv_obj_set_style_text_color(lbl_server_status, lv_color_hex(0x10B981), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_server_status, &lv_font_montserrat_12, LV_PART_MAIN);
     lv_obj_align(lbl_server_status, LV_ALIGN_TOP_RIGHT, -10, 78);
+    lv_obj_set_width(lbl_server_status, 100);
+    lv_label_set_long_mode(lbl_server_status, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(lbl_server_status, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
 
     // --- Collector Error Screen ---
     card_error = lv_obj_create(scr_dashboard);
@@ -1265,8 +1304,29 @@ void fetchQuotaData() {
             accountName = doc["account_name"] | "ChatGPT Account";
             extraCredits = doc["extra_credits"] | "None";
 
-            String provider = doc["provider"] | "codex";
-            String telemetryStatus = doc["status"] | "ok";
+            String provider = doc["provider"] | "error";
+            String telemetryStatus = doc["status"] | "error";
+            if (provider != "codex" && provider != "antigravity") telemetryStatus = "error";
+            if (telemetryStatus == "ok" && provider == "antigravity") {
+                const char *quotaKeys[] = {"gemini_5h_pct", "gemini_weekly_pct", "claude_5h_pct", "claude_weekly_pct"};
+                for (const char *key : quotaKeys) {
+                    if (!doc[key].is<int>() || doc[key].as<int>() < 0 || doc[key].as<int>() > 100) {
+                        http.end();
+                        showTelemetryError("Antigravity quota fields are incomplete or invalid. Retrying.");
+                        return;
+                    }
+                }
+            }
+            if (telemetryStatus == "ok" && provider == "codex") {
+                const bool primaryValid = (doc["codex_5h_pct"].is<int>() && doc["codex_5h_pct"].as<int>() >= 0 && doc["codex_5h_pct"].as<int>() <= 100) ||
+                    (doc["codex_5h_pct"].isNull() && doc["primary_pct"].is<int>() && doc["primary_pct"].as<int>() >= 0 && doc["primary_pct"].as<int>() <= 100);
+                const bool weeklyValid = doc["codex_weekly_pct"].is<int>() && doc["codex_weekly_pct"].as<int>() >= 0 && doc["codex_weekly_pct"].as<int>() <= 100;
+                if (!primaryValid || !weeklyValid) {
+                    http.end();
+                    showTelemetryError("Codex quota fields are incomplete or invalid. Retrying.");
+                    return;
+                }
+            }
             if (telemetryStatus != "ok") {
                 // Never render an error as an apparently healthy quota bar.
                 provider = "error";
@@ -1274,7 +1334,7 @@ void fetchQuotaData() {
             String default_ticker = "* " + accountName;
             String ticker = doc["status_ticker"] | default_ticker;
 
-            String identity = provider + ":" + accountName;
+            String identity = provider + ":" + String(doc["profile_id"] | "") + ":" + accountName;
             bool motionReset = motionAccount != identity;
             motionAccount = identity;
 
@@ -1374,15 +1434,23 @@ void fetchQuotaData() {
                 lv_obj_add_flag(lbl_ticker, LV_OBJ_FLAG_HIDDEN);
                 lv_obj_add_flag(card_error, LV_OBJ_FLAG_HIDDEN);
 
-                int p_pct = doc["primary_pct"] | 0;
-                int left_pct = 100 - p_pct;
+                int left_pct = 0;
+                if (doc["codex_5h_pct"].is<int>()) {
+                    left_pct = doc["codex_5h_pct"].as<int>();
+                } else if (doc["primary_pct"].is<int>()) {
+                    left_pct = 100 - (doc["primary_pct"] | 0);
+                }
                 if (left_pct < 0) left_pct = 0;
-                String default_p = String(p_pct) + "%";
-                String p_val = doc["primary_val"] | default_p;
+                if (left_pct > 100) left_pct = 100;
+
+                String default_p = String(left_pct) + "% left";
+                String p_val = default_p;
                 String p_tag = doc["primary_tag"] | "Usage Limit";
-                String p_sub = doc["primary_sub"] | "100% left";
+                String p_sub = doc["primary_sub"] | "Reset unavailable";
                 String plan_type = doc["plan_type"] | "ChatGPT Plus";
-                int weekly_left = doc["codex_weekly_pct"] | left_pct;
+                int weekly_left = doc["codex_weekly_pct"].as<int>();
+                if (weekly_left < 0) weekly_left = 0;
+                if (weekly_left > 100) weekly_left = 100;
                 String weekly_sub = doc["codex_weekly_sub"] | "Weekly reset unavailable";
 
                 lv_label_set_text(lbl_primary_val, p_val.c_str());
@@ -1406,21 +1474,21 @@ void fetchQuotaData() {
                 cyd_motion_bar(bar_weekly, weekly_left, motionReset);
                 lv_label_set_text(lbl_weekly_sub, weekly_sub.c_str());
                 lv_obj_set_pos(lbl_weekly_sub, 10, 52);
-                const int weekly_used = 100 - weekly_left;
-                const uint32_t weekly_color = weekly_used > 80 ? 0xF43F5E : weekly_used > 50 ? 0xF59E0B : 0x10B981;
+                const uint32_t weekly_color = weekly_left <= 20 ? 0xF43F5E : weekly_left <= 50 ? 0xF59E0B : 0x10B981;
                 lv_obj_set_style_text_color(lbl_weekly_val, lv_color_hex(weekly_color), LV_PART_MAIN);
                 lv_obj_set_style_bg_color(bar_weekly, lv_color_hex(weekly_color), LV_PART_INDICATOR);
 
-                // Color-code primary bar & value
-                if (p_pct >= 100) {
+                // Color-code primary bar & value based on quota remaining (100 -> 0)
+                if (left_pct <= 0 || weekly_left <= 0) {
+                    lv_label_set_text(lbl_primary_warn, weekly_left <= 0 ? "WEEKLY QUOTA EXHAUSTED" : "5-HOUR QUOTA EXHAUSTED");
                     lv_obj_clear_flag(lbl_primary_warn, LV_OBJ_FLAG_HIDDEN);
                     lv_obj_set_style_bg_color(bar_primary, lv_color_hex(0xF43F5E), LV_PART_INDICATOR);
                     lv_obj_set_style_text_color(lbl_primary_val, lv_color_hex(0xF43F5E), LV_PART_MAIN);
-                } else if (p_pct > 80) {
+                } else if (left_pct <= 20) {
                     lv_obj_add_flag(lbl_primary_warn, LV_OBJ_FLAG_HIDDEN);
                     lv_obj_set_style_bg_color(bar_primary, lv_color_hex(0xF43F5E), LV_PART_INDICATOR);
                     lv_obj_set_style_text_color(lbl_primary_val, lv_color_hex(0xF43F5E), LV_PART_MAIN);
-                } else if (p_pct > 50) {
+                } else if (left_pct <= 50) {
                     lv_obj_add_flag(lbl_primary_warn, LV_OBJ_FLAG_HIDDEN);
                     lv_obj_set_style_bg_color(bar_primary, lv_color_hex(0xF59E0B), LV_PART_INDICATOR);
                     lv_obj_set_style_text_color(lbl_primary_val, lv_color_hex(0xF59E0B), LV_PART_MAIN);
@@ -1431,8 +1499,11 @@ void fetchQuotaData() {
                 }
 
                 // Styled Credits in Cyan (#38bdf8) and Plan Type
-                String cred_label = "Credits: #38bdf8 " + extraCredits + "#";
+                String cred_label = extraCredits;
                 lv_label_set_text(lbl_extra_credits, cred_label.c_str());
+                int availableResets = doc["available_resets"] | -1;
+                String resetLabel = availableResets >= 0 ? String(availableResets) : String("Not reported");
+                lv_label_set_text(lbl_available_resets, resetLabel.c_str());
                 lv_label_set_text(lbl_server_status, plan_type.c_str());
                 lv_obj_set_style_text_color(lbl_server_status, lv_color_hex(0x10B981), LV_PART_MAIN);
             }

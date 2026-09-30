@@ -1,7 +1,8 @@
 # Contributing
 
-Keep each ESP32 project self-contained and follow the workspace and project
-`AGENTS.md` files before changing code.
+Keep this repository focused on CYD Usage Monitor. Follow the root and project
+`AGENTS.md` files before changing code. Do not add other ESP32 projects or
+duplicate backup copies to the public tree.
 
 1. Create an ignored `.env` and `include/secrets.h` from their examples.
 2. Never place real accounts, credentials, authorization artifacts, private

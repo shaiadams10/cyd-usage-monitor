@@ -1,5 +1,6 @@
 /* Run with simulator/build-wasm.ps1 -TestMotion. Uses the real LVGL runtime. */
 #include <assert.h>
+#include <string.h>
 #include "lvgl_cyd_sim.c"
 
 static void advance(unsigned ms) {
@@ -21,6 +22,36 @@ int main(void) {
     cyd_show_usage(); advance(500); codex(25); advance(1100);
     assert(lv_bar_get_value(primary_bar) == 750);
     assert(lv_bar_get_value(weekly_bar) == 650);
+    /* Full quota from a previous account cannot linger on an empty account. */
+    cyd_set_codex("Full account", "100% left", "5H", "Reset", 0,
+                  "100% left", "Weekly", 0);
+    assert(lv_bar_get_value(primary_bar) == 1000);
+    cyd_set_codex("Empty account", "0% left", "5H", "Reset", 100,
+                  "0% left", "Weekly", 100);
+    assert(lv_bar_get_value(primary_bar) == 0);
+    assert(lv_bar_get_value(weekly_bar) == 0);
+    /* A fresh 5h window is still blocked when weekly quota is exhausted. */
+    cyd_set_codex("Weekly exhausted", "100% left", "5H", "Reset", 0,
+                  "0% left", "Weekly", 100);
+    assert(lv_bar_get_value(primary_bar) == 1000);
+    assert(!lv_obj_has_flag(primary_warn, LV_OBJ_FLAG_HIDDEN));
+    assert(strcmp(lv_label_get_text(primary_warn), "WEEKLY QUOTA EXHAUSTED") == 0);
+    codex(25);
+    cyd_set_codex_footer("None", "Plus", 2);
+    assert(lv_color_to32(lv_obj_get_style_text_color(codex_resets_title, 0)) == lv_color_to32(lv_color_hex(0xFFFFFF)));
+    assert(lv_color_to32(lv_obj_get_style_text_color(codex_credits_title, 0)) == lv_color_to32(lv_color_hex(0xFFFFFF)));
+    assert(lv_obj_get_style_bg_opa(codex_resets, 0) == LV_OPA_COVER);
+    assert(lv_obj_get_style_bg_opa(codex_credits, 0) == LV_OPA_COVER);
+    assert(strcmp(lv_label_get_text(codex_resets), "2") == 0);
+    cyd_set_codex_footer("500", "Pro", 0);
+    assert(strcmp(lv_label_get_text(codex_resets), "0") == 0);
+    cyd_set_codex_footer("None", "Plus", -1);
+    assert(strcmp(lv_label_get_text(codex_resets), "Not reported") == 0);
+    advance(66);
+    lv_obj_update_layout(details_card);
+    assert(codex_resets->coords.y2 < details_card->coords.y2);
+    assert(codex_resets->coords.x2 < codex_plan->coords.x1);
+
     /* Returning to a populated screen used to reset values after arrival. */
     cyd_show_launcher(); advance(700);
     cyd_show_usage(); advance(99);

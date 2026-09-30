@@ -1,7 +1,0 @@
-.esphome/
-.venv/
-secrets.yaml
-*.bin
-*.elf
-*.map
-

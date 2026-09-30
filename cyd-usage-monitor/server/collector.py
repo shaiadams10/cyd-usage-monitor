@@ -240,7 +240,10 @@ def clean_terminal_transcript(text: str) -> str:
     return text[-16000:]
 
 def percentage(value: str) -> int:
-    return max(0, min(100, int(round(float(value)))))
+    number = float(value)
+    if not 0 <= number <= 100:
+        raise ValueError("CLI percentage is outside the valid quota range")
+    return int(round(number))
 
 
 def extract_login_url(output: str) -> str:
@@ -254,13 +257,20 @@ def parse_codex_status(raw: str) -> dict:
     # Linux PTYs preserve the box-drawing border used by Codex's status card;
     # normalize it so the same parser also handles plain and legacy captures.
     text = text.replace("│", "|")
-    account = re.search(r"^\s*(?:[│|]\s*)?Account:\s*(.+?)\s*\(([^)]*)\)\s*(?:[│|])?\s*$", text, re.MULTILINE)
+    accounts = list(re.finditer(r"^\s*(?:[│|]\s*)?Account:\s*(.+?)\s*\(([^)]*)\)\s*(?:[│|])?\s*$", text, re.MULTILINE))
+    account = accounts[-1] if accounts else None
+    panel = text[account.end():] if account else ""
     limits = list(re.finditer(
         r"(?P<label>5h|Five Hour|Monthly|Weekly) limit:\s*(?:\[[^\n]*\]\s*)?"
         r"(?P<pct>\d+(?:\.\d+)?)%\s+left\s*\(resets\s+(?P<reset>[^)]*)\)",
-        text, re.I,
+        panel, re.I,
     ))
-    credits = re.search(r"^\s*(?:[│|]\s*)?Credits:\s*(.+?)\s*(?:[│|])?\s*$", text, re.MULTILINE | re.I)
+    credits = re.search(r"^\s*(?:[│|]\s*)?Credits:\s*(.+?)\s*(?:[│|])?\s*$", panel, re.MULTILINE | re.I)
+    # This read-only startup notice is captured alongside /status. An absent
+    # notice does not establish that the account has zero banked resets.
+    available_resets = list(re.finditer(
+        r"You\s+have\s+(\d+)\s+usage\s+limit\s+resets?\s+available\b", text, re.I,
+    ))
     if not account or not limits:
         raise ValueError("Codex /status did not contain account and a 5-hour, weekly, or monthly limit field")
     metrics = {}
@@ -273,6 +283,8 @@ def parse_codex_status(raw: str) -> dict:
             "reset": limit.group("reset").strip(),
         }
         labels[key] = "5-Hour Limit" if key == "five_hour" else key.title() + " Limit"
+    if "five_hour" in metrics and "weekly" not in metrics:
+        raise ValueError("Codex /status has not finished rendering its weekly quota")
     primary_key = next((key for key in ("five_hour", "weekly", "monthly") if key in metrics), None)
     metrics["primary"] = metrics[primary_key]
     return {
@@ -282,6 +294,7 @@ def parse_codex_status(raw: str) -> dict:
         "metrics": metrics,
         "limit_label": labels[primary_key],
         "credits": credits.group(1).strip() if credits else "None",
+        "available_resets": int(available_resets[-1].group(1)) if available_resets else None,
     }
 
 
@@ -297,9 +310,11 @@ def account_name_from_transcript(provider: str, raw: str) -> str:
 
 def parse_antigravity_usage(raw: str) -> dict:
     text = strip_terminal(raw)
-    account = re.search(r"^\s*Account:\s*(.+?)\s*$", text, re.MULTILINE | re.I)
+    accounts = list(re.finditer(r"^\s*Account:\s*(.+?)\s*$", text, re.MULTILINE | re.I))
+    account = accounts[-1] if accounts else None
     if not account:
         raise ValueError("Antigravity /usage did not contain an account field")
+    text = text[account.end():]
 
     groups = {
         "gemini": r"GEMINI MODELS(?P<body>.*?)(?=CLAUDE AND GPT MODELS|\Z)",
@@ -394,6 +409,8 @@ def pty_command(
         while time.monotonic() < deadline:
             elapsed = time.monotonic() - started
             while next_input < len(inputs) and elapsed >= inputs[next_input][0]:
+                if complete and hasattr(complete, "begin_request"):
+                    complete.begin_request(len(transcript.decode("utf-8", errors="replace")))
                 os.write(master, inputs[next_input][1].encode("utf-8"))
                 if progress:
                     progress(inputs[next_input][2])
@@ -576,10 +593,9 @@ CODEX_STATUS_INPUTS: list[tuple[float, str, str]] = [
 ]
 
 
-# A quota panel that suddenly reports far less than the previous healthy
-# reading is treated as unconfirmed until a later panel in the same capture
-# repeats it. Codex occasionally paints a transient panel that it corrects a
-# few seconds later, while a real limit hit is repeated by every later panel.
+# Large quota drops and refills need a later independent CLI request.
+# Codex additionally confirms every capture across two requests, because its
+# startup panel can briefly report a full quota before refreshed values arrive.
 ABRUPT_DROP_POINTS = 30
 
 
@@ -601,7 +617,7 @@ def remaining_values(metrics: object, prefix: str = "") -> dict[str, int]:
 
 
 def abrupt_drops(parsed: dict, previous: dict | None) -> list[str]:
-    """Name the limits whose remaining quota fell implausibly since the last healthy read."""
+    """Name suspicious drops or refills since the last healthy read."""
     if not previous:
         return []
     before = remaining_values(previous.get("metrics"))
@@ -609,35 +625,64 @@ def abrupt_drops(parsed: dict, previous: dict | None) -> list[str]:
     return [
         f"{name} {before[name]}% -> {after[name]}%"
         for name in after if name in before
-        and (before[name] - after[name] >= ABRUPT_DROP_POINTS or (after[name] == 0 and before[name] >= 10))
+        and (abs(before[name] - after[name]) >= ABRUPT_DROP_POINTS or (after[name] == 0 and before[name] >= 10))
     ]
 
 
 class PanelConfirmation:
-    """Completion check that demands a repeated panel for abrupt quota drops."""
+    """Confirm independent CLI reads, never a redraw or partial old panel."""
 
-    def __init__(self, parser: Callable[[str], dict], previous: dict | None, progress: Callable[[str], None] | None = None):
+    def __init__(self, parser: Callable[[str], dict], previous: dict | None, progress: Callable[[str], None] | None = None,
+                 require_repeat: bool = False):
         self.parser = parser
         self.previous = previous
         self.progress = progress
         self.suspect: tuple[int, dict[str, int]] | None = None
         self.drops: list[str] = []
+        self.require_repeat = require_repeat
+        self.request_start = 0
+        self.request_sequence = 0
+        self.candidate_account = ""
+        self.accepted = False
+
+    def begin_request(self, offset: int) -> None:
+        """Separate independent CLI requests from redraws of the same panel."""
+        self.request_start = offset
+        self.request_sequence += 1
+        self.accepted = False
 
     @staticmethod
     def panel_count(text: str) -> int:
-        """Count quota lines seen so far; a new panel raises the count."""
-        return len(re.findall(r"limit(?: remaining)?:?\s", strip_terminal(text), re.I))
+        """Count account headers for synthetic captures without request callbacks."""
+        return len(re.findall(r"Account:", strip_terminal(text), re.I))
 
     def __call__(self, text: str) -> bool:
         try:
-            parsed = self.parser(text)
+            parsed = self.parser(text[self.request_start:])
         except (ValueError, KeyError, IndexError, AttributeError):
+            return False
+        count = self.request_sequence or self.panel_count(text)
+        values = remaining_values(parsed.get("metrics"))
+        account = parsed.get("account_name", "")
+        if self.require_repeat:
+            # Allow small real consumption between requests; reject large
+            # startup corrections such as an exhausted quota flashing 100%.
+            consistent = self.suspect and values.keys() == self.suspect[1].keys() and all(
+                abs(value - self.suspect[1][key]) <= 5 for key, value in values.items()
+            )
+            if consistent and count > self.suspect[0] and account == self.candidate_account:
+                self.suspect = None
+                self.accepted = True
+                return True
+            self.suspect = (count, values)
+            self.candidate_account = account
+            self.drops = abrupt_drops(parsed, self.previous)
             return False
         drops = abrupt_drops(parsed, self.previous)
         if not drops:
             self.suspect = None
+            self.accepted = True
             return True
-        count, values = self.panel_count(text), remaining_values(parsed.get("metrics"))
         if self.suspect is None:
             self.suspect, self.drops = (count, values), drops
             if self.progress:
@@ -646,6 +691,7 @@ class PanelConfirmation:
         if count > self.suspect[0]:
             if values == self.suspect[1]:
                 self.suspect = None  # A later panel repeated the drop, so it is real.
+                self.accepted = True
                 return True
             self.suspect, self.drops = (count, values), drops
         return False
@@ -666,13 +712,13 @@ def collect_profile(profile: dict, include_transcript: bool = False, progress: C
         # Inline mode avoids the alternate-screen redraw race in Codex 0.147.
         # Cold starts can initially return a refresh request, so retry while
         # watching for a complete panel instead of sleeping for a fixed 80 sec.
-        # The capture stops as soon as the panel parses, so asking early costs
-        # nothing on a warm start and the later retries cover slow ones.
+        # A complete panel must be corroborated by another /status request;
+        # later retries cover startup corrections and slow providers.
         raw = pty_command(
             [executable, "--no-alt-screen", "--sandbox", "read-only", "--ask-for-approval", "never"], env,
             CODEX_STATUS_INPUTS,
             timeout=COLLECTION_TIMEOUT_BUDGET, cwd=str(profile_workdir(profile)),
-            complete=(confirmation := PanelConfirmation(parse_codex_status, previous, progress)), progress=progress,
+            complete=(confirmation := PanelConfirmation(parse_codex_status, previous, progress, require_repeat=True)), progress=progress,
             responders=[(
                 r"Update now\s*\(runs .*?\)\s*2\.?\s*Skip",
                 "2\r",
@@ -701,12 +747,14 @@ def collect_profile(profile: dict, include_transcript: bool = False, progress: C
         except Exception as error:
             raise CollectionError(str(error), clean_terminal_transcript(raw)) from error
     if confirmation.suspect is not None:
-        # The capture ended on a single unrepeated cliff. Report it instead of
-        # publishing it; the display keeps the previous healthy values.
+        # The capture ended without independent confirmation. Report it instead
+        # of publishing uncertain values; previous confirmed data is labelled.
         raise CollectionError(
-            f"{provider.title()} panel reported an abrupt quota drop (" + ", ".join(confirmation.drops)
-            + ") that no later panel confirmed; the previous reading was kept", clean_terminal_transcript(raw),
+            f"{provider.title()} quota did not stabilize across separate CLI requests (" + ", ".join(confirmation.drops)
+            + "); the previous reading was kept", clean_terminal_transcript(raw),
         )
+    if provider == "codex" and not confirmation.accepted:
+        raise CollectionError("Codex quota needs two matching /status requests; the previous reading was kept", clean_terminal_transcript(raw))
     parsed.update({"profile_id": profile["id"], "label": profile.get("label", ""), "status": "ok", "collected_at": utcnow(), "source": f"{provider} CLI"})
     return (parsed, clean_terminal_transcript(raw)) if include_transcript else parsed
 

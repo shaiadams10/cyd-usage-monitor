@@ -61,82 +61,49 @@ to future local sessions without entering the public repository.
 
 ---
 
-## ESP32 Workspace Guidelines
+## Public Project Scope
 
-This repository contains independent ESP32 projects. Keep changes scoped to
-the relevant project directory and read that project's `AGENTS.md` before
-editing.
+This repository contains only CYD Usage Monitor and its support documentation.
+Keep unrelated ESP32 projects, duplicate backup copies and private configuration
+out of the public tree. Read `cyd-usage-monitor/AGENTS.md` before editing.
 
-## Public-repository rules
+## Project Facts and Boundaries
 
-1. Never commit credentials, API keys, Wi-Fi credentials, access tokens,
-   session data, device identifiers, private hostnames, private IP addresses,
-   email addresses, or personal filesystem paths.
-2. Keep real configuration in ignored files such as `.env` and
-   `include/secrets.h`. Commit only safe, value-free examples.
-3. Keep generated firmware, dependency caches, runtime data, CLI profiles,
-   logs, and local editor settings out of version control.
-4. Use configurable environment variables or documented placeholders for
-   deployment-specific paths and endpoints.
-5. Update the affected project's `README.md` and `CHANGELOG.md` with every
-   behavior, configuration, authentication, deployment, UI, or hardware
-   change.
-6. Run the relevant build, tests, and smoke checks before handoff. Deploy only
-   to an environment explicitly identified by the project operator; do not
-   embed a deployment target in the repository.
+- Firmware uses C++, Arduino, PlatformIO, LVGL 8, TFT_eSPI,
+  XPT2046_Touchscreen and ArduinoJson. Current physical target: Hosyond/LCDWiki
+  E32R40T ESP32-32E, ST7796S 480x320 landscape and XPT2046 resistive touch.
+  The historical PlatformIO environment remains `esp32-2432S028R`.
+- Server/dashboard use Python, HTML, JavaScript, Docker and Compose. The
+  C/LVGL simulator uses Emscripten 3.1.74 and shares firmware UI behavior.
+- Codex quota collection uses authenticated `/status` panels only. Never
+  activate banked resets or open Codex `/usage` during collection.
+  Antigravity uses its authenticated `/usage` panel. OpenRouter is the sole
+  documented public quota-API exception, using management read endpoints.
+- Keep credentials, Wi-Fi secrets, profiles, logs, account identifiers,
+  private hosts/addresses and personal paths out of Git. Use ignored `.env`
+  and `include/secrets.h`, private runtime storage and value-free examples.
+- Publish only the protected dashboard externally. Keep the Bearer-protected
+  device API on the operator's private LAN, outside public tunnel ingress.
+- Update project README and CHANGELOG for behavior, UI, hardware,
+  configuration, authentication and deployment changes.
+- Deploy only to the operator-designated environment. Read the ignored local
+  operator map before running containers or deploying; no host is hard-coded.
+- Dependencies are pinned in project build/container/simulator configuration.
+  There is no repository-wide package manager.
 
-Each project must be self-contained, document its hardware and pin mapping,
-and retain its own build configuration.
+## Validation
 
-## Project Facts
-
-- The two primary projects are `esp32s3-home-assistant` (the main Home
-  Assistant voice satellite) and `cyd-usage-monitor`, both documented at the
-  repository root and in their project READMEs.
-- `esp32s3-home-assistant` v2 uses ESPHome 2026.7.0 with the ESP-IDF backend,
-  on-device microWakeWord, the encrypted native API, and the standard Home
-  Assistant Assist pipeline. Its previous custom Arduino implementation is a
-  dated rollback-only directory and must not be used as a source of networking
-  or voice-state code.
-- Firmware targets the ESP32-2432S028R Cheap Yellow Display using C++,
-  Arduino, PlatformIO, LVGL 8, TFT_eSPI, XPT2046_Touchscreen, and ArduinoJson.
-- The self-hosted server and dashboard use Python, HTML, JavaScript, Docker,
-  and Docker Compose. A C/LVGL simulator produces the browser WebAssembly
-  preview with Emscripten.
-- Dependencies are pinned in `cyd-usage-monitor/platformio.ini`, the
-  container configuration, and the simulator build tooling. There is no
-  repository-wide package manager.
-
-## Build, Test, and Run Commands
-
-Run commands from the repository root unless a command changes directories:
+From the repository root:
 
 ```sh
 python -m unittest discover -s cyd-usage-monitor/server
+python -m unittest discover -s cyd-usage-monitor/scripts -p "test_*.py"
 cd cyd-usage-monitor
 pio run
 docker compose --env-file .env.example config --quiet
-docker compose up -d --build
-cd ../esp32s3-home-assistant
-.venv/Scripts/esphome.exe config device.yaml
-.venv/Scripts/esphome.exe compile device.yaml
-docker compose -f server/docker-compose.yml config --quiet
 ```
 
-For simulator changes, run `cyd-usage-monitor/simulator/build-wasm.ps1` in
-PowerShell with Emscripten 3.1.74 available.
-
-## Conventions and Architecture
-
-- Codex and Antigravity authentication remains inside isolated official CLI
-  profiles. The collector parses their visible usage panels and must not import
-  credentials or call private provider APIs. OpenRouter is the sole documented
-  public-API exception: its dashboard-managed Management API key remains in
-  private runtime storage and only normalized credits/activity are persisted.
-- The protected browser dashboard and authenticated CYD API consume the
-  normalized snapshot. The physical display and browser preview share LVGL
-  assets and behavior.
-- Follow `cyd-usage-monitor/AGENTS.md` for project-specific security,
-  cross-runtime, documentation, testing, and deployment requirements.
-- Keep durable project-wide facts and commands in this file. Keep temporary
-  status, recent work, and short-lived follow-ups in `docs/context.md`.
+For simulator changes run `simulator/build-wasm.ps1 -TestMotion` and
+`simulator/build-wasm.ps1` in PowerShell with Emscripten 3.1.74 available.
+Run container builds and live smoke checks on the configured deployment host.
+Keep temporary status in `docs/context.md`, and durable facts here.

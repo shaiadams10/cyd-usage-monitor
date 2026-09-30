@@ -1,5 +1,47 @@
 # Changelog
 
+## 2026-09-30 — CYD-only public repository and refreshed homepage
+
+- Publish only CYD source and support documentation; remove unrelated ESP32
+  projects from the current GitHub tree while preserving local work.
+- Replace the homepage with a visual overview, provider coverage, architecture,
+  quick start and focused documentation links. Correct hardware and collection
+  confirmation descriptions, and guard CI against unrelated project publication.
+
+## 2026-09-29 — Confirmed quota collection and accurate account switching
+
+- Confirm Codex values across independent /status requests, allowing small
+  consumption while rejecting transient large startup corrections. Parse only
+  the latest account panel and reject incomplete or out-of-range quotas.
+- Stop synthesizing full/missing quotas or borrowing weekly values from older
+  panels. Label retained retry values Last confirmed and keep existing expiry.
+- Snap quota bars to the newly selected account and bind next-account responses
+  to that selected profile. Show weekly exhaustion even with unused 5-hour quota.
+- Align browser validation and warning thresholds with firmware; add regression
+  cases for startup refills, partial panels, malformed values and full-to-empty
+  account switches. Provider reset activation remains absent.
+
+## 2026-09-29 — Codex available resets
+
+- Parse the available usage-limit reset count from the read-only CLI notice
+  captured alongside `/status` and display it beside Credits on Codex cards.
+- Compile only the canonical firmware entry point, excluding local duplicate
+  backup sources; include the visible reset label in device diagnostics.
+- Version the updated LVGL assets so browsers load the matching footer export.
+- Style the physical and preview Credits/Resets headings white, with blue
+  values inside compact rounded badges.
+- Send reset counts in the authenticated device payload and display them beside
+  Credits on both the physical CYD and shared LVGL browser preview.
+- Preserve explicit zero counts; missing notices show **Not reported**. No
+  reset activation controls or changes to collection commands were added.
+
+## 2026-09-21 — Quota draining and warning color threshold fix
+
+- Fix primary and weekly quota bar color coding and warning logic to consistently evaluate remaining quota draining from 100% to 0%.
+- Correct primary bar and value text color thresholds: green above 50% remaining, amber from 21% to 50%, red at or below 20%, and display "100% QUOTA EXHAUSTED" only when quota is depleted (at or below 0% remaining).
+- Align weekly bar color thresholds with remaining quota percentage (red at <=20%, amber at <=50%, green above 50%).
+- Prefer `codex_5h_pct` when present with fallback to `100 - primary_pct`, and clean up default subtext/fallback strings.
+
 ## 2026-09-19 — Faster, steadier usage refresh
 
 - Collect CLI profiles in parallel on per-profile worker threads (bounded by

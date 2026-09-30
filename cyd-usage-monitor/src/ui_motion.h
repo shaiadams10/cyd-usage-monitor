@@ -89,7 +89,16 @@ static void cyd_motion_bar_init(lv_obj_t *bar, uint16_t delay) {
 static void cyd_motion_bar(lv_obj_t *bar, int percent, bool reset) {
     percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
     for (unsigned i = 0; i < cyd_bar_count; ++i)
-        if (cyd_bars[i].obj == bar) cyd_start_value(&cyd_bars[i], percent * 10, reset);
+        if (cyd_bars[i].obj == bar) {
+            if (reset) {
+                /* A new account must never inherit the previous account's bar. */
+                cyd_motion_value *v = &cyd_bars[i];
+                v->from = v->current = v->target = percent * 10;
+                v->known = true; v->running = false; v->shine = false;
+                v->refreshed = lv_tick_get();
+                lv_bar_set_value(bar, v->current, LV_ANIM_OFF);
+            } else cyd_start_value(&cyd_bars[i], percent * 10, false);
+        }
 }
 static void cyd_motion_arc_init(lv_obj_t *arc) {
     cyd_arc.obj = arc;

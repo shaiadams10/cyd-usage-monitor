@@ -118,6 +118,20 @@ Credits:              500 credits
         self.assertEqual(snapshot["account_name"], "demo-account")
         self.assertEqual(snapshot["metrics"]["primary"]["remaining_pct"], 73)
 
+    def test_codex_available_resets_notice(self):
+        panel = "Account: demo-account (Plus)\n5h limit: 80% left (resets 05:00)\nWeekly limit: 90% left (resets Friday)\n"
+        for count in (0, 1, 2):
+            with self.subTest(count=count):
+                notice = f"\x1b[32m• You have {count} usage limit reset{'s' if count != 1 else ''} available. Run /usage to use one.\x1b[0m\n"
+                snapshot = parse_codex_status(notice + panel)
+                self.assertEqual(snapshot["available_resets"], count)
+        self.assertIsNone(parse_codex_status(panel)["available_resets"])
+
+    def test_codex_available_resets_uses_latest_notice(self):
+        panel = "Account: demo-account (Plus)\nWeekly limit: 90% left (resets Friday)\n"
+        notices = "You have 2 usage limit resets available.\nYou have 1 usage\nlimit reset available.\n"
+        self.assertEqual(parse_codex_status(notices + panel)["available_resets"], 1)
+
     def test_parses_weekly_codex_limit(self):
         snapshot = parse_codex_status("""
 Account: demo-account (Plus)
@@ -137,6 +151,16 @@ Weekly limit: [bar] 100% left (resets 20:04 on 15 Aug)
         self.assertEqual(snapshot["metrics"]["weekly"], {"remaining_pct": 91, "reset": "00:03 on 3 Sep"})
         self.assertEqual(snapshot["metrics"]["primary"], snapshot["metrics"]["five_hour"])
 
+    @staticmethod
+    def confirmed_codex_capture(panel):
+        def capture(command, env, inputs, complete=None, **kwargs):
+            complete.begin_request(0)
+            assert not complete(panel)
+            complete.begin_request(len(panel))
+            assert complete(panel + panel)
+            return panel + panel
+        return capture
+
     def test_every_codex_profile_uses_the_update_prompt_responder(self):
         panel = "Account: future-account (Plus)\n5h limit: 80% left (resets 05:00)\nWeekly limit: 90% left (resets Friday)"
         for profile_id in ("codex-new-profile-a", "codex-new-profile-b"):
@@ -144,7 +168,7 @@ Weekly limit: [bar] 100% left (resets 20:04 on 15 Aug)
             with patch.object(collector, "cli_executable", return_value="codex"), \
                  patch.object(collector, "profile_environment", return_value={}), \
                  patch.object(collector, "profile_workdir", return_value=Path(".")), \
-                 patch.object(collector, "pty_command", return_value=panel) as command:
+                 patch.object(collector, "pty_command", side_effect=self.confirmed_codex_capture(panel)) as command:
                 self.assertEqual(collector.collect_profile(profile)["status"], "ok")
             responder = command.call_args.kwargs["responders"][0]
             self.assertRegex("1. Update now (runs npm install) 2. Skip", responder[0])
@@ -759,6 +783,47 @@ class CollectionSchedulingTests(unittest.TestCase):
     def test_codex_status_is_requested_early_and_retried(self):
         self.assertLessEqual(collector.CODEX_STATUS_INPUTS[0][0], 6.0)
         self.assertTrue(all(item[1] == "/status\r" for item in collector.CODEX_STATUS_INPUTS))
+
+    def test_codex_latest_partial_panel_cannot_borrow_old_weekly_quota(self):
+        old = "Account: old (Plus)\n5h limit: 100% left (resets 05:00)\nWeekly limit: 100% left (resets Friday)\n"
+        partial = "Account: new (Plus)\n5h limit: 0% left (resets 05:00)\n"
+        with self.assertRaises(ValueError):
+            parse_codex_status(old + partial)
+        latest = parse_codex_status(old + partial + "Weekly limit: 0% left (resets Friday)\n")
+        self.assertEqual(latest["account_name"], "new")
+        self.assertEqual(latest["metrics"]["weekly"]["remaining_pct"], 0)
+        self.assertEqual(latest["credits"], "None")
+        with self.assertRaises(ValueError):
+            parse_codex_status(old.replace("100%", "110%"))
+
+    def test_codex_startup_refill_needs_independent_requests(self):
+        panel = "Account: demo (Plus)\n5h limit: {pct}% left (resets 05:00)\nWeekly limit: 0% left (resets Friday)\n"
+        full, empty = panel.format(pct=100), panel.format(pct=0)
+        check = collector.PanelConfirmation(parse_codex_status, None, require_repeat=True)
+        check.begin_request(0)
+        self.assertFalse(check(full))
+        self.assertFalse(check(full + full), "redrawing the same request cannot confirm it")
+        check.begin_request(len(full + full))
+        self.assertFalse(check(full + full + empty), "a startup correction needs another request")
+        check.begin_request(len(full + full + empty))
+        self.assertTrue(check(full + full + empty + empty))
+        self.assertTrue(check.accepted)
+
+    def test_codex_confirmation_allows_real_consumption_and_rejects_partial_requests(self):
+        panel = "Account: demo (Plus)\n5h limit: {pct}% left (resets 05:00)\nWeekly limit: 70% left (resets Friday)\n"
+        first, second = panel.format(pct=90), panel.format(pct=88)
+        check = collector.PanelConfirmation(parse_codex_status, None, require_repeat=True)
+        check.begin_request(0)
+        self.assertFalse(check(first))
+        check.begin_request(len(first))
+        self.assertFalse(check(first + "Account: demo (Plus)\n5h limit: 88% left (resets 05:00)\n"))
+        self.assertTrue(check(first + second))
+
+    def test_antigravity_redraw_uses_latest_account_panel(self):
+        panel = "Account: {account}\nGEMINI MODELS\nWeekly Limit Remaining\n{pct}% remaining\nFive Hour Limit Remaining\n{pct}% remaining\nCLAUDE AND GPT MODELS\nWeekly Limit Remaining\n{pct}% remaining\nFive Hour Limit Remaining\n{pct}% remaining\n"
+        latest = parse_antigravity_usage(panel.format(account="old", pct=100) + panel.format(account="new", pct=0))
+        self.assertEqual(latest["account_name"], "new")
+        self.assertEqual(latest["metrics"]["claude"]["five_hour"]["remaining_pct"], 0)
         self.assertLess(collector.CODEX_STATUS_INPUTS[-1][0], collector.COLLECTION_TIMEOUT_BUDGET)
 
     def test_collect_all_runs_profiles_in_parallel(self):

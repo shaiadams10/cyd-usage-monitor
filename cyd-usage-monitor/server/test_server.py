@@ -5,6 +5,7 @@ import os
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -385,6 +386,31 @@ class ServerApiTests(unittest.TestCase):
         self.assertEqual(healthy["codex_5h_pct"], 44)
         self.assertEqual(healthy["codex_weekly_pct"], 91)
 
+    def test_codex_reset_counts_reach_device_payload(self):
+        app.write_json(app.PROFILES_FILE, {"profiles": [self.profile], "active_profile_id": self.profile["id"]})
+        for count in (0, 2, None):
+            with self.subTest(count=count):
+                snapshot = {
+                    "provider": "codex", "status": "ok", "account_name": "Demo",
+                    "collected_at": app.utcnow(), "available_resets": count,
+                    "metrics": {"five_hour": {"remaining_pct": 80, "reset": "05:00"}, "weekly": {"remaining_pct": 60, "reset": "Friday"}},
+                }
+                app.write_json(app.STATE_FILE, {"profiles": {self.profile["id"]: snapshot}})
+                self.assertEqual(self.request("/api/admin/cyd-status")[1]["available_resets"], count)
+
+    def test_incomplete_or_invalid_codex_quotas_are_unavailable(self):
+        app.write_json(app.PROFILES_FILE, {"profiles": [self.profile], "active_profile_id": self.profile["id"]})
+        for values in ({"five_hour": {"remaining_pct": 100, "reset": "later"}},
+                       {"five_hour": {"remaining_pct": None, "reset": "later"}, "weekly": {"remaining_pct": 0, "reset": "later"}},
+                       {"five_hour": {"remaining_pct": 101, "reset": "later"}, "weekly": {"remaining_pct": 0, "reset": "later"}}):
+            with self.subTest(values=values):
+                snapshot = {"provider": "codex", "status": "ok", "account_name": "Demo",
+                            "collected_at": app.utcnow(), "metrics": values}
+                app.write_json(app.STATE_FILE, {"profiles": {self.profile["id"]: snapshot}})
+                payload = self.request("/api/admin/cyd-status")[1]
+                self.assertEqual(payload["status"], "error")
+                self.assertEqual(payload["primary_val"], "Unavailable")
+
     def test_single_failed_poll_keeps_last_good_values_until_confirmed_or_stale(self):
         app.write_json(app.PROFILES_FILE, {"profiles": [self.profile], "active_profile_id": self.profile["id"]})
         last_ok = {
@@ -405,6 +431,7 @@ class ServerApiTests(unittest.TestCase):
         self.assertTrue(degraded["degraded"])
         self.assertIn("quota panel incomplete", degraded["degraded_error"])
         self.assertIn("retrying", degraded["status_ticker"])
+        self.assertTrue(degraded["codex_5h_sub"].startswith("Last confirmed"))
 
         # The collector's confirmed outage threshold shows the real error.
         app.write_json(app.STATE_FILE, {"profiles": {self.profile["id"]: dict(failed, consecutive_failures=3, alert_confirmed=True)}})
@@ -547,6 +574,21 @@ class ServerApiTests(unittest.TestCase):
             self.assertIs(connection.sock, socket)
         finally:
             connection.close()
+
+    def test_next_account_payload_stays_bound_during_concurrent_selection(self):
+        second = {"id": "codex-9876543210", "provider": "codex", "label": "Second", "enabled": True}
+        config = {"profiles": [self.profile, second], "active_profile_id": self.profile["id"]}
+        app.write_json(app.PROFILES_FILE, config)
+        original = app.cyd_payload
+        def concurrent_selection(profile_id=None):
+            # Another selector changes active_id after this request's rotation.
+            app.write_json(app.PROFILES_FILE, config)
+            return original(profile_id)
+        with patch.object(app, "cyd_payload", side_effect=concurrent_selection) as payload:
+            status, body, _ = self.request("/api/v1/next-account", basic=False, bearer=True, device=True)
+        self.assertEqual(status, 200)
+        payload.assert_called_once_with(second["id"])
+        self.assertEqual(body["account_name"], "Second")
 
     def test_admin_posts_require_csrf_header_and_json(self):
         path = "/api/admin/profiles"

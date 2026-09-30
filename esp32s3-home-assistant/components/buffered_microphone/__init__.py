@@ -1,2 +1,0 @@
-"""Buffered microphone external component."""
-

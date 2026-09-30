@@ -1,6 +1,6 @@
 # CYD CLI Usage Monitor
 
-An ESP32 Cheap Yellow Display (ESP32-2432S028R) that displays usage snapshots
+An ESP32 touchscreen monitor for the Hosyond/LCDWiki E32R40T that displays usage snapshots
 from locally authenticated OpenAI Codex and Google Antigravity CLIs plus
 account-wide OpenRouter credits and spend. A small Docker-hosted dashboard
 manages isolated CLI profiles, private OpenRouter setup, and the CYD API.
@@ -170,7 +170,7 @@ account on the display or dashboard makes it due immediately. At most
 `CYD_MONITOR_MAX_PARALLEL_COLLECTIONS` (default 3) CLI captures run at once;
 raise it on a host with spare memory, since each capture starts a full CLI
 process. Codex `/status` is requested from six seconds after launch and retried
-until the panel parses, so a warm start finishes in roughly ten seconds.
+until independent requests corroborate the panel. Confirmation adds capture time; a parsed startup panel alone is insufficient.
 
 A single failed capture does not blank the display. The collector keeps the
 last healthy result alongside the failure, and the CYD keeps showing those
@@ -181,12 +181,14 @@ one 60-second capture). The firmware applies the same idea to its own LAN
 polling: a transport failure replaces the quota widgets only after three
 consecutive misses, while token rejection still shows immediately.
 
-Quota values are also sanity-checked against the previous healthy reading. A
-panel that reports a limit at least 30 points lower (or 0% where 10% or more
-remained) is not accepted until a later panel in the same capture repeats it;
-a real limit hit is repeated by every later panel and is accepted within the
-same capture, while a transient wrong panel is discarded and recorded as an
-unconfirmed reading in the incident history.
+Codex values require corroboration across separate `/status` requests, allowing
+small real consumption between readings. Redraws cannot confirm themselves.
+Large drops or refills require another agreeing request; an incomplete latest
+panel cannot borrow quotas from an older panel. Unconfirmed or out-of-range
+readings retain the previous healthy snapshot under the existing stale budget.
+Account switches apply their own bars immediately, while updates to the same
+account retain animation. An exhausted weekly allowance is explicitly marked
+when five-hour quota remains.
 
 ## Hardware & Pin Mapping
 
@@ -504,8 +506,29 @@ minutes, and a full device restart is used only after five minutes. The final
 restart is allowed only when the current boot previously held a valid
 connection, preventing reboot loops during an AP outage or bad configuration.
 
+Codex collection confirms quota values across separate read-only `/status`
+requests before publishing them. Small real consumption between requests is
+allowed; startup corrections and large changes need another confirming read.
+Only the latest account panel is parsed, and a partial 5-hour/weekly panel is
+never combined with an older panel. Missing or invalid quotas show an error,
+rather than full allowance. During an unconfirmed retry the CYD labels retained
+values **Last confirmed**; expired snapshots show an error.
+
+Quota bars immediately take the selected account's own values on account
+switches, with animations retained for updates within that account. A depleted
+weekly limit shows **WEEKLY QUOTA EXHAUSTED** even if the separate 5-hour window
+still has allowance. This does not activate any usage-limit resets.
+
 For Codex profiles, Usage Monitor shows the current rolling 5-hour allowance
-and weekly allowance together. Selecting any CLI account with **Show on CYD**,
+and weekly allowance together. Each Codex dashboard card also shows available
+usage limit resets beside Credits, read from the CLI startup notice captured
+with `/status`. If no count is reported, the card says **Not reported** rather
+than assuming zero. This is informational; collection never activates a reset
+or opens Codex `/usage`. The physical CYD and its LVGL browser preview show
+white **Resets:** and **Credits:** headings with blue value badges in the Codex footer, with **Not reported** when
+the CLI does not provide a count. Firmware builds compile only the canonical
+`src/main.cpp` entry point, so local duplicate backup sources are excluded.
+Selecting any CLI account with **Show on CYD**,
 or choosing **Show on CYD** on the OpenRouter card, queues a private
 dashboard-to-device command and updates the browser LVGL preview immediately.
 The physical CYD receives that route on its next three-second LAN poll.

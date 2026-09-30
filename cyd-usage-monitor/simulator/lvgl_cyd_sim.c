@@ -16,6 +16,7 @@ static bool motion_identity(const char *account, int provider) {
 
 #define SCREEN_W 320
 #define SCREEN_H 240
+static lv_obj_t *codex_credits, *codex_resets, *codex_plan, *codex_credits_title, *codex_resets_title;
 
 static lv_color_t buffer[SCREEN_W * 24];
 static lv_color_t launcher_icon_buffer[56 * 56];
@@ -538,6 +539,10 @@ EMSCRIPTEN_KEEPALIVE void cyd_init(void) {
   lv_label_set_text(primary_warn, "100% QUOTA EXHAUSTED");
   lv_obj_set_style_text_color(primary_warn, lv_color_hex(0xF43F5E), LV_PART_MAIN);
   lv_obj_set_style_text_font(primary_warn, &lv_font_montserrat_12, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(primary_warn, lv_color_hex(0x18181B), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(primary_warn, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_radius(primary_warn, 3, LV_PART_MAIN);
+  lv_obj_set_style_pad_hor(primary_warn, 2, LV_PART_MAIN);
   lv_obj_align_to(primary_warn, primary_bar, LV_ALIGN_CENTER, 0, 0);
   lv_obj_add_flag(primary_warn, LV_OBJ_FLAG_HIDDEN);
   primary_sub = lv_label_create(primary);
@@ -547,8 +552,8 @@ EMSCRIPTEN_KEEPALIVE void cyd_init(void) {
   lv_obj_set_pos(primary_sub, 6, 80);
   lv_obj_t *details = lv_obj_create(usage_screen);
   details_card = details;
-  lv_obj_set_size(details, 312, 60);
-  lv_obj_set_pos(details, 4, 160);
+  lv_obj_set_size(details, 312, 82);
+  lv_obj_set_pos(details, 4, 156);
   style_card(details, 0x27272A, 10);
   weekly_value = lv_label_create(details);
   lv_label_set_text(weekly_value, "-");
@@ -568,7 +573,44 @@ EMSCRIPTEN_KEEPALIVE void cyd_init(void) {
   lv_label_set_text(weekly_sub, "Waiting for weekly quota");
   lv_obj_set_style_text_color(weekly_sub, lv_color_hex(0x94A3B8), LV_PART_MAIN);
   lv_obj_set_style_text_font(weekly_sub, &lv_font_montserrat_12, LV_PART_MAIN);
-  lv_obj_set_pos(weekly_sub, 6, 36);
+  lv_obj_set_pos(weekly_sub, 6, 34);
+  codex_credits = lv_label_create(details);
+  codex_resets = lv_label_create(details);
+  codex_plan = lv_label_create(details);
+  lv_obj_t *footer_labels[] = {codex_credits, codex_resets, codex_plan};
+  const int footer_x[] = {56, 152, 250};
+  const int footer_width[] = {40, 94, 42};
+  for (int i = 0; i < 3; ++i) {
+    lv_obj_set_style_text_font(footer_labels[i], &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_pos(footer_labels[i], footer_x[i], 50);
+    if (i == 2) lv_obj_set_width(footer_labels[i], footer_width[i]);
+    else lv_obj_set_style_max_width(footer_labels[i], footer_width[i], LV_PART_MAIN);
+    lv_label_set_long_mode(footer_labels[i], LV_LABEL_LONG_DOT);
+  }
+  codex_credits_title = lv_label_create(details);
+  codex_resets_title = lv_label_create(details);
+  lv_label_set_text(codex_credits_title, "Credits:");
+  lv_label_set_text(codex_resets_title, "Resets:");
+  lv_obj_t *titles[] = {codex_credits_title, codex_resets_title};
+  const int title_x[] = {4, 100};
+  for (int i = 0; i < 2; ++i) {
+    lv_obj_set_style_text_font(titles[i], &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_color(titles[i], lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_pos(titles[i], title_x[i], 50);
+    lv_obj_set_style_text_color(footer_labels[i], lv_color_hex(0x38BDF8), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(footer_labels[i], lv_color_hex(0x152C40), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(footer_labels[i], LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(footer_labels[i], 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(footer_labels[i], 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(footer_labels[i], 2, LV_PART_MAIN);
+    lv_obj_set_y(footer_labels[i], 48);
+  }
+
+  lv_obj_set_style_text_color(codex_plan, lv_color_hex(0x10B981), LV_PART_MAIN);
+  lv_obj_set_style_text_align(codex_plan, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+  lv_label_set_text(codex_credits, "None");
+  lv_label_set_text(codex_resets, "Not reported");
+  lv_label_set_text(codex_plan, "");
 
   error_card = lv_obj_create(usage_screen);
   lv_obj_set_size(error_card, 312, 154);
@@ -654,21 +696,31 @@ EMSCRIPTEN_KEEPALIVE void cyd_set_codex(const char *account, const char *value, 
   lv_label_set_text(primary_tag, tag);
   lv_label_set_text(primary_sub, sub);
   cyd_motion_bar(primary_bar, 100 - used, reset);
-  uint32_t status_color = used > 80 ? 0xF43F5E : used > 50 ? 0xF59E0B : 0x10B981;
+  uint32_t status_color = used >= 80 || week_used >= 100 ? 0xF43F5E : used >= 50 ? 0xF59E0B : 0x10B981;
   lv_obj_set_style_text_color(primary_value, lv_color_hex(status_color), LV_PART_MAIN);
   lv_obj_set_style_bg_color(primary_bar, lv_color_hex(status_color), LV_PART_INDICATOR);
-  if (used >= 100) lv_obj_clear_flag(primary_warn, LV_OBJ_FLAG_HIDDEN);
+  if (used >= 100 || week_used >= 100) {
+    lv_label_set_text(primary_warn, week_used >= 100 ? "WEEKLY QUOTA EXHAUSTED" : "5-HOUR QUOTA EXHAUSTED");
+    lv_obj_clear_flag(primary_warn, LV_OBJ_FLAG_HIDDEN);
+  }
   else lv_obj_add_flag(primary_warn, LV_OBJ_FLAG_HIDDEN);
   lv_label_set_text(weekly_value, week_value);
   lv_label_set_text(weekly_sub, week_sub);
   cyd_motion_bar(weekly_bar, 100 - week_used, reset);
-  uint32_t weekly_color = week_used > 80 ? 0xF43F5E : week_used > 50 ? 0xF59E0B : 0x10B981;
+  uint32_t weekly_color = week_used >= 80 ? 0xF43F5E : week_used >= 50 ? 0xF59E0B : 0x10B981;
   lv_obj_set_style_text_color(weekly_value, lv_color_hex(weekly_color), LV_PART_MAIN);
   lv_obj_set_style_bg_color(weekly_bar, lv_color_hex(weekly_color), LV_PART_INDICATOR);
 }
 
 EMSCRIPTEN_KEEPALIVE void cyd_show_usage(void) {
   cyd_motion_show(usage_screen, false);
+}
+
+EMSCRIPTEN_KEEPALIVE void cyd_set_codex_footer(const char *credits, const char *plan, int resets) {
+  lv_label_set_text(codex_credits, credits);
+  if (resets >= 0) lv_label_set_text_fmt(codex_resets, "%d", resets);
+  else lv_label_set_text(codex_resets, "Not reported");
+  lv_label_set_text(codex_plan, plan);
 }
 
 EMSCRIPTEN_KEEPALIVE void cyd_show_launcher(void) {

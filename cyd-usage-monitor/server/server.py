@@ -285,18 +285,38 @@ def cyd_payload(profile_id: str | None = None) -> dict:
             "Last CLI result is stale" if reason == "stale" else snapshot.get("error", "CLI collection failed"),
             snapshot.get("account_name") or profile.get("last_account_name") or profile.get("label") or "Telemetry unavailable",
         )
-    payload = render_snapshot(shown)
+    try:
+        payload = render_snapshot(shown)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return unavailable(profile.get("provider", "collector"), "CLI quota fields are incomplete or invalid",
+                           shown.get("account_name") or "Telemetry unavailable")
+    payload["profile_id"] = profile_id
     if reason == "degraded":
         # Tell the operator the values are carried over while the collector retries.
         payload["degraded"] = True
         payload["degraded_error"] = str(snapshot.get("error", "CLI collection failed"))[:120]
         payload["status_ticker"] += " · retrying"
+        for key in ("primary_sub", "codex_5h_sub", "codex_weekly_sub"):
+            if key in payload:
+                payload[key] = "Last confirmed · " + payload[key]
     return payload
 
 
 def render_snapshot(snapshot: dict) -> dict:
+    if snapshot.get("provider") not in {"codex", "antigravity"}:
+        raise ValueError("Unknown quota provider")
+    def validate_metric(metric: dict) -> None:
+        if not isinstance(metric, dict):
+            raise ValueError("Invalid quota metric")
+        value = metric.get("remaining_pct")
+        if type(value) is not int or not 0 <= value <= 100 or not isinstance(metric.get("reset"), str):
+            raise ValueError("Invalid quota metric")
+
     if snapshot.get("provider") == "antigravity":
         metrics = snapshot["metrics"]
+        for group in ("gemini", "claude"):
+            for limit in ("five_hour", "weekly"):
+                validate_metric(metrics[group][limit])
         def usage_sub(metric: dict) -> str:
             reset = str(metric.get("reset") or "").strip()
             if not reset:
@@ -322,14 +342,19 @@ def render_snapshot(snapshot: dict) -> dict:
         }
 
     metrics = snapshot["metrics"]
+    if "five_hour" in metrics and "weekly" not in metrics:
+        raise ValueError("Missing weekly quota")
     primary = metrics.get("five_hour") or metrics.get("primary") or metrics.get("weekly") or metrics["monthly"]
     weekly = metrics.get("weekly") or metrics.get("monthly") or primary
+    validate_metric(primary)
+    validate_metric(weekly)
     remaining = primary["remaining_pct"]
     return {
         "provider": "codex", "status": "ok", "account_name": snapshot["account_name"],
         "plan_type": snapshot.get("plan_type", "ChatGPT"), "primary_val": f"{remaining}% left",
         "primary_pct": 100 - remaining, "primary_tag": "5-Hour Limit" if metrics.get("five_hour") else snapshot.get("limit_label", "Usage Limit"),
         "primary_sub": "Resets " + primary["reset"], "extra_credits": snapshot.get("credits", "None"),
+        "available_resets": snapshot.get("available_resets"),
         "codex_5h_pct": primary["remaining_pct"], "codex_5h_sub": "Resets " + primary["reset"],
         "codex_weekly_pct": weekly["remaining_pct"], "codex_weekly_sub": "Resets " + weekly["reset"],
         "status_ticker": "* Codex CLI · " + snapshot["collected_at"], "collected_at": snapshot["collected_at"],
@@ -554,7 +579,7 @@ class Handler(BaseHTTPRequestHandler):
                         settings, "usage", profile_id=selected["id"], source="device",
                         audit_source=self.selection_source(), action="cycle-account",
                     ))
-                return self.send_json(cyd_payload())
+                return self.send_json(cyd_payload(selected["id"]))
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         if path.startswith("/static/"):
             relative = Path(path.removeprefix("/static/"))

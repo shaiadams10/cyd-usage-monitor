@@ -15,6 +15,26 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
+      - name: Enforce CYD-only public source tree
+        run: |
+          python - <<'PY'
+          import pathlib, re, subprocess
+          allowed_roots = {".github", "cyd-usage-monitor", "docs"}
+          allowed_files = {".gitattributes", ".gitignore", "AGENTS.md", "CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "LICENSE", "NOTICE.md", "README.md", "SECURITY.md"}
+          files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
+          bad = []
+          for name in files:
+              path = pathlib.PurePosixPath(name)
+              if path.parts[0] not in allowed_roots and name not in allowed_files:
+                  bad.append(name)
+              if re.search(r" \(\d+\)", name) or path.name in {".env", "secrets.h", "map.local.md"}:
+                  bad.append(name)
+              if any(part in {"profiles", "data", ".pio", "__pycache__"} for part in path.parts):
+                  bad.append(name)
+          if bad:
+              raise SystemExit("Unexpected public files: " + ", ".join(sorted(set(bad))))
+          print("CYD-only source tree verified")
+          PY
       - name: Run server and storage tests
         run: python -m unittest discover -s cyd-usage-monitor/server -v
       - name: Validate Compose configuration
@@ -78,6 +98,7 @@ jobs:
               "cyd_pointer",
               "cyd_publish_provider_mascots",
               "cyd_set_codex",
+              "cyd_set_codex_footer",
               "cyd_set_antigravity",
               "cyd_set_error",
               "cyd_set_openrouter",

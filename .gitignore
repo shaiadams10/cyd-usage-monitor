@@ -15,3 +15,10 @@ docs/map.local.md
 **/data/
 *.bin
 /*.wav
+
+# Local workspace siblings and duplicate backup copies are not public source
+/assistant/
+/esp32s3-home-assistant/
+/esp32s3-home-assistant-legacy-*/
+**/* ([0-9])*
+docs/*local.md

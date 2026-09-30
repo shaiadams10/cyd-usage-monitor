@@ -9,7 +9,7 @@ because Wi-Fi and the device token are compiled from ignored
 
 ## What you need
 
-- An ESP32-2432S028R CYD and USB data cable, or the Wokwi simulator.
+- The supported E32R40T display and a USB data cable, or the Wokwi simulator.
 - PlatformIO Core or VS Code with PlatformIO.
 - The monitor server's private LAN IPv4 address and `CYD_API_TOKEN`.
 - Wi-Fi that can reach the monitor server's LAN address.
