@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-30 — README device artwork
+
+- Replace the dashboard screenshot in both README introductions with the
+  operator-provided Codex/Antigravity device illustration using example accounts.
+
 ## 2026-09-30 — CYD-only public repository and refreshed homepage
 
 - Publish only CYD source and support documentation; remove unrelated ESP32

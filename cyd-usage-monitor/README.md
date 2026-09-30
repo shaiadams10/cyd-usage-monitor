@@ -137,7 +137,9 @@ Re-run installation after adding accounts, changing the desktop
 Codex home, or an update that removes the configured Codex executable. Keep
 private settings and backups outside the public checkout.
 
-![CYD Usage Monitor dashboard](../docs/images/cyd-usage-monitor-dashboard.png)
+![CYD displays showing Codex and Antigravity quotas](../docs/images/cyd-usage-monitor-hero.png)
+
+*Illustrative device artwork with example accounts and quota values.*
 
 ## How it works
 

@@ -83,3 +83,5 @@ Public CYD source and supporting documentation only.
 | `docs/context.md` | Public CYD project context and source map | 2026-09-30 |
 | `docs/images/cyd-usage-monitor-dashboard.png` | Illustrative dashboard screenshot with sample accounts | 2026-09-30 |
 | `docs/map.md` | Public CYD project context and source map | 2026-09-30 |
+
+| `docs/images/cyd-usage-monitor-hero.png` | User-provided promotional illustration of Codex and Antigravity CYD screens with example accounts | 2026-09-30 |

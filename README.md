@@ -17,9 +17,9 @@ A self-hosted dashboard and ESP32 touchscreen for Codex, Antigravity, and OpenRo
 
 </div>
 
-![Dashboard and shared LVGL browser preview](docs/images/cyd-usage-monitor-dashboard.png)
+![CYD displays showing Codex and Antigravity quotas](docs/images/cyd-usage-monitor-hero.png)
 
-*Illustrative dashboard with sample accounts. The current release also shows Codex five-hour quota and available reset counts.*
+*Illustrative device artwork with example accounts and quota values.*
 
 ## Why build this?
 

@@ -8,6 +8,14 @@ shared LVGL WebAssembly preview and optional Windows account-switching helpers.
 
 ## Recent Changes
 
+### 2026-09-30 — README Device Artwork
+- Use the operator-provided Codex/Antigravity device illustration in the public
+  homepage and operator README; label it illustrative with example accounts.
+- Preserve the existing dashboard screenshot as a documentation asset.
+- Verified PNG format/dimensions, byte-identical copy and README asset paths.
+- Files: README.md, cyd-usage-monitor/{README.md,CHANGELOG.md},
+  docs/{images/cyd-usage-monitor-hero.png,context.md,map.md}.
+
 ### 2026-09-30 — CYD-only Public Release and Homepage
 - Removed unrelated ESP32 projects from the current public tree, preserving
   the operator's local workspace and existing Git history.
