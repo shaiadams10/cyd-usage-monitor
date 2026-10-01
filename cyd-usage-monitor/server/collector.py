@@ -409,7 +409,7 @@ def pty_command(
         while time.monotonic() < deadline:
             elapsed = time.monotonic() - started
             while next_input < len(inputs) and elapsed >= inputs[next_input][0]:
-                if complete and hasattr(complete, "begin_request"):
+                if complete and hasattr(complete, "begin_request") and inputs[next_input][1].startswith("/"):
                     complete.begin_request(len(transcript.decode("utf-8", errors="replace")))
                 os.write(master, inputs[next_input][1].encode("utf-8"))
                 if progress:
@@ -592,6 +592,18 @@ CODEX_STATUS_INPUTS: list[tuple[float, str, str]] = [
     (52.0, "/status\r", "Waiting for final rate-limit values. Retrying /status…"),
 ]
 
+# /usage opens a modal: slash commands typed while it is open do not request
+# fresh data. Close it before each independent confirmation request.
+ANTIGRAVITY_USAGE_INPUTS: list[tuple[float, str, str]] = [
+    (3.0, "/usage\r", "Antigravity started. Opening /usage…"),
+    (9.0, "\x1b", "Closing the previous quota panel…"),
+    (10.0, "/usage\r", "Refreshing Antigravity's /usage panel…"),
+    (16.0, "\x1b", "Closing the previous quota panel…"),
+    (17.0, "/usage\r", "Confirming Antigravity's /usage panel…"),
+    (25.0, "\x1b", "Closing the previous quota panel…"),
+    (26.0, "/usage\r", "Retrying Antigravity's /usage panel…"),
+]
+
 
 # Large quota drops and refills need a later independent CLI request.
 # Codex additionally confirms every capture across two requests, because its
@@ -685,15 +697,19 @@ class PanelConfirmation:
             return True
         if self.suspect is None:
             self.suspect, self.drops = (count, values), drops
+            self.candidate_account = account
             if self.progress:
                 self.progress("The quota panel shows an abrupt drop (" + ", ".join(drops) + "). Waiting for a second panel to confirm it.")
             return False
         if count > self.suspect[0]:
-            if values == self.suspect[1]:
+            if (values.keys() == self.suspect[1].keys()
+                    and all(abs(value - self.suspect[1][key]) <= 5 for key, value in values.items())
+                    and account == self.candidate_account):
                 self.suspect = None  # A later panel repeated the drop, so it is real.
                 self.accepted = True
                 return True
             self.suspect, self.drops = (count, values), drops
+            self.candidate_account = account
         return False
 
 
@@ -734,12 +750,8 @@ def collect_profile(profile: dict, include_transcript: bool = False, progress: C
         # provider quota fields parse rather than using a blind timeout.
         raw = pty_command(
             [executable], env,
-            [
-                (3.0, "/usage\r", "Antigravity started. Opening /usage…"),
-                (10.0, "/usage\r", "Refreshing Antigravity's /usage panel…"),
-                (17.0, "/usage\r", "Confirming Antigravity's /usage panel…"),
-            ],
-            timeout=25, cwd=str(profile_workdir(profile)),
+            ANTIGRAVITY_USAGE_INPUTS,
+            timeout=40, cwd=str(profile_workdir(profile)),
             complete=(confirmation := PanelConfirmation(parse_antigravity_usage, previous, progress)), progress=progress,
         )
         try:
@@ -865,11 +877,13 @@ def send_email_message(subject: str, body: str) -> tuple[bool, str]:
         return False, message
 
 
-def send_waha_failure_email(event: str, alert_message: str, waha_error: str) -> tuple[bool, str]:
-    """Send one deduplicated fallback email for a distinct failed WAHA message."""
-    delivery_key = hashlib.sha256((event + "\0" + alert_message).encode("utf-8")).hexdigest()
+def send_waha_failure_email(event: str, alert_message: str, waha_error: str,
+                            notification_key: str | None = None) -> tuple[bool, str]:
+    """Deduplicate by incident even when retry counts and evidence change."""
+    delivery_key = hashlib.sha256((event + "\0" + (notification_key or alert_message)).encode("utf-8")).hexdigest()
     status = read_json(ALERTS_FILE, {})
-    if status.get("fallback_email_delivery_key") == delivery_key:
+    if (status.get("fallback_email_delivery_key") == delivery_key
+            or delivery_key in status.get("fallback_email_delivery_keys", [])):
         return True, "Fallback email was already delivered for this WAHA failure."
     delivered, detail = send_email_message(
         "[CYD Usage Monitor] WhatsApp alert delivery failed",
@@ -877,7 +891,13 @@ def send_waha_failure_email(event: str, alert_message: str, waha_error: str) -> 
         f"WAHA result: {waha_error}\n\nOriginal monitor notification:\n\n{alert_message}\n",
     )
     if delivered:
-        record_alert_status(fallback_email_delivery_key=delivery_key, fallback_email_last_event=event)
+        def remember(status: dict) -> None:
+            keys = status.setdefault("fallback_email_delivery_keys", [])
+            if delivery_key not in keys:
+                keys.append(delivery_key)
+            status["fallback_email_delivery_keys"] = keys[-INCIDENT_HISTORY_LIMIT:]
+            status.update(fallback_email_delivery_key=delivery_key, fallback_email_last_event=event)
+        update_json(ALERTS_FILE, {}, remember)
     return delivered, detail
 
 
@@ -981,7 +1001,7 @@ def record_incident(profile: dict, previous: dict | None, snapshot: dict) -> Non
         update_json(INCIDENTS_FILE, {"incidents": []}, update)
 
 
-def deliver_waha_message(event: str, message: str) -> tuple[bool, str]:
+def deliver_waha_message(event: str, message: str, notification_key: str | None = None) -> tuple[bool, str]:
     """Deliver a dashboard/collector alert without exposing the WAHA key."""
     alert_message = message
     settings = waha_settings()
@@ -990,7 +1010,7 @@ def deliver_waha_message(event: str, message: str) -> tuple[bool, str]:
     if not configured:
         error = "WAHA alerts are not configured: set WAHA_API_KEY and a chat ID"
         record_alert_status(last_event=event, last_error=error)
-        _, fallback = send_waha_failure_email(event, alert_message, error)
+        _, fallback = send_waha_failure_email(event, alert_message, error, notification_key)
         return False, error + " " + fallback
     payload = json.dumps({"session": settings["session"], "chatId": settings["chat_id"], "text": message}).encode("utf-8")
     request = urlrequest.Request(
@@ -1018,12 +1038,12 @@ def deliver_waha_message(event: str, message: str) -> tuple[bool, str]:
         if detail:
             message += f": {detail[:600]}"
         record_alert_status(last_event=event, last_error=message)
-        _, fallback = send_waha_failure_email(event, alert_message, message)
+        _, fallback = send_waha_failure_email(event, alert_message, message, notification_key)
         return False, message + " " + fallback
     except (OSError, ValueError, RuntimeError, urlerror.URLError) as error:
         message = f"WAHA delivery failed: {error}"
         record_alert_status(last_event=event, last_error=message)
-        _, fallback = send_waha_failure_email(event, alert_message, message)
+        _, fallback = send_waha_failure_email(event, alert_message, message, notification_key)
         return False, message + " " + fallback
 
 
@@ -1087,7 +1107,10 @@ def notify_transition(profile: dict, previous: dict | None, snapshot: dict) -> b
             f"⏱️ *Interruption:* {elapsed_text((previous.get('failure_started_at') or previous.get('collected_at')) if previous else None, snapshot.get('collected_at'))}\n\n"
             "🔧 *Resolution*\nA later scheduled poll returned a complete quota panel. The monitor recovered automatically; no reconnect or credential change was performed."
         )
-    delivered, _ = deliver_waha_message(event, message)
+    incident_start = ((snapshot if is_alerting else previous) or {}).get("failure_started_at")
+    incident_start = incident_start or ((previous or {}).get("collected_at") if was_alerting else snapshot.get("collected_at"))
+    notification_key = profile["id"] + "\0" + str(incident_start or "legacy")
+    delivered, _ = deliver_waha_message(event, message, notification_key)
     return delivered
 
 

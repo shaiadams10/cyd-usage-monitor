@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-09-30 — Stop repeated fallback emails and confirm Antigravity refills
+
+- Deduplicate accepted fallback emails by account and outage start time in a
+  bounded durable history, preserving WhatsApp retries without emailing on each
+  changing failure count or diagnostic capture. Failed SMTP sends still retry.
+- Close Antigravity's `/usage` modal before each new request so quota refills
+  can be independently confirmed. Allow small consumption between confirmation
+  reads and require the same account.
+- Document WAHA QR pairing recovery and add regression tests for changing and
+  interleaved incidents, SMTP retry, and modal/refill confirmation.
+
 ## 2026-09-30 — README device artwork
 
 - Replace the dashboard screenshot in both README introductions with the

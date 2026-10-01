@@ -8,6 +8,24 @@ shared LVGL WebAssembly preview and optional Windows account-switching helpers.
 
 ## Recent Changes
 
+### 2026-09-30 — CYD Notification Flood and Antigravity Modal Recovery
+- Fixed fallback email deduplication to use account/outage identity rather than
+  changing retry text; retain a bounded durable history across interleaved profiles.
+- Close Antigravity's /usage modal before independent requests, allowing real
+  refills to confirm with small consumption tolerance and matching account identity.
+- Passed 75 server tests and live captures of both enabled Antigravity profiles.
+  Backed up remote source/state and rollback image, migrated the existing email
+  receipt, and deployed only the collector to the configured private host.
+  All six enabled CLI profiles recovered/continued healthy; email timestamp did
+  not advance. App remained healthy and protected API smoke checks passed.
+- Both configured WAHA sessions still exist but require QR pairing. Container
+  uptime and storage mount are intact; retained logs show no initiating unpair
+  event, so the cause is unresolved. No WAHA session was changed or removed.
+- Publication checks: 75 server tests and 21 helper tests passed; Gitleaks
+  found no secrets, diff whitespace checks passed, and Brain is healthy.
+- Files: cyd-usage-monitor/{server/collector.py,server/test_collector.py,
+  README.md,CHANGELOG.md}, docs/{context.md,map.md}; private remote backups.
+
 ### 2026-09-30 — README Device Artwork
 - Use the operator-provided Codex/Antigravity device illustration in the public
   homepage and operator README; label it illustrative with example accounts.

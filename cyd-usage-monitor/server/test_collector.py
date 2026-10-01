@@ -324,6 +324,33 @@ If you are not redirected, paste the authorization code below:
                 self.assertTrue(collector.send_waha_failure_email("failure", "same alert", "WAHA failed")[0])
                 self.assertEqual(send.call_count, 1)
 
+    def test_fallback_email_survives_changing_retries_and_interleaved_profiles(self):
+        first = {"id": "agy-one", "provider": "antigravity"}
+        second = {"id": "agy-two", "provider": "antigravity"}
+        previous = {"status": "error", "alert_confirmed": True, "alert_delivery_pending": True,
+                    "failure_started_at": "2026-09-30T20:00:00Z"}
+        def failed(count):
+            return dict(previous, error="quota unavailable", consecutive_failures=count,
+                        collected_at=f"2026-09-30T21:{count:02d}:00Z",
+                        diagnostics={"evidence_id": f"capture-{count}", "capture_chars": count * 10})
+        with patch.object(collector, "waha_settings", return_value={"api_key": "", "chat_id": "", "session": "default"}), \
+                patch.object(collector, "send_email_message", return_value=(True, "sent")) as send:
+            self.assertFalse(collector.notify_transition(first, previous, failed(3)))
+            self.assertFalse(collector.notify_transition(second, previous, failed(4)))
+            # All deduplication state is on disk, so a restart preserves it.
+            self.assertFalse(collector.notify_transition(first, previous, failed(5)))
+            self.assertEqual(send.call_count, 2)
+            new_incident = dict(previous, failure_started_at="2026-09-30T22:00:00Z")
+            collector.notify_transition(first, None, dict(failed(6), **new_incident))
+            self.assertEqual(send.call_count, 3)
+
+    def test_failed_email_is_retried_until_smtp_accepts(self):
+        with patch.object(collector, "send_email_message", side_effect=[(False, "failed"), (True, "sent")]) as send:
+            self.assertFalse(collector.send_waha_failure_email("failure", "attempt 1", "offline", "incident-one")[0])
+            self.assertTrue(collector.send_waha_failure_email("failure", "attempt 2", "offline", "incident-one")[0])
+            self.assertTrue(collector.send_waha_failure_email("failure", "attempt 3", "offline", "incident-one")[0])
+            self.assertEqual(send.call_count, 2)
+
     def test_smtp_fallback_uses_starttls_without_persisting_credentials(self):
         class FakeSmtp:
             instance = None
@@ -825,6 +852,27 @@ class CollectionSchedulingTests(unittest.TestCase):
         self.assertEqual(latest["account_name"], "new")
         self.assertEqual(latest["metrics"]["claude"]["five_hour"]["remaining_pct"], 0)
         self.assertLess(collector.CODEX_STATUS_INPUTS[-1][0], collector.COLLECTION_TIMEOUT_BUDGET)
+
+    def test_antigravity_refill_is_confirmed_after_closing_modal(self):
+        panel = "Account: demo\nGEMINI MODELS\nWeekly Limit Remaining\n79% remaining\nFive Hour Limit Remaining\n{pct}% remaining\nCLAUDE AND GPT MODELS\nWeekly Limit Remaining\n100% remaining\nFive Hour Limit Remaining\n100% remaining\n"
+        previous = parse_antigravity_usage(panel.format(pct=58))
+        def fake_pty(command, env, inputs, **kwargs):
+            commands = [item[1] for item in inputs]
+            self.assertEqual(commands[:3], ["/usage\r", "\x1b", "/usage\r"])
+            complete = kwargs["complete"]
+            first, second = panel.format(pct=96), panel.format(pct=95)
+            complete.begin_request(0)
+            self.assertFalse(complete(first))
+            self.assertFalse(complete(first), "a redraw cannot confirm a refill")
+            complete.begin_request(len(first))
+            self.assertTrue(complete(first + second))
+            return first + second
+        with patch.object(collector, "cli_executable", return_value="agy"), \
+                patch.object(collector, "profile_environment", return_value={}), \
+                patch.object(collector, "profile_workdir", return_value=Path(".")), \
+                patch.object(collector, "pty_command", fake_pty):
+            snapshot = collector.collect_profile({"id": "agy-test", "provider": "antigravity"}, previous=previous)
+        self.assertEqual(snapshot["metrics"]["gemini"]["five_hour"]["remaining_pct"], 95)
 
     def test_collect_all_runs_profiles_in_parallel(self):
         profiles = [{"id": f"codex-{index}", "provider": "codex"} for index in range(3)]

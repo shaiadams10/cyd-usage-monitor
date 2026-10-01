@@ -710,11 +710,21 @@ report the interruption duration and distinguish a later successful poll from
 an actual reconnect or credential change.
 
 Failed WAHA sends remain pending and are retried on later failed collections.
+Fallback email is deduplicated by account and outage start time, so changing
+failure counts, diagnostic captures, or retries from another account cannot
+send another email for the same incident. A new outage can send a new email.
 If the failure notification was never delivered, the collector suppresses the
 otherwise confusing recovery message. A red **WAHA delivery failing** status
 on the Overview means routing is configured but the WAHA session or endpoint
 is unavailable. Restore the session in WAHA (scan its QR code when the session
 reports `SCAN_QR_CODE`), then use **Alerts → Send test alert** to verify delivery.
+This status means WhatsApp pairing is required; restarting the monitor cannot
+complete it. On your phone, use **WhatsApp → Linked devices → Link a device**
+and scan the current QR in the WAHA dashboard for the configured session.
+
+Antigravity confirmation closes its scrollable `/usage` modal before requesting
+another panel. This lets real quota refills be independently confirmed rather
+than repeatedly rejecting them against an older snapshot.
 
 For an independent fallback, open **Alerts → Email integration** and choose
 **Gmail / Google Workspace** or **Custom TLS SMTP**. Gmail preconfigures

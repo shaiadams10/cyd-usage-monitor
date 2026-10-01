@@ -19,9 +19,9 @@ Public CYD source and supporting documentation only.
 | `cyd-usage-monitor/.env.example` | CYD .env.example | 2026-09-30 |
 | `cyd-usage-monitor/.gitignore` | CYD .gitignore | 2026-09-30 |
 | `cyd-usage-monitor/AGENTS.md` | CYD AGENTS.md | 2026-09-30 |
-| `cyd-usage-monitor/CHANGELOG.md` | CYD CHANGELOG.md | 2026-09-30 |
+| `cyd-usage-monitor/CHANGELOG.md` | Project history including notification deduplication and Antigravity modal recovery | 2026-09-30 |
 | `cyd-usage-monitor/Dockerfile` | CYD Dockerfile | 2026-09-30 |
-| `cyd-usage-monitor/README.md` | CYD README.md | 2026-09-30 |
+| `cyd-usage-monitor/README.md` | Operator guide including incident email deduplication and WAHA QR recovery | 2026-09-30 |
 | `cyd-usage-monitor/diagram.json` | CYD diagram.json | 2026-09-30 |
 | `cyd-usage-monitor/docker-compose.yml` | CYD docker-compose.yml | 2026-09-30 |
 | `cyd-usage-monitor/include/lv_conf.h` | CYD include/lv_conf.h | 2026-09-30 |
@@ -41,7 +41,7 @@ Public CYD source and supporting documentation only.
 | `cyd-usage-monitor/scripts/test_stream_deck_security.py` | CYD scripts/test_stream_deck_security.py | 2026-09-30 |
 | `cyd-usage-monitor/scripts/watch-antigravity-messages.py` | CYD scripts/watch-antigravity-messages.py | 2026-09-30 |
 | `cyd-usage-monitor/server/__init__.py` | CYD server/__init__.py | 2026-09-30 |
-| `cyd-usage-monitor/server/collector.py` | CYD server/collector.py | 2026-09-30 |
+| `cyd-usage-monitor/server/collector.py` | CLI collector with modal-aware confirmation and durable incident email deduplication | 2026-09-30 |
 | `cyd-usage-monitor/server/dashboard.html` | CYD server/dashboard.html | 2026-09-30 |
 | `cyd-usage-monitor/server/server.py` | CYD server/server.py | 2026-09-30 |
 | `cyd-usage-monitor/server/static/apple-touch-icon.png` | Dashboard artwork or shared LVGL browser asset | 2026-09-30 |
@@ -69,7 +69,7 @@ Public CYD source and supporting documentation only.
 | `cyd-usage-monitor/server/static/lvgl/cyd_lvgl.js` | Dashboard artwork or shared LVGL browser asset | 2026-09-30 |
 | `cyd-usage-monitor/server/static/lvgl/cyd_lvgl.wasm` | Dashboard artwork or shared LVGL browser asset | 2026-09-30 |
 | `cyd-usage-monitor/server/storage.py` | CYD server/storage.py | 2026-09-30 |
-| `cyd-usage-monitor/server/test_collector.py` | CYD server/test_collector.py | 2026-09-30 |
+| `cyd-usage-monitor/server/test_collector.py` | Collector regressions for interleaved incidents, SMTP retries and Antigravity refills | 2026-09-30 |
 | `cyd-usage-monitor/server/test_server.py` | CYD server/test_server.py | 2026-09-30 |
 | `cyd-usage-monitor/server/test_storage.py` | CYD server/test_storage.py | 2026-09-30 |
 | `cyd-usage-monitor/simulator/build-wasm.ps1` | CYD simulator/build-wasm.ps1 | 2026-09-30 |
@@ -80,8 +80,8 @@ Public CYD source and supporting documentation only.
 | `cyd-usage-monitor/src/mascot_img.h` | CYD src/mascot_img.h | 2026-09-30 |
 | `cyd-usage-monitor/src/ui_motion.h` | CYD src/ui_motion.h | 2026-09-30 |
 | `cyd-usage-monitor/wokwi.toml` | CYD wokwi.toml | 2026-09-30 |
-| `docs/context.md` | Public CYD project context and source map | 2026-09-30 |
+| `docs/context.md` | Current CYD state, recent changes, validation and deployment results | 2026-09-30 |
 | `docs/images/cyd-usage-monitor-dashboard.png` | Illustrative dashboard screenshot with sample accounts | 2026-09-30 |
-| `docs/map.md` | Public CYD project context and source map | 2026-09-30 |
+| `docs/map.md` | Public CYD source manifest and file purposes | 2026-09-30 |
 
 | `docs/images/cyd-usage-monitor-hero.png` | User-provided promotional illustration of Codex and Antigravity CYD screens with example accounts | 2026-09-30 |
