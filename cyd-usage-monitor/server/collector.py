@@ -409,6 +409,14 @@ def pty_command(
         while time.monotonic() < deadline:
             elapsed = time.monotonic() - started
             while next_input < len(inputs) and elapsed >= inputs[next_input][0]:
+                pending_input = inputs[next_input][1]
+                decoded = transcript.decode("utf-8", errors="replace")
+                if complete and hasattr(complete, "allow_input") and not complete.allow_input(pending_input, decoded):
+                    # Escape on Antigravity's sign-in screen logs out and deletes
+                    # the saved session. A startup/network failure must not turn
+                    # a harmless quota retry into a credential removal.
+                    next_input += 1
+                    continue
                 if complete and hasattr(complete, "begin_request") and inputs[next_input][1].startswith("/"):
                     complete.begin_request(len(transcript.decode("utf-8", errors="replace")))
                 os.write(master, inputs[next_input][1].encode("utf-8"))
@@ -662,6 +670,19 @@ class PanelConfirmation:
         self.request_start = offset
         self.request_sequence += 1
         self.accepted = False
+
+    def allow_input(self, value: str, transcript: str) -> bool:
+        """Close only a quota modal rendered by the current request."""
+        if value != "\x1b":
+            return True
+        current = transcript[self.request_start:]
+        if re.search(r"currently not signed in|Select login method|authorization code", strip_terminal(current), re.I):
+            return False
+        try:
+            self.parser(current)
+        except (ValueError, KeyError, IndexError, AttributeError):
+            return False
+        return True
 
     @staticmethod
     def panel_count(text: str) -> int:

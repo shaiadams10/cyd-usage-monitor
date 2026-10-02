@@ -702,6 +702,12 @@ WAHA API key. Set `CYD_MONITOR_TIMEZONE` to an IANA timezone such as
 5-hour and weekly limits), container system time, and alert timestamps use
 local time; it defaults to UTC.
 
+Antigravity quota retries send Escape only after the current request has rendered
+a complete quota panel. Escape on the CLI sign-in screen logs out and removes
+the saved session, so startup or network failures must never receive this key.
+If a previous collector already removed the session, reconnect the existing
+profile through Accounts after updating the collector.
+
 Failure alerts use WhatsApp formatting and include the first detection time,
 the number of consecutive failed collections,
 observed parser/CLI symptom, privacy-safe capture counts, a diagnostic ID, the

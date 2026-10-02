@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-02 — Preserve Antigravity sessions during quota retries
+
+- Guard Escape retries with a complete quota panel from the current request;
+  never send Escape to an authentication screen, where the CLI logs out and
+  deletes the saved session. A transient startup/network failure now remains
+  a collection failure without the collector removing credentials.
+- Add regressions for empty/partial panels, sign-in after a prior panel,
+  independent request boundaries, and the actual PTY input loop.
+
+
 ## 2026-09-30 — Stop repeated fallback emails and confirm Antigravity refills
 
 - Deduplicate accepted fallback emails by account and outage start time in a

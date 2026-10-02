@@ -8,6 +8,21 @@ shared LVGL WebAssembly preview and optional Windows account-switching helpers.
 
 ## Recent Changes
 
+### 2026-10-02 — Antigravity Retry Logout Guard
+- Traced repeated disconnection to a transient user-info TLS timeout followed
+  by the collector sending Escape on the CLI sign-in screen. CLI logs then
+  recorded logout; the saved session disappeared despite a valid token.
+- Guard Escape with a complete quota panel from the current request, preserving
+  modal confirmation without sending destructive keys during authentication.
+- Passed 77 server tests, a deployed Linux PTY sign-in/no-Escape regression,
+  and authenticated dashboard/device API plus unauthorized rejection checks.
+- Preserved remote source and rollback image; deployed only the collector.
+  Existing removed sessions require the official dashboard reconnect flow.
+- Publication checks: 77 server tests, Gitleaks public-tree scan, added-text
+  privacy review, whitespace checks and Brain validation passed.
+- Files: cyd-usage-monitor/{server/collector.py,server/test_collector.py,
+  README.md,CHANGELOG.md}, docs/{context.md,map.md}.
+
 ### 2026-09-30 — CYD Notification Flood and Antigravity Modal Recovery
 - Fixed fallback email deduplication to use account/outage identity rather than
   changing retry text; retain a bounded durable history across interleaved profiles.

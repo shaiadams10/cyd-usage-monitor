@@ -4,7 +4,7 @@ import tempfile
 import unittest
 import datetime as dt
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 try:
     from . import collector
@@ -873,6 +873,30 @@ class CollectionSchedulingTests(unittest.TestCase):
                 patch.object(collector, "pty_command", fake_pty):
             snapshot = collector.collect_profile({"id": "agy-test", "provider": "antigravity"}, previous=previous)
         self.assertEqual(snapshot["metrics"]["gemini"]["five_hour"]["remaining_pct"], 95)
+
+    def test_antigravity_escape_requires_current_complete_quota_panel(self):
+        panel = "Account: demo\nGEMINI MODELS\nWeekly Limit Remaining\n79% remaining\nFive Hour Limit Remaining\n58% remaining\nCLAUDE AND GPT MODELS\nWeekly Limit Remaining\n100% remaining\nFive Hour Limit Remaining\n100% remaining\n"
+        check = collector.PanelConfirmation(parse_antigravity_usage, None)
+        self.assertFalse(check.allow_input("\x1b", ""))
+        self.assertFalse(check.allow_input("\x1b", "Account: demo\nGEMINI MODELS\n"))
+        self.assertTrue(check.allow_input("\x1b", panel))
+        self.assertFalse(check.allow_input("\x1b", panel + "Select login method:"))
+        check.begin_request(len(panel))
+        self.assertFalse(check.allow_input("\x1b", panel + "You are currently not signed in."))
+        self.assertTrue(check.allow_input("\x1b", panel + panel))
+
+    def test_pty_retry_never_sends_escape_to_antigravity_signin(self):
+        check = collector.PanelConfirmation(parse_antigravity_usage, None)
+        process = Mock()
+        process.poll.return_value = 0
+        with patch.object(collector, "open_terminal", return_value=(10, 11)), \
+                patch.object(collector.subprocess, "Popen", return_value=process), \
+                patch.object(collector.time, "monotonic", side_effect=[0, 0, .1, .2, .3, .4]), \
+                patch.object(collector.select, "select", return_value=([10], [], [])), \
+                patch.object(collector.os, "read", side_effect=[b"You are currently not signed in. Select login method:", OSError()]), \
+                patch.object(collector.os, "close"), patch.object(collector.os, "write") as write:
+            collector.pty_command(["agy"], {}, [(0, "/usage\r", "usage"), (.3, "\x1b", "close")], complete=check)
+        write.assert_called_once_with(10, b"/usage\r")
 
     def test_collect_all_runs_profiles_in_parallel(self):
         profiles = [{"id": f"codex-{index}", "provider": "codex"} for index in range(3)]
