@@ -88,6 +88,13 @@ int main(void) {
     assert(lv_bar_get_value(lv_obj_get_child(c5, 2)) == 400);
     assert(lv_bar_get_value(lv_obj_get_child(gw, 2)) == 650);
     assert(lv_bar_get_value(lv_obj_get_child(cw, 2)) == 200);
+    cyd_set_antigravity("Demo AG", "N/A", "Not reported by CLI", "N/A", "Not reported by CLI", "78%", "Refresh in 2h", "100%", "Quota available");
+    assert(strcmp(lv_label_get_text(lv_obj_get_child(g5, 1)), "N/A") == 0);
+    assert(lv_bar_get_value(lv_obj_get_child(g5, 2)) == 0);
+    assert(lv_obj_get_style_text_color(lv_obj_get_child(g5, 1), 0).full == lv_color_hex(0x8A929C).full);
+    advance(1100);
+    assert(lv_bar_get_value(lv_obj_get_child(c5, 2)) == 780);
+    assert(lv_bar_get_value(lv_obj_get_child(cw, 2)) == 1000);
     cyd_set_error("Demo AG", "Unavailable"); advance(1100);
     assert(!lv_obj_has_flag(error_card, LV_OBJ_FLAG_HIDDEN));
 

@@ -42,6 +42,19 @@ redirects writes there into a package cache invisible to ordinary startup tasks
 and other desktop apps. Use the per-user `CYD Antigravity Messages` scheduled
 task for logon/recovery and keep debug history bounded and metadata-only.
 
+## Collector diagnostics
+
+Use `server/diagnostics.py` for private, bounded collection events. Keep raw
+terminal captures host-only; timeline/API/console records must use credential-safe
+fields and hashed account references. Preserve first evidence for retained
+incidents and never prune open outages to make room for recovered incidents.
+The collector supports `--healthcheck`; listener health alone is insufficient.
+CLI executables are read-only file bind mounts. Stage and checksum-verify
+official updates, preserve the prior binary, and recreate the collector after
+replacing a host binary so it receives the new inode. Verify `/usage` before
+and after an Antigravity update; missing groups can indicate an outdated client.
+The collected banner version is retained in private diagnostic events.
+
 ## Shared UI motion
 
 `src/ui_motion.h` is the C-compatible motion implementation for firmware and

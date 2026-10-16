@@ -19,9 +19,11 @@ import smtplib
 import ssl
 import subprocess
 import struct
+import sys
 import threading
 import time
 import uuid
+import collections
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Callable
@@ -31,8 +33,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     from .storage import data_lock, read_json, read_json_unlocked, update_json, write_json, write_json_unlocked
+    from .diagnostics import redact, record_event, failure_category, exception_frames
 except ImportError:  # Docker runs this file as a top-level script.
     from storage import data_lock, read_json, read_json_unlocked, update_json, write_json, write_json_unlocked
+    from diagnostics import redact, record_event, failure_category, exception_frames
 
 try:
     import pty
@@ -203,6 +207,9 @@ def collect_openrouter() -> dict | None:
     key = config.get("key") if isinstance(config, dict) else None
     if not isinstance(key, str) or not key:
         return None
+    started = time.monotonic()
+    profile = {"provider": "openrouter"}
+    attempt_id = record_event(DATA_DIR, "collection_started", profile=profile, outcome="running")
     try:
         credits = openrouter_json("/credits", key)
         keys: list[dict] = []
@@ -224,6 +231,8 @@ def collect_openrouter() -> dict | None:
             "error": str(error), "collected_at": utcnow(), "source": "OpenRouter API",
         }
     write_json(OPENROUTER_STATE_FILE, snapshot)
+    record_event(DATA_DIR, "collection_finished", profile=profile, outcome=snapshot["status"], attempt_id=attempt_id,
+                 duration_ms=round((time.monotonic() - started) * 1000), error=snapshot.get("error", ""))
     return snapshot
 
 
@@ -324,6 +333,11 @@ def parse_antigravity_usage(raw: str) -> dict:
     for key, pattern in groups.items():
         match = re.search(pattern, text, re.I | re.S)
         if not match:
+            # A finished /usage modal can legitimately omit an entire model
+            # group. Never accept a truncated modal or invent a quota for it.
+            if re.search(r"Within each group|esc\s+Close", text, re.I):
+                metrics[key] = {"available": False, "reason": "Not reported by CLI"}
+                continue
             raise ValueError(f"Antigravity /usage did not contain the {key} quota group")
         body = match.group("body")
         group_metrics = {}
@@ -365,7 +379,11 @@ def parse_antigravity_usage(raw: str) -> dict:
                 reset_text = "Reset time unavailable"
             group_metrics[name] = {"remaining_pct": percentage(value.group(1)), "reset": reset_text}
         metrics[key] = group_metrics
-    return {"provider": "antigravity", "account_name": account.group(1).strip(), "plan_type": "Antigravity", "metrics": metrics, "credits": "None"}
+    missing = [key for key, group in metrics.items() if group.get("available") is False]
+    if len(missing) == len(groups):
+        raise ValueError("Antigravity /usage did not contain any quota group")
+    return {"provider": "antigravity", "account_name": account.group(1).strip(), "plan_type": "Antigravity",
+            "metrics": metrics, "credits": "None", "missing_groups": missing}
 
 
 def open_terminal() -> tuple[int, int]:
@@ -390,6 +408,21 @@ def matching_pty_responses(
     return matches
 
 
+def cli_version_from_transcript(text: str) -> str:
+    versions = re.findall(
+        r"(?:Antigravity CLI|OpenAI Codex)\s*\(?v?(\d{1,4}\.\d{1,4}\.\d{1,4}(?:[-+][A-Za-z0-9.-]{1,40})?)\b",
+        strip_terminal(text),
+    )
+    return versions[-1] if versions else ""
+
+
+class TerminalCapture(str):
+    def __new__(cls, text: str, facts: dict):
+        obj = super().__new__(cls, text)
+        obj.facts = facts
+        return obj
+
+
 def pty_command(
     command: list[str], env: dict[str, str], inputs: list[tuple[float, str, str]], timeout: float = 20.0,
     cwd: str | None = None, complete: Callable[[str], bool] | None = None,
@@ -398,13 +431,21 @@ def pty_command(
 ) -> str:
     """Run a TUI command, stream meaningful progress, and stop once a panel is complete."""
     master, slave = open_terminal()
-    process = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, env=env, cwd=cwd, close_fds=True)
+    try:
+        process = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, env=env, cwd=cwd, close_fds=True)
+    except Exception:
+        os.close(master)
+        os.close(slave)
+        raise
     os.close(slave)
     transcript = bytearray()
     deadline = time.monotonic() + timeout
     next_input = 0
     handled_responders: set[int] = set()
     started = time.monotonic()
+    stop_reason = "timeout"
+    requests_sent = 0
+    exit_code = None
     try:
         while time.monotonic() < deadline:
             elapsed = time.monotonic() - started
@@ -420,6 +461,8 @@ def pty_command(
                 if complete and hasattr(complete, "begin_request") and inputs[next_input][1].startswith("/"):
                     complete.begin_request(len(transcript.decode("utf-8", errors="replace")))
                 os.write(master, inputs[next_input][1].encode("utf-8"))
+                if pending_input.startswith("/"):
+                    requests_sent += 1
                 if progress:
                     progress(inputs[next_input][2])
                 next_input += 1
@@ -428,22 +471,30 @@ def pty_command(
                 try:
                     data = os.read(master, 65536)
                 except OSError:
+                    stop_reason = "read_closed"
                     break
                 if not data:
+                    stop_reason = "read_closed"
                     break
                 transcript.extend(data)
+                if len(transcript) > 1024 * 1024:
+                    stop_reason = "capture_limit"
+                    break
                 decoded = transcript.decode("utf-8", errors="replace")
                 for response, message in matching_pty_responses(decoded, responders or [], handled_responders):
                     os.write(master, response.encode("utf-8"))
                     if progress:
                         progress(message)
                 if complete and complete(decoded):
+                    stop_reason = "complete"
                     if progress:
                         progress("Quota panel is complete. Parsing the normalized values now.")
                     break
             if process.poll() is not None and not readable:
+                stop_reason = "cli_exited"
                 break
     finally:
+        exit_code = process.poll()  # Do not confuse our intentional terminate with a CLI crash.
         if process.poll() is None:
             process.terminate()
             try:
@@ -452,13 +503,19 @@ def pty_command(
                 process.kill()
                 process.wait(timeout=2)
         os.close(master)
-    return transcript.decode("utf-8", errors="replace")
+    decoded = transcript.decode("utf-8", errors="replace")
+    return TerminalCapture(decoded, {
+        "stop_reason": stop_reason, "duration_ms": round((time.monotonic() - started) * 1000),
+        "requests_sent": requests_sent, "exit_code": exit_code, "capture_chars": len(transcript),
+        "cli_version": cli_version_from_transcript(decoded),
+    })
 
 
 class CollectionError(RuntimeError):
-    def __init__(self, message: str, transcript: str):
+    def __init__(self, message: str, transcript: str, capture: dict | None = None):
         super().__init__(message)
         self.transcript = transcript
+        self.capture = capture or {}
 
 
 def collection_diagnostics(error: Exception) -> dict:
@@ -471,17 +528,18 @@ def collection_diagnostics(error: Exception) -> dict:
     ), "")
     # A provider error line is useful, but URLs, email addresses, and long
     # opaque values are never copied into telemetry, alerts, or the browser.
-    provider_error = re.sub(r"https?://\S+", "[url redacted]", provider_error)
-    provider_error = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[account redacted]", provider_error)
-    provider_error = re.sub(r"\b[A-Za-z0-9_-]{24,}\b", "[value redacted]", provider_error)
+    provider_error = redact(provider_error, 240)
     return {
         "capture_chars": len(transcript),
         "nonempty_lines": len(lines),
         "account_field_seen": bool(re.search(r"^\s*Account:\s*\S", transcript, re.MULTILINE | re.I)),
         "gemini_group_seen": bool(re.search(r"GEMINI MODELS", transcript, re.I)),
         "claude_group_seen": bool(re.search(r"CLAUDE AND GPT MODELS", transcript, re.I)),
-        "authentication_prompt_seen": bool(re.search(r"sign.?in|log.?in|authenticate|authorization", transcript, re.I)),
+        "authentication_prompt_seen": failure_category(str(error), transcript) == "authentication",
         "provider_error_hint": provider_error[:240],
+        "category": failure_category(str(error), transcript), "error_type": type(error).__name__,
+        "frames": exception_frames(error),
+        "capture": error.capture if isinstance(error, CollectionError) else {},
     }
 
 
@@ -491,9 +549,7 @@ def archive_failure_evidence(profile: dict, error: Exception, diagnostics: dict)
         return ""
     evidence_id = uuid.uuid4().hex[:12]
     transcript = clean_terminal_transcript(error.transcript)
-    transcript = re.sub(r"https?://\S+", "[url redacted]", transcript)
-    transcript = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[account redacted]", transcript)
-    transcript = re.sub(r"\b[A-Za-z0-9_-]{24,}\b", "[value redacted]", transcript)
+    transcript = redact(transcript, 32000)
     DEBUG_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(DEBUG_EVIDENCE_DIR, 0o700)
@@ -501,7 +557,7 @@ def archive_failure_evidence(profile: dict, error: Exception, diagnostics: dict)
         pass
     write_json(DEBUG_EVIDENCE_DIR / f"{evidence_id}.json", {
         "evidence_id": evidence_id, "captured_at": utcnow(), "profile_id": profile["id"],
-        "provider": profile["provider"], "error": str(error), "diagnostics": diagnostics,
+        "provider": profile["provider"], "error": redact(error), "diagnostics": diagnostics,
         "redacted_transcript": transcript,
     })
     def modified_at(path: Path) -> float:
@@ -511,7 +567,16 @@ def archive_failure_evidence(profile: dict, error: Exception, diagnostics: dict)
             return 0.0
 
     evidence_files = sorted(DEBUG_EVIDENCE_DIR.glob("*.json"), key=modified_at, reverse=True)
-    for expired in evidence_files[INCIDENT_HISTORY_LIMIT:]:
+    # Keep the beginning of every open outage as well as its newest evidence.
+    incidents = read_json(INCIDENTS_FILE, {}).get("incidents", [])
+    pinned = {evidence_id}
+    for incident in incidents:
+        pinned.update(filter(None, (incident.get("first_evidence_id"),
+                                   incident.get("diagnostics", {}).get("evidence_id"))))
+    keep = {path.stem for path in evidence_files[:200]} | pinned
+    for expired in evidence_files:
+        if expired.stem in keep:
+            continue
         try:
             expired.unlink()
         except OSError:
@@ -752,7 +817,9 @@ def collect_profile(profile: dict, include_transcript: bool = False, progress: C
         # A complete panel must be corroborated by another /status request;
         # later retries cover startup corrections and slow providers.
         raw = pty_command(
-            [executable, "--no-alt-screen", "--sandbox", "read-only", "--ask-for-approval", "never"], env,
+            [executable, "--no-alt-screen", "--sandbox", "read-only", "--ask-for-approval", "never",
+             "-c", "disable_paste_burst=true", "-c", "features.apps=false",
+             "-c", "check_for_update_on_startup=false"], env,
             CODEX_STATUS_INPUTS,
             timeout=COLLECTION_TIMEOUT_BUDGET, cwd=str(profile_workdir(profile)),
             complete=(confirmation := PanelConfirmation(parse_codex_status, previous, progress, require_repeat=True)), progress=progress,
@@ -765,10 +832,11 @@ def collect_profile(profile: dict, include_transcript: bool = False, progress: C
         try:
             parsed = parse_codex_status(raw)
         except Exception as error:
-            raise CollectionError(str(error), clean_terminal_transcript(raw)) from error
+            raise CollectionError(str(error), clean_terminal_transcript(raw), getattr(raw, "facts", {})) from error
     else:
-        # /usage is a scrollable panel. Retry, then stop as soon as all four
-        # provider quota fields parse rather than using a blind timeout.
+        # /usage is a scrollable panel. Retry until its reported quota groups
+        # parse rather than using a blind timeout. An omitted group can also
+        # indicate an outdated CLI, not just an account entitlement change.
         raw = pty_command(
             [executable], env,
             ANTIGRAVITY_USAGE_INPUTS,
@@ -778,22 +846,26 @@ def collect_profile(profile: dict, include_transcript: bool = False, progress: C
         try:
             parsed = parse_antigravity_usage(raw)
         except Exception as error:
-            raise CollectionError(str(error), clean_terminal_transcript(raw)) from error
+            raise CollectionError(str(error), clean_terminal_transcript(raw), getattr(raw, "facts", {})) from error
     if confirmation.suspect is not None:
         # The capture ended without independent confirmation. Report it instead
         # of publishing uncertain values; previous confirmed data is labelled.
         raise CollectionError(
-            f"{provider.title()} quota did not stabilize across separate CLI requests (" + ", ".join(confirmation.drops)
-            + "); the previous reading was kept", clean_terminal_transcript(raw),
+            (f"{provider.title()} quota did not stabilize across separate CLI requests (" + ", ".join(confirmation.drops) + ")"
+             if confirmation.drops else f"{provider.title()} quota confirmation incomplete: no two matching independent readings")
+            + "; the previous reading was kept", clean_terminal_transcript(raw), getattr(raw, "facts", {}),
         )
     if provider == "codex" and not confirmation.accepted:
-        raise CollectionError("Codex quota needs two matching /status requests; the previous reading was kept", clean_terminal_transcript(raw))
+        raise CollectionError("Codex quota needs two matching /status requests; the previous reading was kept", clean_terminal_transcript(raw), getattr(raw, "facts", {}))
+    parsed["capture"] = dict(getattr(raw, "facts", {}), confirmation_requests=confirmation.request_sequence)
     parsed.update({"profile_id": profile["id"], "label": profile.get("label", ""), "status": "ok", "collected_at": utcnow(), "source": f"{provider} CLI"})
     return (parsed, clean_terminal_transcript(raw)) if include_transcript else parsed
 
 
 def error_snapshot(profile: dict, error: Exception) -> dict:
     diagnostics = collection_diagnostics(error)
+    if profile.get("provider") == "antigravity":
+        diagnostics["native_error_hint"] = native_error_hint(profile)
     try:
         diagnostics["evidence_id"] = archive_failure_evidence(profile, error, diagnostics)
     except (OSError, ValueError, TypeError) as storage_error:
@@ -803,7 +875,7 @@ def error_snapshot(profile: dict, error: Exception) -> dict:
     return {
         "profile_id": profile["id"], "label": profile.get("label", ""), "provider": profile["provider"],
         "account_name": account_name,
-        "status": "error", "error": str(error), "diagnostics": diagnostics,
+        "status": "error", "error": redact(error), "diagnostics": diagnostics,
         "collected_at": utcnow(), "source": "CLI collector",
     }
 
@@ -989,24 +1061,27 @@ def record_incident(profile: dict, previous: dict | None, snapshot: dict) -> Non
 
     def update(history: dict) -> None:
         incidents = history.setdefault("incidents", [])
-        if is_error and not was_error:
+        active = next((item for item in reversed(incidents) if item.get("profile_id") == profile["id"] and item.get("status") == "open"), None)
+        if is_error and active is None:
             incidents.append({
                 "id": str(uuid.uuid4()), "profile_id": profile["id"], "provider": profile["provider"],
                 "account": snapshot.get("account_name") or profile.get("label") or f"{profile['provider'].title()} account",
-                "status": "open", "started_at": snapshot.get("collected_at"), "last_failure_at": snapshot.get("collected_at"),
-                "failed_polls": 1, "error": snapshot.get("error", "Unknown collector error"),
+                "status": "open", "started_at": snapshot.get("failure_started_at") or snapshot.get("collected_at"), "last_failure_at": snapshot.get("collected_at"),
+                "failed_polls": snapshot.get("consecutive_failures", 1), "error": snapshot.get("error", "Unknown collector error"),
                 "explanation": failure_explanation(profile, snapshot), "diagnostics": snapshot.get("diagnostics", {}),
+                "first_diagnostics": snapshot.get("diagnostics", {}),
+                "first_evidence_id": snapshot.get("diagnostics", {}).get("evidence_id", ""),
             })
-        elif is_error and was_error:
-            active = next((item for item in reversed(incidents) if item.get("profile_id") == profile["id"] and item.get("status") == "open"), None)
+        elif is_error:
             if active:
+                active.setdefault("first_diagnostics", active.get("diagnostics", {}))
+                active.setdefault("first_evidence_id", active.get("diagnostics", {}).get("evidence_id", ""))
                 active["last_failure_at"] = snapshot.get("collected_at")
                 active["failed_polls"] = int(active.get("failed_polls", 1)) + 1
                 active["error"] = snapshot.get("error", active.get("error"))
                 active["explanation"] = failure_explanation(profile, snapshot)
                 active["diagnostics"] = snapshot.get("diagnostics", {})
-        elif not is_error and was_error:
-            active = next((item for item in reversed(incidents) if item.get("profile_id") == profile["id"] and item.get("status") == "open"), None)
+        elif not is_error:
             if active:
                 active["status"] = "recovered"
                 active["recovered_at"] = snapshot.get("collected_at")
@@ -1015,7 +1090,9 @@ def record_incident(profile: dict, previous: dict | None, snapshot: dict) -> Non
                     - dt.datetime.fromisoformat(active["started_at"].replace("Z", "+00:00"))
                 ).total_seconds()))
                 active["resolution"] = "A later scheduled poll read a complete CLI quota panel; no credentials or profile settings were changed."
-        history["incidents"] = incidents[-INCIDENT_HISTORY_LIMIT:]
+        recovered = [item for item in incidents if item.get("status") != "open"][-INCIDENT_HISTORY_LIMIT:]
+        history["incidents"] = sorted(recovered + [item for item in incidents if item.get("status") == "open"],
+                                      key=lambda item: item.get("started_at", ""))
         history["updated_at"] = utcnow()
 
     if is_error or was_error:
@@ -1219,12 +1296,79 @@ def persist_snapshot(profile: dict, snapshot: dict, interval_seconds: int | None
 def collect_and_persist(profile: dict, interval_seconds: int | None = None) -> dict:
     """Collect one profile under its own lock and store the normalized result."""
     with profile_lock(profile["id"]):
+        started = time.monotonic()
+        attempt_id = record_event(DATA_DIR, "collection_started", profile=profile, outcome="running")
         try:
             snapshot = collect_profile(profile)
         except Exception as error:
             snapshot = error_snapshot(profile, error)
-        persist_snapshot(profile, snapshot, interval_seconds)
+        snapshot["attempt_id"] = attempt_id
+        try:
+            persisted = persist_snapshot(profile, snapshot, interval_seconds)
+        except Exception as error:
+            record_event(DATA_DIR, "snapshot_write_failed", profile=profile, outcome="error", attempt_id=attempt_id,
+                         category="storage", error_type=type(error).__name__, frames=exception_frames(error))
+            return snapshot
+        log_collection_result(profile, snapshot, attempt_id, started, persisted)
         return snapshot
+
+
+def log_collection_result(profile: dict, snapshot: dict, attempt_id: str, started: float, persisted: bool) -> None:
+    facts = snapshot.get("diagnostics", {})
+    record_event(DATA_DIR, "collection_finished", profile=profile,
+                 outcome=("partial" if snapshot.get("missing_groups") else snapshot.get("status", "error")) if persisted else "removed",
+                 attempt_id=attempt_id, duration_ms=round((time.monotonic() - started) * 1000),
+                 category=facts.get("category", ""), error=snapshot.get("error", ""),
+                 error_type=facts.get("error_type", ""), frames=facts.get("frames", []),
+                 capture=facts.get("capture") or snapshot.get("capture", {}),
+                 consecutive_failures=snapshot.get("consecutive_failures", 0),
+                 evidence_id=facts.get("evidence_id", ""), missing_groups=snapshot.get("missing_groups", []),
+                 native_error_hint=facts.get("native_error_hint", ""))
+
+
+def native_error_hint(profile: dict) -> str:
+    path = PROFILE_ROOT / profile["id"] / "home" / ".gemini" / "antigravity-cli" / "cli.log"
+    try:
+        # Never correlate an old CLI run with a new failure.
+        if time.time() - path.stat().st_mtime > 120:
+            return ""
+        with path.open("rb") as handle:
+            handle.seek(max(0, path.stat().st_size - 65536))
+            lines = handle.read(65536).decode("utf-8", "replace").splitlines()
+        errors = [line for line in lines if re.search(r"\bE\d{4}\b", line)]
+        return redact(errors[-1], 300) if errors else ""
+    except OSError:
+        return ""
+
+
+def maintain_cli_logs(profiles: list[dict]) -> None:
+    """Prune only recognized dated Antigravity logs; preserve the active log."""
+    removed = 0
+    for profile in profiles:
+        if profile.get("provider") != "antigravity" or not re.fullmatch(r"antigravity-[0-9a-f]{10}", str(profile.get("id", ""))):
+            continue
+        directory = PROFILE_ROOT / profile["id"] / "home" / ".gemini" / "antigravity-cli"
+        try:
+            active = directory / "cli.log"
+            active_inode = active.stat().st_ino if active.exists() else None
+            directories = [directory]
+            if not (directory / "log").is_symlink():
+                directories.append(directory / "log")
+            allowed_parents = {folder.resolve() for folder in directories}
+            files = sorted((path for folder in directories for path in folder.glob("cli-*.log")
+                            if re.fullmatch(r"cli-\d{8}_\d{6}\.log", path.name) and not path.is_symlink()
+                            and path.resolve().parent in allowed_parents), key=lambda path: path.stat().st_mtime, reverse=True)
+            for index, path in enumerate(files):
+                stat = path.stat()
+                if stat.st_ino == active_inode or time.time() - stat.st_mtime < 300:
+                    continue
+                if index >= 200 or time.time() - stat.st_mtime > 7 * 86400:
+                    path.unlink()
+                    removed += 1
+        except OSError as error:
+            record_event(DATA_DIR, "cli_log_cleanup_failed", profile=profile, outcome="error", error_type=type(error).__name__)
+    if removed:
+        record_event(DATA_DIR, "cli_log_cleanup", removed_files=removed)
 
 
 def profile_interval(profile: dict, active_profile_id: str | None) -> int:
@@ -1359,6 +1503,8 @@ def _panel_parses(parser: Callable[[str], dict], raw: str) -> bool:
 def collect_one_with_transcript(profile: dict, progress: Callable[[str], None] | None = None) -> tuple[dict, str]:
     """Collect one profile and persist both the normalized snapshot and raw CLI panel."""
     with profile_lock(profile["id"]):
+        started = time.monotonic()
+        attempt_id = record_event(DATA_DIR, "collection_started", profile=profile, outcome="running")
         transcript = ""
         try:
             snapshot, transcript = collect_profile(profile, include_transcript=True, progress=progress)
@@ -1367,7 +1513,9 @@ def collect_one_with_transcript(profile: dict, progress: Callable[[str], None] |
         except Exception as error:
             snapshot = error_snapshot(profile, error)
         active_id = read_json(PROFILES_FILE, {}).get("active_profile_id")
-        persist_snapshot(profile, snapshot, profile_interval(profile, active_id))
+        snapshot["attempt_id"] = attempt_id
+        persisted = persist_snapshot(profile, snapshot, profile_interval(profile, active_id))
+        log_collection_result(profile, snapshot, attempt_id, started, persisted)
         return snapshot, transcript
 
 
@@ -1763,7 +1911,19 @@ def process_requests(sessions: dict[str, LoginSession]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--once", action="store_true", help="Collect each configured profile once and exit")
+    parser.add_argument("--healthcheck", action="store_true", help="Check the collector heartbeat without collecting")
     args = parser.parse_args()
+    threading.excepthook = lambda args: record_event(
+        DATA_DIR, "worker_failed", outcome="error", error_type=args.exc_type.__name__, frames=exception_frames(args.exc_value))
+    sys.excepthook = lambda kind, error, trace: record_event(
+        DATA_DIR, "collector_failed", outcome="error", error_type=kind.__name__, frames=exception_frames(error))
+    if args.healthcheck:
+        health = read_json(RUNTIME_FILE, {}).get("health", {})
+        try:
+            age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(health["heartbeat_at"].replace("Z", "+00:00"))).total_seconds()
+            raise SystemExit(0 if 0 <= age < 45 else 1)
+        except (KeyError, ValueError, TypeError):
+            raise SystemExit(1)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     record_alert_status(email_fallback_configured=email_fallback_configured())
     if args.once:
@@ -1773,6 +1933,9 @@ def main() -> None:
     scheduler = CollectionScheduler()
     published_schedule: dict | None = None
     next_input_cleanup = 0.0
+    next_heartbeat = next_log_cleanup = 0.0
+    instance_started_at = utcnow()
+    record_event(DATA_DIR, "collector_started")
 
     def publish_schedule(schedule: dict) -> None:
         """Expose scheduling state for the dashboard countdown."""
@@ -1793,6 +1956,13 @@ def main() -> None:
         # up on the next 0.5s tick, and the displayed account refreshes on its
         # faster cadence regardless of how many other accounts exist.
         config = read_json(PROFILES_FILE, {"profiles": [], "active_profile_id": None})
+        if time.monotonic() >= next_heartbeat:
+            update_json(RUNTIME_FILE, {}, lambda runtime: runtime.update({"health": {
+                "started_at": instance_started_at, "heartbeat_at": utcnow(), "status": "running"}}))
+            next_heartbeat = time.monotonic() + 10
+        if time.monotonic() >= next_log_cleanup:
+            maintain_cli_logs(config.get("profiles", []))
+            next_log_cleanup = time.monotonic() + 3600
         scheduler.tick(config)
         publish_schedule(scheduler.schedule(config))
         time.sleep(0.5)

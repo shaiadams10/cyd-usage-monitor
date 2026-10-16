@@ -1310,6 +1310,8 @@ void fetchQuotaData() {
             if (telemetryStatus == "ok" && provider == "antigravity") {
                 const char *quotaKeys[] = {"gemini_5h_pct", "gemini_weekly_pct", "claude_5h_pct", "claude_weekly_pct"};
                 for (const char *key : quotaKeys) {
+                    const char *availableKey = strncmp(key, "gemini", 6) == 0 ? "gemini_available" : "claude_available";
+                    if (doc[availableKey].is<bool>() && !doc[availableKey].as<bool>() && doc[key].isNull()) continue;
                     if (!doc[key].is<int>() || doc[key].as<int>() < 0 || doc[key].as<int>() > 100) {
                         http.end();
                         showTelemetryError("Antigravity quota fields are incomplete or invalid. Retrying.");
@@ -1378,6 +1380,8 @@ void fetchQuotaData() {
                 lv_obj_clear_flag(box_claude_5h, LV_OBJ_FLAG_HIDDEN);
                 lv_obj_clear_flag(box_claude_wk, LV_OBJ_FLAG_HIDDEN);
 
+                const bool geminiAvailable = !(doc["gemini_available"].is<bool>() && !doc["gemini_available"].as<bool>());
+                const bool claudeAvailable = !(doc["claude_available"].is<bool>() && !doc["claude_available"].as<bool>());
                 int g_5h = doc["gemini_5h_pct"] | 0;
                 String g_5h_sub = doc["gemini_5h_sub"] | "No collector data";
                 int g_wk = doc["gemini_weekly_pct"] | 0;
@@ -1389,27 +1393,31 @@ void fetchQuotaData() {
                 String c_wk_sub = doc["claude_weekly_sub"] | "No collector data";
 
                 // Update Gemini 5H Box (Progress bar = % remaining)
-                String g5_val_str = String(g_5h) + "%";
+                String g5_val_str = geminiAvailable ? String(g_5h) + "%" : "N/A";
                 lv_label_set_text(lbl_g5_val, g5_val_str.c_str());
-                cyd_motion_bar(bar_g5, g_5h, motionReset);
+                cyd_motion_bar(bar_g5, g_5h, motionReset || !geminiAvailable);
+                lv_obj_set_style_text_color(lbl_g5_val, lv_color_hex(geminiAvailable ? 0x2563EB : 0x8A929C), LV_PART_MAIN);
                 lv_label_set_text(lbl_g5_sub, g_5h_sub.c_str());
 
                 // Update Gemini Weekly Box
-                String gw_val_str = String(g_wk) + "%";
+                String gw_val_str = geminiAvailable ? String(g_wk) + "%" : "N/A";
                 lv_label_set_text(lbl_gw_val, gw_val_str.c_str());
-                cyd_motion_bar(bar_gw, g_wk, motionReset);
+                cyd_motion_bar(bar_gw, g_wk, motionReset || !geminiAvailable);
+                lv_obj_set_style_text_color(lbl_gw_val, lv_color_hex(geminiAvailable ? 0x2563EB : 0x8A929C), LV_PART_MAIN);
                 lv_label_set_text(lbl_gw_sub, g_wk_sub.c_str());
 
                 // Update Claude 5H Box
-                String c5_val_str = String(c_5h) + "%";
+                String c5_val_str = claudeAvailable ? String(c_5h) + "%" : "N/A";
                 lv_label_set_text(lbl_c5_val, c5_val_str.c_str());
-                cyd_motion_bar(bar_c5, c_5h, motionReset);
+                cyd_motion_bar(bar_c5, c_5h, motionReset || !claudeAvailable);
+                lv_obj_set_style_text_color(lbl_c5_val, lv_color_hex(claudeAvailable ? 0xF97316 : 0x8A929C), LV_PART_MAIN);
                 lv_label_set_text(lbl_c5_sub, c_5h_sub.c_str());
 
                 // Update Claude Weekly Box
-                String cw_val_str = String(c_wk) + "%";
+                String cw_val_str = claudeAvailable ? String(c_wk) + "%" : "N/A";
                 lv_label_set_text(lbl_cw_val, cw_val_str.c_str());
-                cyd_motion_bar(bar_cw, c_wk, motionReset);
+                cyd_motion_bar(bar_cw, c_wk, motionReset || !claudeAvailable);
+                lv_obj_set_style_text_color(lbl_cw_val, lv_color_hex(claudeAvailable ? 0xF97316 : 0x8A929C), LV_PART_MAIN);
                 lv_label_set_text(lbl_cw_sub, c_wk_sub.c_str());
 
             } else {

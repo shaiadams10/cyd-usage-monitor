@@ -1,5 +1,36 @@
 # Changelog
 
+## 2026-10-16 — Restore Gemini quotas with the current official CLI
+
+- Confirmed `agy` 1.1.11 omitted Gemini in both its TUI and official `/usage`
+  JSON for the same account that reports both groups with 1.4.0. The parser
+  already reads the current panel correctly; missing data came from the old
+  client rather than a changed Gemini heading or scroll position.
+- Verified the official release checksum, preserved the prior host binary,
+  and updated the configured collector host to 1.4.0. No model turns were sent.
+- Record safe CLI banner versions in collection diagnostics and display them
+  in the searchable timeline. Add current-panel and version/privacy regressions.
+- Document read-only CLI mount maintenance and collector recreation after
+  replacing a binary, including checks for incomplete model groups.
+
+## 2026-10-16 — Collection recovery and durable diagnostics
+
+- Accept finished Antigravity quota panels containing one model group; show
+  absent groups as N/A across dashboard, physical CYD and LVGL preview. Reject
+  truncated panels and incomplete reported groups.
+- Prevent malformed Codex `/status` input by disabling paste-burst detection,
+  connector startup and startup update checks during quota capture. Preserve
+  two independent confirmations and keep reset times readable during retries.
+- Add a private, searchable SQLite collection timeline with 30-day/100,000-event
+  retention, safe structured Docker logs, capture timing/request/exit metadata,
+  categories and exception locations. Preserve first outage evidence and open
+  incidents; retain 200 recent captures plus referenced incident evidence.
+- Add collector heartbeat/health checks, privacy-safe browser disconnect logs,
+  native CLI error hints, bounded hourly Antigravity dated-log maintenance, and
+  explicit Docker log rotation (three 10 MB files per service).
+- Record the deferred Luna wake-up design and safeguards; no model requests
+  or scheduled wake-ups are introduced.
+
 ## 2026-10-02 — Preserve Antigravity sessions during quota retries
 
 - Guard Escape retries with a complete quota panel from the current request;

@@ -891,7 +891,7 @@ class CollectionSchedulingTests(unittest.TestCase):
         process.poll.return_value = 0
         with patch.object(collector, "open_terminal", return_value=(10, 11)), \
                 patch.object(collector.subprocess, "Popen", return_value=process), \
-                patch.object(collector.time, "monotonic", side_effect=[0, 0, .1, .2, .3, .4]), \
+                patch.object(collector.time, "monotonic", side_effect=[0, 0, .1, .2, .3, .4, .5]), \
                 patch.object(collector.select, "select", return_value=([10], [], [])), \
                 patch.object(collector.os, "read", side_effect=[b"You are currently not signed in. Select login method:", OSError()]), \
                 patch.object(collector.os, "close"), patch.object(collector.os, "write") as write:

@@ -8,6 +8,33 @@ shared LVGL WebAssembly preview and optional Windows account-switching helpers.
 
 ## Recent Changes
 
+### 2026-10-16 — Reliable Collection and Searchable Diagnostics
+- Recover Codex slash-command input by disabling paste-burst handling and startup
+  connector/update prompts; retain independent confirmations and readable reset
+  times while explicitly labeling retries.
+- Support completed Antigravity panels with one model group across API, dashboard,
+  firmware and LVGL preview. Show omitted groups as N/A without fabricating quota.
+- Diagnose Gemini omission in the old official CLI using same-account terminal
+  and print-mode /usage checks. Checksum-verified 1.4.0 restores both groups with
+  the existing parser; preserve the previous host binary for rollback.
+- Add bounded private SQLite event search, safe console logs and CLI versions,
+  failure categories, capture/confirmation metadata, first-outage evidence,
+  collector heartbeat, native log maintenance and Docker log rotation.
+- Save the draft Luna wake-up design for further discussion. Implementation and
+  automatic sending remain deferred at the operator's request.
+- Passed 95 isolated Linux server tests, Windows server tests (Unix PTY skipped),
+  firmware/WASM builds, LVGL partial-quota regressions, browser fixture and live
+  protected API checks. Verified all configured accounts and container health.
+- Publication checks passed: 95 server tests (Windows PTY skip), 21 helper
+  tests, clean firmware build with example configuration, Compose validation,
+  secret/private-value scans, source-tree guard, whitespace and Brain checks.
+- Files: cyd-usage-monitor/{AGENTS.md,CHANGELOG.md,Dockerfile,README.md,
+  docker-compose.yml,instructions/CODEX_WAKEUP_PLAN.md,server/collector.py,
+  server/diagnostics.py,server/test_diagnostics.py,server/server.py,
+  server/dashboard.html,server/test_collector.py,server/test_server.py,
+  server/static/lvgl/cyd_lvgl.wasm,src/main.cpp,simulator/lvgl_cyd_sim.c,
+  simulator/test_motion.c}, docs/{context.md,map.md}.
+
 ### 2026-10-02 — Antigravity Retry Logout Guard
 - Traced repeated disconnection to a transient user-info TLS timeout followed
   by the collector sending Escape on the CLI sign-in screen. CLI logs then

@@ -120,8 +120,9 @@ static void set_grid_card(lv_obj_t *card, const char *value, const char *sub, ui
   lv_obj_t *bar = lv_obj_get_child(card, 2);
   lv_obj_t *sub_label = lv_obj_get_child(card, 3);
   lv_label_set_text(value_label, value);
-  lv_obj_set_style_text_color(value_label, lv_color_hex(color), LV_PART_MAIN);
-  cyd_motion_bar(bar, atoi(value), motion_reset);
+  bool available = value[0] >= '0' && value[0] <= '9';
+  lv_obj_set_style_text_color(value_label, lv_color_hex(available ? color : 0x8A929C), LV_PART_MAIN);
+  cyd_motion_bar(bar, available ? atoi(value) : 0, motion_reset || !available);
   lv_label_set_text(sub_label, sub);
 }
 

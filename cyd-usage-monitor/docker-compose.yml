@@ -13,6 +13,11 @@ services:
       # private LAN address. The dashboard listener remains Tunnel-only.
       - "${CYD_LAN_BIND_ADDRESS:-127.0.0.1}:${CYD_LAN_PORT:-8001}:8001"
     restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     stop_grace_period: 15s
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
@@ -41,6 +46,11 @@ services:
     security_opt: ["no-new-privileges:true"]
     pids_limit: 128
     restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     depends_on:
       cyd-monitor-app:
         condition: service_healthy
@@ -60,7 +70,18 @@ services:
     command: ["python3", "/app/collector.py"]
     network_mode: host
     restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "python3", "/app/collector.py", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
       CYD_MONITOR_DATA_DIR: /app/data

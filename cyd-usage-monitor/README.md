@@ -771,13 +771,78 @@ later failures continue to name that account in the dashboard, device payload,
 incident history, and alerts. Upgrade the host's Codex installation separately
 during a planned maintenance window.
 
-The protected dashboard's **Alerts** view retains the latest 50 structured
-incidents, including repeated failed-poll counts and recovery details. For
-deeper debugging, the collector keeps at most 50 redacted terminal captures as
-mode-`0600` JSON files under the private runtime data directory's
-`.collector-debug/` folder. These host-only captures are not returned by an API
-or sent to WhatsApp; use the alert's diagnostic ID to locate the matching file.
-URLs, email addresses, and long opaque values are redacted before storage.
+The protected dashboard's **Alerts** view includes a searchable **Diagnostic
+events** timeline. Filter by provider/outcome or search an attempt ID, evidence
+ID, or failure category; load older pages without losing the current page.
+The private mode-`0600` `collector-events.sqlite3` database retains up to 30
+days or 100,000 events, whichever comes first. Scheduled and manual reads record
+start/completion, duration, CLI version when its banner is present, request count, exit/timeout reason, confirmation
+state, error category, safe exception locations and related evidence. The same
+structured events appear in Docker logs with hashed account references. Compose
+explicitly rotates each service's Docker logs at three 10 MB files.
+`GET /api/v1/diagnostics` requires dashboard administrator authentication and
+is unavailable on the device listener. It never returns raw terminal output.
+
+Incident history retains every open outage plus the latest 50 recovered ones.
+It preserves first and latest diagnostics instead of replacing the original
+symptom on every retry. Private `.collector-debug/` JSON captures retain the
+latest 200 failures plus evidence referenced by retained incidents (each capture
+is capped at 32,000 characters). URLs, accounts, secrets, network addresses,
+filesystem paths and long opaque values are redacted. Captures stay host-only;
+use the diagnostic ID to locate them. Already-pruned historical evidence cannot
+be reconstructed by the upgrade.
+
+Collector health uses a ten-second heartbeat; a heartbeat older than 45 seconds
+is stalled. Docker checks it using `python3 /app/collector.py --healthcheck`.
+An app listener being healthy does not mean collection is healthy. Browser
+disconnects are logged without noisy tracebacks or client addresses.
+Antigravity native logs contribute a redacted error hint to failed captures;
+this is a diagnostic clue, not proof of the quota failure's root cause. Hourly
+maintenance retains at most 200 recognized dated native CLI logs or seven days,
+preserving the active log and files younger than five minutes. It does not
+touch authentication, settings, unrelated logs, or symlink targets.
+
+A finished Antigravity `/usage` modal may report only one model group. The
+reported group stays live; the missing group shows **N/A / Not reported by CLI**
+in the dashboard, physical CYD and LVGL preview. No missing quota defaults to
+0% or 100%. A truncated modal or incomplete reported group still fails collection.
+
+An omitted group can indicate an outdated CLI. On October 16, 2026, the same
+account's `agy` 1.1.11 `/usage` omitted Gemini in both the TUI and its official
+print-mode JSON output; the verified 1.4.0 release restored both quota groups.
+The existing parser correctly reads the 1.4.0 panel, including decimal values
+and reset times. Check **Alerts → Diagnostic events** for the captured CLI
+version before interpreting a missing group as an account restriction.
+
+CLI binaries are mounted read-only, so their self-updaters cannot maintain the
+host installation. Stage updates from the [official Antigravity installer](https://antigravity.google/docs/getting-started/),
+verify its release checksum, preserve the old binary, and test `/usage` with
+the isolated profile before replacing `AGY_HOST_PATH` on the monitor host.
+Recreate the collector after replacing a file bind mount; restarting alone
+may retain the old inode:
+
+```sh
+docker compose up -d --no-deps --force-recreate cyd-monitor-collector
+```
+
+Confirm a fresh complete snapshot and the running CLI version after the
+update. Keep the old binary for rollback. Google currently documents the
+removal of Claude Sonnet/Opus 4.6 and GPT-OSS on November 2, 2026; this does not
+mean Gemini quotas should disappear. Follow the provider's [current model documentation](https://antigravity.google/docs/models)
+for model availability rather than hard-coding a removal date into the parser.
+
+Codex quota reads disable paste-burst detection, connector startup and startup
+update prompts in the isolated collector invocation. This prevents overlapping
+or malformed `/status` input during TUI startup, while retaining independent
+quota confirmation. During a short retry, the reset time remains **Resets ...**,
+the device heading shows **Retry**, and the dashboard explicitly labels last
+confirmed values with the failure reason. Confirmed outages and stale readings
+remain unavailable rather than appearing current. Updates to the host CLI
+remain an operator maintenance task.
+
+The deferred [Codex wake-up plan](instructions/CODEX_WAKEUP_PLAN.md) records the
+reset-aware schedule and durable duplicate-send limits. Luna starting the
+window is operator-confirmed. This release implements no wake-up messages.
 
 ## Development checks
 

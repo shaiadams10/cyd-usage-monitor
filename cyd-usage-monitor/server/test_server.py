@@ -238,7 +238,7 @@ class ServerApiTests(unittest.TestCase):
         self.assertIn(b"window.cydPreviewNextAccount", dashboard)
         self.assertIn(b'class="button remove compact hidden"', dashboard)
         self.assertIn(b"Incident history", dashboard)
-        self.assertIn(b"host evidence", dashboard)
+        self.assertIn(b"first evidence", dashboard)
         self.assertNotIn(b"account-meta", dashboard)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         status, body, _ = self.request("/api/admin/cyd-status")
@@ -431,7 +431,9 @@ class ServerApiTests(unittest.TestCase):
         self.assertTrue(degraded["degraded"])
         self.assertIn("quota panel incomplete", degraded["degraded_error"])
         self.assertIn("retrying", degraded["status_ticker"])
-        self.assertTrue(degraded["codex_5h_sub"].startswith("Last confirmed"))
+        self.assertTrue(degraded["codex_5h_sub"].startswith("Resets "))
+        self.assertIn("Retry", degraded["primary_tag"])
+        self.assertEqual(degraded["last_success_at"], last_ok["collected_at"])
 
         # The collector's confirmed outage threshold shows the real error.
         app.write_json(app.STATE_FILE, {"profiles": {self.profile["id"]: dict(failed, consecutive_failures=3, alert_confirmed=True)}})
@@ -453,6 +455,41 @@ class ServerApiTests(unittest.TestCase):
         self.assertTrue(app.is_stale({"collected_at": aged, "stale_after_seconds": 120}))
         self.assertTrue(app.is_stale({"collected_at": aged, "stale_after_seconds": True}))
         self.assertTrue(app.is_stale({}))
+
+    def test_diagnostics_api_is_admin_only_and_searchable(self):
+        try:
+            from .diagnostics import record_event
+        except ImportError:
+            from diagnostics import record_event
+        record_event(app.DATA_DIR, "collection_finished", profile={"provider": "antigravity"},
+                     outcome="partial", missing_groups=["gemini"])
+        self.assertEqual(self.request("/api/v1/diagnostics", basic=False)[0], 401)
+        self.assertEqual(self.request("/api/v1/diagnostics", basic=False, bearer=True, device=True)[0], 404)
+        status, result, _ = self.request("/api/v1/diagnostics?provider=antigravity&outcome=partial&q=gemini")
+        self.assertEqual(status, 200)
+        self.assertEqual(result["events"][0]["missing_groups"], ["gemini"])
+        self.assertEqual(self.request("/api/v1/diagnostics?before=invalid")[0], 400)
+
+    def test_partial_antigravity_payload_does_not_fabricate_missing_quotas(self):
+        snapshot = {"provider": "antigravity", "account_name": "sample", "collected_at": app.utcnow(),
+                    "metrics": {"gemini": {"available": False}, "claude": {
+                        "weekly": {"remaining_pct": 100, "reset": "Quota available"},
+                        "five_hour": {"remaining_pct": 78, "reset": "2h"}}}}
+        payload = app.render_snapshot(snapshot)
+        self.assertTrue(payload["partial"])
+        self.assertIsNone(payload["gemini_5h_pct"])
+        self.assertFalse(payload["gemini_available"])
+        self.assertEqual(payload["gemini_5h_sub"], "Not reported by CLI")
+        self.assertEqual(payload["claude_5h_pct"], 78)
+        del snapshot["metrics"]["claude"]["weekly"]
+        with self.assertRaises(KeyError):
+            app.render_snapshot(snapshot)
+
+    def test_collector_health_detects_stalled_heartbeat(self):
+        app.write_json(app.RUNTIME_FILE, {"health": {"heartbeat_at": app.utcnow()}})
+        self.assertEqual(app.public_runtime()["health"]["status"], "healthy")
+        app.write_json(app.RUNTIME_FILE, {"health": {"heartbeat_at": "2026-01-01T00:00:00Z"}})
+        self.assertEqual(app.public_runtime()["health"]["status"], "stalled")
 
     def test_antigravity_cyd_payload_formats_disabled_and_standard_subtexts(self):
         ag_profile = dict(self.profile, id="antigravity-0123456789", provider="antigravity", label="Antigravity")

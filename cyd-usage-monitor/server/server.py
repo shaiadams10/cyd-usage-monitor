@@ -22,8 +22,10 @@ from pathlib import Path
 
 try:
     from .storage import data_lock, read_json, read_json_unlocked, update_json, write_json, write_json_unlocked
+    from .diagnostics import query_events, redact
 except ImportError:  # Docker runs this file as a top-level script.
     from storage import data_lock, read_json, read_json_unlocked, update_json, write_json, write_json_unlocked
+    from diagnostics import query_events, redact
 
 
 DATA_DIR = Path(os.environ.get("CYD_MONITOR_DATA_DIR", "/app/data"))
@@ -296,9 +298,10 @@ def cyd_payload(profile_id: str | None = None) -> dict:
         payload["degraded"] = True
         payload["degraded_error"] = str(snapshot.get("error", "CLI collection failed"))[:120]
         payload["status_ticker"] += " · retrying"
-        for key in ("primary_sub", "codex_5h_sub", "codex_weekly_sub"):
-            if key in payload:
-                payload[key] = "Last confirmed · " + payload[key]
+        payload["last_success_at"] = shown.get("collected_at")
+        payload["retry_count"] = snapshot.get("consecutive_failures", 1)
+        if payload.get("provider") == "codex":
+            payload["primary_tag"] = "5-Hour · Retry" if shown.get("metrics", {}).get("five_hour") else "Usage · Retry"
     return payload
 
 
@@ -315,8 +318,12 @@ def render_snapshot(snapshot: dict) -> dict:
     if snapshot.get("provider") == "antigravity":
         metrics = snapshot["metrics"]
         for group in ("gemini", "claude"):
+            if metrics.get(group, {}).get("available") is False:
+                continue
             for limit in ("five_hour", "weekly"):
                 validate_metric(metrics[group][limit])
+        if all(metrics.get(group, {}).get("available") is False for group in ("gemini", "claude")):
+            raise ValueError("No quota groups reported")
         def usage_sub(metric: dict) -> str:
             reset = str(metric.get("reset") or "").strip()
             if not reset:
@@ -325,21 +332,21 @@ def render_snapshot(snapshot: dict) -> dict:
             if lower.startswith(("quota", "weekly", "limit", "disabled", "reset", "refresh")):
                 return reset
             return "Refresh in: " + reset
-        return {
+        result = {
             "provider": "antigravity", "status": "ok", "account_name": snapshot["account_name"],
             "plan_type": snapshot.get("plan_type", "Antigravity"),
-            "gemini_5h_pct": metrics["gemini"]["five_hour"]["remaining_pct"],
-            "gemini_5h_sub": usage_sub(metrics["gemini"]["five_hour"]),
-            "gemini_weekly_pct": metrics["gemini"]["weekly"]["remaining_pct"],
-            "gemini_weekly_sub": usage_sub(metrics["gemini"]["weekly"]),
-            "claude_5h_pct": metrics["claude"]["five_hour"]["remaining_pct"],
-            "claude_5h_sub": usage_sub(metrics["claude"]["five_hour"]),
-            "claude_weekly_pct": metrics["claude"]["weekly"]["remaining_pct"],
-            "claude_weekly_sub": usage_sub(metrics["claude"]["weekly"]),
             "extra_credits": snapshot.get("credits", "None"), "collected_at": snapshot["collected_at"],
             "status_ticker": "* Antigravity CLI · " + snapshot["collected_at"],
             "source": snapshot.get("source", "agy CLI"),
         }
+        for group in ("gemini", "claude"):
+            available = metrics[group].get("available") is not False
+            result[group + "_available"] = available
+            for limit, suffix in (("five_hour", "5h"), ("weekly", "weekly")):
+                result[f"{group}_{suffix}_pct"] = metrics[group][limit]["remaining_pct"] if available else None
+                result[f"{group}_{suffix}_sub"] = usage_sub(metrics[group][limit]) if available else "Not reported by CLI"
+        result["partial"] = not all(result[group + "_available"] for group in ("gemini", "claude"))
+        return result
 
     metrics = snapshot["metrics"]
     if "five_hour" in metrics and "weekly" not in metrics:
@@ -410,6 +417,13 @@ def public_control() -> dict:
 def public_runtime() -> dict:
     """Return workflow details while ensuring completed secrets never reach the browser."""
     runtime = copy.deepcopy(read_json(RUNTIME_FILE, {"requests": {}}))
+    health = runtime.setdefault("health", {})
+    try:
+        age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(health["heartbeat_at"].replace("Z", "+00:00"))).total_seconds()
+        health["status"] = "healthy" if 0 <= age < 45 else "stalled"
+        health["age_seconds"] = max(0, round(age))
+    except (KeyError, ValueError, TypeError):
+        health["status"] = "unknown"
     for record in runtime.get("requests", {}).values():
         if record.get("status") != "running":
             for key in ("login_url", "device_code", "terminal_output"):
@@ -449,7 +463,22 @@ class Handler(BaseHTTPRequestHandler):
         return getattr(self.server, "surface", "dashboard") == "device"
 
     def log_message(self, format, *args):
-        print("%s - %s" % (self.address_string(), format % args))
+        print(redact(format % args, 600), flush=True)
+
+    def log_request(self, code="-", size="-"):
+        path = urllib.parse.urlparse(self.path).path
+        route = path if re.fullmatch(r"/api/(?:v1|admin)/[a-z-]{1,40}|/", path) else "asset-or-other"
+        self.log_message("%s", json.dumps({"event": "http_request", "route": route,
+                                           "status": str(code), "surface": "device" if self.is_device_surface() else "dashboard"}))
+
+    def handle(self):
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError):
+            # Browser/device disconnects are not collector failures and do not
+            # need a traceback with addresses and host filesystem paths.
+            self.close_connection = True
+            self.log_message('%s', '{"event":"client_disconnected"}')
 
     def security_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -613,6 +642,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path in {"/api/v1/cyd-status", "/api/v1/next-account", "/api/v1/openrouter-status", "/api/v1/display-command", "/api/v1/selection-history"}:
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+        if path == "/api/v1/diagnostics":
+            if not self.require_admin():
+                return
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                before = max(0, int(query.get("before", ["0"])[0]))
+            except ValueError:
+                return self.send_json({"error": "invalid cursor"}, HTTPStatus.BAD_REQUEST)
+            return self.send_json(query_events(DATA_DIR, provider=query.get("provider", [""])[0],
+                                               outcome=query.get("outcome", [""])[0], query=query.get("q", [""])[0], before=before))
         if path == "/api/v1/collector-status":
             if not self.require_admin():
                 return
