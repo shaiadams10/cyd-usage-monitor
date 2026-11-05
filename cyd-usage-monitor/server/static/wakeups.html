@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0d1013"><title>Wake-ups · CYD Usage Monitor</title>
+  <link rel="icon" href="/static/favicon.svg"><link rel="stylesheet" href="/static/wakeups.css?v=20261104-defaults">
+  <script src="/static/wakeups.js?v=20261104-defaults" defer></script>
+</head>
+<body>
+<div class="app">
+  <nav class="nav" aria-label="Dashboard sections">
+    <a class="mark" href="/" aria-label="CYD dashboard"><img src="/static/favicon-32x32.png?v=2" width="28" height="28" alt=""></a>
+    <a href="/#overview"><small>Overview</small></a><a href="/#accounts"><small>Accounts</small></a><a href="/#alerts"><small>Alerts</small></a><a href="/#utilities"><small>Utilities</small></a><a class="active" href="/static/wakeups.html" aria-current="page"><small>Wake-ups</small></a>
+  </nav>
+  <main class="shell">
+    <header class="page-heading"><div><p class="eyebrow">Account automation</p><h1>Wake-ups</h1><p class="intro">Your accounts. Ready when you need them.</p></div><span id="connection" class="connection" role="status">Connecting…</span></header>
+    <div class="control-bar"><div class="master-control"><span id="masterState" class="state-pill">Stopped</span><span id="masterDescription">Schedules and immediate sends are stopped.</span></div><button id="masterToggle" type="button" class="button secondary" disabled>Enable wake-ups</button></div>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <div class="page-toolbar"><div class="view-tabs" aria-label="Wake-up views"><button id="viewSchedules" type="button" class="active" aria-pressed="true">Schedules <span id="scheduleCount" class="count">0</span></button><button id="viewActivity" type="button" aria-pressed="false">Activity</button><button id="viewDefaults" type="button" aria-pressed="false">Defaults</button></div><div class="toolbar-actions"><button id="nowTab" type="button" class="button secondary">Send now</button><button id="scheduleTab" type="button" class="button primary">＋ New schedule</button></div></div>
+
+    <section id="schedulesView" aria-labelledby="schedulesTitle">
+      <div class="list-heading"><div><h2 id="schedulesTitle">Your schedules</h2><p class="help">Send once at the scheduled time when weekly quota remains, even if the five-hour window is active or unclear.</p></div><label class="filter-label">Show<select id="scheduleFilter"><option value="all">All schedules</option><option value="active">Active</option><option value="paused">Paused / completed</option></select></label></div>
+      <div id="scheduleList" class="schedule-list"><div class="empty-state"><h3>Loading schedules…</h3></div></div>
+    </section>
+
+    <section id="defaultsView" aria-labelledby="defaultsTitle" hidden>
+      <div class="list-heading"><div><h2 id="defaultsTitle">Provider defaults</h2><p class="help">Set a model and reasoning level once. New sends and schedules start with these choices, and you can override them each time.</p></div></div>
+      <div id="defaultsList" class="defaults-list"></div>
+      <p class="help">Saved on the server and shared across your devices. Changing defaults never changes an existing schedule or queued send.</p>
+    </section>
+
+    <section id="composerView" class="composer" aria-labelledby="composeTitle" hidden>
+      <header class="editor-heading"><div><button id="backSchedules" type="button" class="back-button">← Schedules</button><h2 id="composeTitle">New schedule</h2><p id="editorDescription" class="help">Choose accounts, a message and a time.</p></div><button id="cancelEdit" class="button secondary" type="button">Cancel</button></header>
+      <div class="compose-body">
+        <section class="editor-section"><div class="section-heading"><div class="section-title"><span class="step">1</span><h3>Accounts <span id="selectedCount" class="selection-count">None selected</span></h3></div><button id="selectAll" class="text-button" type="button">Select all</button></div><p class="help">Select accounts from any provider.</p><label class="search-field"><span class="sr-only">Find an account</span><input id="accountSearch" type="search" placeholder="Find an account…" autocomplete="off"></label><div id="accountList" class="account-list" aria-label="Accounts"><p class="empty">Loading accounts…</p></div></section>
+        <section id="modelSettings" class="editor-section model-settings" aria-labelledby="modelSettingsTitle" hidden><div class="section-title"><span class="step">2</span><h3 id="modelSettingsTitle">Model &amp; reasoning</h3></div><p class="help">One choice per provider, applied to its selected accounts.</p><div id="providerSettings"></div></section>
+        <section class="editor-section message-settings"><div class="section-heading"><h3><label for="wakeupPrompt">Message</label></h3><span id="promptCount" class="character-count">6 / 500</span></div><textarea id="wakeupPrompt" rows="3" maxlength="500" required aria-describedby="messageHelp">say OK</textarea><p id="messageHelp" class="help">Keep it short. Submitted once to each eligible account, with no automatic resend.</p></section>
+        <div id="nowPanel"><div class="editor-footer"><p id="sendSelection" class="footer-summary">Choose accounts and models to continue.</p><button id="sendNow" type="button" class="button primary" disabled>Choose accounts to continue</button></div></div>
+        <form id="schedulePanel">
+          <section class="editor-section"><div class="section-title"><span class="step">3</span><h3>When to wake</h3></div><div class="form-grid"><label class="field wide">Schedule name<input id="scheduleLabel" maxlength="80" placeholder="e.g. Weekday mornings" autocomplete="off"></label><label class="field">Repeat<select id="scheduleKind"><option value="weekly">On selected days</option><option value="once">Just once</option></select></label><label id="timeField" class="field">Time<input id="scheduleTime" type="time" value="08:00" required></label><label id="dateField" class="field" hidden>Date and time<input id="scheduleDate" type="datetime-local"></label></div>
+          <fieldset id="weekdayField"><legend>Days of the week</legend><div class="weekdays"><label><input type="checkbox" value="0" checked><span>Mon</span></label><label><input type="checkbox" value="1" checked><span>Tue</span></label><label><input type="checkbox" value="2" checked><span>Wed</span></label><label><input type="checkbox" value="3" checked><span>Thu</span></label><label><input type="checkbox" value="4" checked><span>Fri</span></label><label><input type="checkbox" value="5" checked><span>Sat</span></label><label><input type="checkbox" value="6" checked><span>Sun</span></label></div></fieldset>
+          <label class="field timezone-field">Timezone<input id="scheduleTimezone" list="timezones" autocomplete="off" required><small>Schedules follow daylight saving changes in this timezone.</small><datalist id="timezones"><option value="America/New_York"><option value="America/Chicago"><option value="America/Denver"><option value="America/Los_Angeles"><option value="Europe/London"><option value="Europe/Berlin"><option value="Asia/Jerusalem"><option value="Asia/Tokyo"><option value="Australia/Sydney"><option value="UTC"></datalist></label></section>
+          <div class="editor-footer"><p id="schedulePreview" class="footer-summary"></p><button id="saveSchedule" class="button primary" type="submit" disabled>Create schedule</button></div>
+        </form>
+      </div>
+    </section>
+
+    <section id="activityView" aria-labelledby="activityTitle" hidden><div class="list-heading"><div><h2 id="activityTitle">Recent activity</h2><p class="help">The outcome for each account, including anything that failed.</p></div><button id="refresh" type="button" class="button secondary">Refresh</button></div><div id="history" class="history"><p class="empty">No wake-ups yet.</p></div></section>
+    <details class="guard-note"><summary>How sending is protected</summary><p>One submitted prompt per selected account. No automatic prompt retries or model fallbacks. At least 5 hours and 2 minutes between attempts per account; maximum 5 attempts in 24 hours. Failed or uncertain attempts pause the account.</p><p>Stop cancels queued sends. A prompt already in progress may finish. Missed schedule times are skipped.</p></details>
+  </main>
+</div>
+<dialog id="reviewDialog" aria-labelledby="reviewTitle"><form method="dialog"><button class="dialog-close" aria-label="Close review" value="cancel">×</button><p class="eyebrow">Confirm immediate send</p><h2 id="reviewTitle">Review your wake-up</h2><p id="reviewSummary" class="help"></p><div id="reviewAccounts" class="review-accounts"></div><div class="request-summary"><span>Message</span><code id="reviewPrompt"></code></div><p class="help">Send now submits one prompt even if the five-hour window is active or uncertain. Identity, model and duplicate-attempt checks still apply. A provider may reject the request if quota is exhausted.</p><div class="dialog-actions"><button class="button secondary" value="cancel">Go back</button><button id="confirmSend" class="button primary" value="send">Send one prompt each</button></div></form></dialog>
+<dialog id="deleteDialog" aria-labelledby="deleteTitle"><form method="dialog"><h2 id="deleteTitle">Delete this schedule?</h2><p id="deleteSummary" class="help"></p><p class="help">Queued sends from this schedule will be cancelled. Saved activity is kept.</p><div class="dialog-actions"><button class="button secondary" value="cancel">Keep schedule</button><button class="button danger" value="delete">Delete schedule</button></div></form></dialog>
+</body>
+</html>

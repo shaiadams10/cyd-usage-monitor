@@ -1,7 +1,7 @@
 # CYD Usage Monitor
 
 > A self-hosted usage dashboard that collects quota snapshots from locally
-> authenticated OpenAI Codex and Google Antigravity CLIs plus the documented
+> authenticated OpenAI Codex, Google Antigravity and Claude Code CLIs plus the documented
 > OpenRouter management API, presents them in a
 > browser, and displays the selected account on an ESP32 Cheap Yellow Display.
 
@@ -77,8 +77,14 @@ out of the public tree. Read `cyd-usage-monitor/AGENTS.md` before editing.
   C/LVGL simulator uses Emscripten 3.1.74 and shares firmware UI behavior.
 - Codex quota collection uses authenticated `/status` panels only. Never
   activate banked resets or open Codex `/usage` during collection.
-  Antigravity uses its authenticated `/usage` panel. OpenRouter is the sole
+  Antigravity and Claude Code use their authenticated `/usage` panels. OpenRouter is the sole
   documented public quota-API exception, using management read endpoints.
+- Wake-ups are a separate operator-controlled feature. Submit one selected
+  prompt through an official CLI, never automatically resubmit or change models,
+  and preserve the durable account/attempt ledger. Scheduled attempts require
+  fresh healthy weekly quota, including active or unclear five-hour windows.
+  Send now bypasses quota eligibility while retaining identity/model and durable
+  duplicate/interval/uncertainty guards. Follow the project's detailed contract.
 - Keep credentials, Wi-Fi secrets, profiles, logs, account identifiers,
   private hosts/addresses and personal paths out of Git. Use ignored `.env`
   and `include/secrets.h`, private runtime storage and value-free examples.
@@ -96,6 +102,7 @@ out of the public tree. Read `cyd-usage-monitor/AGENTS.md` before editing.
 From the repository root:
 
 ```sh
+python -m pip install -r cyd-usage-monitor/server/requirements.txt
 python -m unittest discover -s cyd-usage-monitor/server
 python -m unittest discover -s cyd-usage-monitor/scripts -p "test_*.py"
 cd cyd-usage-monitor

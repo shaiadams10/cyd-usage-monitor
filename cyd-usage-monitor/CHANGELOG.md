@@ -1,5 +1,165 @@
 # Changelog
 
+## 2026-11-05 — Scheduled attempts with active or unclear windows
+
+- Match the operator's scheduled-send preference: attempt one prompt with active
+  or unclear five-hour windows when a fresh healthy same-account panel reports
+  positive weekly quota. Apply to existing schedules; retain identity, model,
+  duplicate, interval, daily and uncertain-outcome guards with no prompt retry.
+- Do not assume a reset restart for active/unknown windows. Explain exhausted vs
+  unavailable weekly quota separately, include exhausted-window resets on skips,
+  and label skipped CLI clocks as reported. Retain bounded normalized preflight
+  facts in saved results for future diagnosis, without raw panels or credentials.
+
+## 2026-11-04 — Accurate guarded failures and quota-window explanations
+
+- Preserve confirmed failures behind account guards as failed results with their
+  recorded cause; distinguish them from genuinely unconfirmed attempts. A new
+  request blocked by that guard does not pretend another prompt was submitted.
+- Attribute usage/rate-limit failures using fresh same-account CLI panels. Show
+  weekly/five-hour exhaustion and their reported resets in Activity and grouped
+  text/image receipts; disclose when the affected window cannot be confirmed.
+- Reuse healthy quota facts where possible; otherwise perform one bounded
+  read-only check alongside existing reset reads. Keep all guards and no-retry
+  behavior, and continue processing other accounts after any failure.
+
+## 2026-11-04 — Faster wake-ups, stable activity and visible reset times
+
+- Replace immediate Codex/Claude pre-send quota-screen reads with fresh official
+  identity metadata; replace Codex's repeated identity screen with local
+  `account/read`. Reuse only healthy same-account quota panels under two minutes
+  old. Keep scheduled eligibility and all durable no-resend guards.
+- Publish each confirmed send immediately and overlap up to three read-only
+  reset checks. Keep one final grouped receipt, with no extra model prompts.
+- Retain fresh CLI reset clocks when rounded-full quota leaves activity unknown;
+  label these CLI reported in text/image receipts and show resets in Activity.
+- Keep a stable row per selected account and distinguish checking/sending/reset
+  verification from a genuine failure or interruption. A live reservation no
+  longer appears as a failed/interrupted attempt with an acknowledgement button.
+
+## 2026-11-04 — Provider defaults, simpler receipts and explicit immediate sends
+
+- Add server-persisted model/reasoning defaults per provider, with save/remove
+  controls under Wake-ups → Defaults. Prefill new actions; one-off overrides and
+  changes to defaults never retarget existing jobs or schedules. Flag retired
+  selections without silently substituting models.
+- Redesign receipts as compact account rows on a light background, with reset
+  times aligned in a separate column and timezone printed once in the header.
+  Keep confirmed/estimated/unavailable states explicit; stress-check 9/50 accounts.
+- Format WhatsApp receipts like collection alerts, using bold headings, status
+  emojis, provider/model sections and quoted reasons. Preserve summary counts
+  in short image captions and formatted inline-image email fallback.
+- Honor explicit Send now requests with one prompt regardless of active/unknown
+  window or reported quota. Keep all identity/model/duplicate/interval/uncertainty
+  guards. Scheduled sends retain confirmed-idle checks. A rounded-full quota and
+  reset clock label are no longer incorrectly classified as proof of activity.
+
+## 2026-11-04 — Visual wake-up receipts and persistent master state
+
+- Replace per-account failure alerts with one scheduled/Send now run receipt,
+  including successes, skips, failures and unconfirmed outcomes grouped by
+  provider/model. Preserve schedule name/time and completed account progress.
+- Render a local branded JPEG with prominent reset-time badges: confirmed in a compact neutral tag,
+  estimates with a distinct warm-toned label. Try one read-only post-send quota check, with no new prompts.
+  Convert reset epochs to the configured timezone with DST support.
+- Deliver one WhatsApp image plus caption, with the existing email fallback carrying
+  inline image and full plain text. Rendering failure falls back to text; durably
+  claimed receipts are never replayed. Keep legacy pending-alert compatibility.
+- Preserve enabled/disabled preference across restarts and delivery errors. Clock
+  safety holds block sending separately; interrupted attempts are summarized and
+  remain guarded rather than retried. Existing schedules/ledger are preserved.
+- Pin Pillow 13.0.0 for runtime/CI report rendering; package local raster provider
+  marks derived from their existing SVGs. Verify grouping, delivery, MIME image,
+  restart persistence, interruption, model safety and timezone rendering.
+
+## 2026-11-04 — Wake-up schedule management and navigation redesign
+
+- Open wake-ups on a schedule-first screen with readable time/day/status cards,
+  clear account/model/message sections, next-run details, filters and explicit
+  edit/pause/resume/delete actions. Confirm deletion and preserve keyboard focus
+  during background refresh.
+- Give New schedule, Send now and Activity their own views, with grouped searchable
+  accounts, clear selection counts and local provider SVG icons replacing initials.
+- Match the dashboard sidebar item and mobile navigation to the existing controls;
+  return links open the correct dashboard section. Preserve sending safeguards.
+- Verify real authenticated HTTP form flows, duplicate protection, provider icons,
+  filtering, search, delete cancellation, focus retention and responsive layouts
+  from 320 to 1440 pixels, without starting collectors or sending real prompts.
+
+## 2026-11-04 — Larger quota visuals, current models and custom wake-up messages
+
+- Match ChatGPT to Claude's equal two-card layout, enlarge remaining bars and
+  percentage labels across dashboard, physical CYD and shared LVGL preview;
+  retain ChatGPT credits, available resets, plan and reset times.
+- Use integrity-verified official Codex 0.166.0 for GPT-6/6.1 and 5.6 discovery
+  and wake-up sending. Keep quota collection on 0.147.0 because the newer CLI
+  omits its visible banked-reset notice; optional `CODEX_WAKEUP_HOST_DIR` separates
+  the two read-only official installations. Invalidate catalogue
+  caches after binary replacement and retain visible Codex-only model entries.
+- Add a shared editable wake-up message, default `say OK`, to immediate sends
+  and schedules; persist exact text, restore on edit, review before sending,
+  and include text in idempotency checks. Preserve legacy scheduled/queued text.
+- Reject invalid text before queuing and preserve one-prompt, no-resend guards;
+  custom text stays out of alerts and console logs.
+
+## 2026-11-04 — Explicit wake-up models and provider designs
+
+- Select models and supported reasoning per provider for immediate and scheduled
+  prompts, applied across selected accounts and snapshotted into each job.
+- Discover choices through official CLIs; reject unavailable account/model pairs
+  without fallback. Keep one submitted prompt, bounded execution and no automatic
+  resend; failed schedules and uncertain attempts pause for review.
+- Record per-account outcomes and safe reasons, with one notification delivery
+  attempt through configured channels and visible delivery failures.
+- Redesign Claude and Codex dashboard cards and shared LVGL screens with distinct
+  terracotta/burst and emerald/OpenAI-inspired branding; compact reset labels
+  retain timezone information in the normalized snapshots.
+
+
+## 2026-11-04 — Claude Code and guarded wake-up controls
+
+- Preserve Claude quota feature fetching with granular privacy settings; normalize
+  native cursor-rendered rows and guard startup input timing.
+- Handle Claude first-run theme and default-deny workspace trust without importing
+  credentials or approving unrelated folders.
+- Add isolated official Claude Code sign-in and `/usage` collection, independent
+  panel confirmation, account validation, cached-panel rejection and reset text.
+- Add Claude profiles to the dashboard, device API, physical CYD and shared LVGL
+  browser preview; clearly show weekly exhaustion and unavailable reset times.
+- Accept Claude profile IDs in both Stream Deck direct-selection helpers.
+- Add verified native CLI mounting with `CLAUDE_HOST_PATH` / `CLAUDE_BIN`.
+- Add mobile wake-up account selection, immediate actions and timezone-aware
+  one-time/recurring schedules with master stop and visible provider readiness.
+- Persist attempt reservations, account deduplication, idempotent requests,
+  five-hour safety intervals and unknown-result pauses in a private ledger.
+  Collection remains free of inference prompts; only verified sending adapters
+  can send the fixed wake-up prompt.
+
+
+## 2026-11-03 — Display profile IDs on the web dashboard
+
+- Display stable profile IDs on the protected web dashboard for all configured
+  OpenAI Codex and Google Antigravity profiles on both the Overview cards and the
+  Accounts management list.
+- Provide a one-click copy button next to each ID with clipboard feedback to
+  simplify configuring Stream Deck account-switching buttons and desktop automation scripts.
+- Enhanced global copy event handling to support direct text values (`data-copy-text`)
+  alongside existing DOM element references (`data-copy`).
+- Added dashboard template assertions in server test regressions.
+
+## 2026-10-26 — Recover after power loss and delayed LAN startup
+
+- Diagnosed the app's failed private-LAN port bind during host boot. Docker
+  left the app stopped despite `restart: always`; starting it subsequently
+  left its bridge attachment absent. Recreating the app restored both listeners.
+- Add an installable Linux user-systemd timer, with verified lingering, to
+  check existing monitor services at boot and every minute. Recreate stopped
+  or disconnected services and restart persistently unhealthy services at most
+  once per five minutes. Use existing images without builds, pulls or changes
+  to other services; retain private runtime volumes and Compose configuration.
+- Document maintenance pause/resume and recovery checks; test delayed-start
+  failures, lost networking, healthy-service preservation and safe error logs.
+
 ## 2026-10-16 — Restore Gemini quotas with the current official CLI
 
 - Confirmed `agy` 1.1.11 omitted Gemini in both its TUI and official `/usage`

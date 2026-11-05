@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include "../src/mascot_img.h"
 #include "../src/ui_motion.h"
+#include "../src/ui_provider.h"
 static bool motion_reset;
 static char motion_account[256];
 static int motion_provider;
@@ -16,7 +17,7 @@ static bool motion_identity(const char *account, int provider) {
 
 #define SCREEN_W 320
 #define SCREEN_H 240
-static lv_obj_t *codex_credits, *codex_resets, *codex_plan, *codex_credits_title, *codex_resets_title;
+static lv_obj_t *codex_credits, *codex_resets, *codex_plan, *codex_credits_title, *codex_resets_title, *claude_mark, *claude_footer, *codex_mark, *provider_eyebrow;
 
 static lv_color_t buffer[SCREEN_W * 24];
 static lv_color_t launcher_icon_buffer[56 * 56];
@@ -76,8 +77,18 @@ EM_JS(void, publish_mascot, (int provider, const uint16_t *pixels), {
   window.cydProviderMascots[provider ? 'antigravity' : 'codex'] = canvas.toDataURL('image/png');
 });
 
+EM_JS(void, publish_provider_vector, (int provider, const int16_t *points, int count), {
+  let paths="";const values=HEAP16.subarray(points>>1,(points>>1)+count*2);
+  for(let i=0;i<count;i+=2)paths+='<path d="M'+values[i*2]+' '+values[i*2+1]+'L'+values[i*2+2]+' '+values[i*2+3]+'"/>';
+  const svg='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><g fill="none" stroke="'+(provider?'#D97757':'#B6F2DD')+'" stroke-width="1.8" stroke-linecap="round">'+paths+'</g></svg>';
+  window.cydProviderMascots=window.cydProviderMascots||{};
+  window.cydProviderMascots[provider?'claude':'codex']='data:image/svg+xml,'+encodeURIComponent(svg);
+});
+
 EMSCRIPTEN_KEEPALIVE void cyd_publish_provider_mascots(void) {
-  publish_mascot(0, (const uint16_t *)mascot_pixel_map);
+  cyd_provider_geometry();
+  publish_provider_vector(0, (const int16_t *)cyd_provider_lines[0], cyd_provider_count[0]);
+  publish_provider_vector(1, (const int16_t *)cyd_provider_lines[1], cyd_provider_count[1]);
   publish_mascot(1, (const uint16_t *)antigravity_mascot_pixel_map);
 }
 
@@ -471,6 +482,11 @@ EMSCRIPTEN_KEEPALIVE void cyd_init(void) {
   lv_img_set_src(ag_mascot, &antigravity_mascot_img);
   lv_obj_set_pos(ag_mascot, 6, 3);
   lv_obj_add_flag(ag_mascot, LV_OBJ_FLAG_HIDDEN);
+  claude_mark = cyd_provider_icon(usage_screen, true, 24);
+  codex_mark = cyd_provider_icon(usage_screen, false, 24);
+  lv_obj_set_pos(claude_mark, 8, 2);lv_obj_set_pos(codex_mark, 8, 2);
+  provider_eyebrow = lv_label_create(usage_screen);
+  lv_obj_add_flag(provider_eyebrow, LV_OBJ_FLAG_HIDDEN);
   header = lv_label_create(usage_screen);
   lv_label_set_text(header, "Waiting for collector");
   lv_obj_set_style_text_color(header, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
@@ -612,6 +628,14 @@ EMSCRIPTEN_KEEPALIVE void cyd_init(void) {
   lv_label_set_text(codex_credits, "None");
   lv_label_set_text(codex_resets, "Not reported");
   lv_label_set_text(codex_plan, "");
+  claude_footer = lv_label_create(usage_screen);
+  lv_label_set_text(claude_footer, "Claude Code");
+  lv_obj_set_style_text_font(claude_footer, &lv_font_montserrat_12, LV_PART_MAIN);
+  lv_obj_set_style_text_color(claude_footer, lv_color_hex(0xD97757), LV_PART_MAIN);
+  lv_obj_set_pos(claude_footer, 6, 50);
+  lv_obj_set_width(claude_footer, 290);
+  lv_label_set_long_mode(claude_footer, LV_LABEL_LONG_DOT);
+  lv_obj_add_flag(claude_footer, LV_OBJ_FLAG_HIDDEN);
 
   error_card = lv_obj_create(usage_screen);
   lv_obj_set_size(error_card, 312, 154);
@@ -682,6 +706,17 @@ EMSCRIPTEN_KEEPALIVE void cyd_tick(uint32_t elapsed_ms) {
   lv_timer_handler();
 }
 
+static void provider_theme(bool claude) {
+  cyd_provider_view view={usage_screen,primary_card,details_card,primary_value,weekly_value,primary_tag,weekly_tag,
+    primary_sub,weekly_sub,primary_bar,weekly_bar,primary_warn,provider_eyebrow};
+  cyd_provider_theme(&view,claude,SCREEN_W,SCREEN_H);
+  lv_obj_add_flag(mascot,LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(claude?codex_mark:claude_mark,LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(claude?claude_mark:codex_mark,LV_OBJ_FLAG_HIDDEN);
+  lv_obj_set_pos(claude_footer,10,204);
+
+}
+
 EMSCRIPTEN_KEEPALIVE void cyd_set_codex(const char *account, const char *value, const char *tag, const char *sub, int used,
                                         const char *week_value, const char *week_sub, int week_used) {
   bool reset = motion_identity(account, 1);
@@ -692,6 +727,10 @@ EMSCRIPTEN_KEEPALIVE void cyd_set_codex(const char *account, const char *value, 
   lv_obj_clear_flag(details_card, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(mascot, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(ag_mascot, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(claude_mark, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(claude_footer, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_t *footer[] = {codex_credits, codex_resets, codex_plan, codex_credits_title, codex_resets_title};
+  for (unsigned i = 0; i < sizeof(footer)/sizeof(footer[0]); ++i) lv_obj_clear_flag(footer[i], LV_OBJ_FLAG_HIDDEN);
   lv_label_set_text(header, account);
   lv_label_set_text(primary_value, value);
   lv_label_set_text(primary_tag, tag);
@@ -711,17 +750,66 @@ EMSCRIPTEN_KEEPALIVE void cyd_set_codex(const char *account, const char *value, 
   uint32_t weekly_color = week_used >= 80 ? 0xF43F5E : week_used >= 50 ? 0xF59E0B : 0x10B981;
   lv_obj_set_style_text_color(weekly_value, lv_color_hex(weekly_color), LV_PART_MAIN);
   lv_obj_set_style_bg_color(weekly_bar, lv_color_hex(weekly_color), LV_PART_INDICATOR);
+  provider_theme(false);
 }
 
 EMSCRIPTEN_KEEPALIVE void cyd_show_usage(void) {
   cyd_motion_show(usage_screen, false);
 }
 
+/* Remaining percentages, with -1 for a window omitted by the CLI. */
+EMSCRIPTEN_KEEPALIVE void cyd_set_claude(const char *account, int five_hour, const char *five_sub,
+                                         int weekly, const char *week_sub, const char *plan) {
+  bool reset = motion_identity(account, 3);
+  if (reset) { cyd_motion_enter(primary_card, 0); cyd_motion_enter(details_card, 90); }
+  lv_obj_add_flag(error_card, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(grid, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(mascot, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(ag_mascot, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(claude_mark, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(primary_card, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(details_card, LV_OBJ_FLAG_HIDDEN);
+  lv_label_set_text(header, account);
+  bool five_valid = five_hour >= 0 && five_hour <= 100;
+  bool week_valid = weekly >= 0 && weekly <= 100;
+  if (five_valid) lv_label_set_text_fmt(primary_value, "%d%% left", five_hour);
+  else lv_label_set_text(primary_value, "N/A");
+  if (week_valid) lv_label_set_text_fmt(weekly_value, "%d%% left", weekly);
+  else lv_label_set_text(weekly_value, "N/A");
+  lv_label_set_text(primary_tag, "5-Hour Limit");
+  lv_label_set_text(weekly_tag, "Weekly Limit");
+  lv_label_set_text(primary_sub, five_sub);
+  lv_label_set_text(weekly_sub, week_sub);
+  cyd_motion_bar(primary_bar, five_valid ? five_hour : 0, reset || !five_valid);
+  cyd_motion_bar(weekly_bar, week_valid ? weekly : 0, reset || !week_valid);
+  bool exhausted = (five_valid && five_hour == 0) || (week_valid && weekly == 0);
+  uint32_t color = exhausted ? 0xF43F5E : !five_valid ? 0x8A929C : five_hour <= 20 ? 0xF43F5E : five_hour <= 50 ? 0xF59E0B : 0x10B981;
+  uint32_t week_color = !week_valid ? 0x8A929C : weekly <= 20 ? 0xF43F5E : weekly <= 50 ? 0xF59E0B : 0x10B981;
+  lv_obj_set_style_text_color(primary_value, lv_color_hex(color), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(primary_bar, lv_color_hex(color), LV_PART_INDICATOR);
+  lv_obj_set_style_text_color(weekly_value, lv_color_hex(week_color), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(weekly_bar, lv_color_hex(week_color), LV_PART_INDICATOR);
+  if (exhausted) {
+    lv_label_set_text(primary_warn, week_valid && weekly == 0 ? "WEEKLY QUOTA EXHAUSTED" : "5-HOUR QUOTA EXHAUSTED");
+    lv_obj_clear_flag(primary_warn, LV_OBJ_FLAG_HIDDEN);
+  } else lv_obj_add_flag(primary_warn, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_t *footer[] = {codex_credits, codex_resets, codex_plan, codex_credits_title, codex_resets_title};
+  for (unsigned i = 0; i < sizeof(footer)/sizeof(footer[0]); ++i) lv_obj_add_flag(footer[i], LV_OBJ_FLAG_HIDDEN);
+  lv_label_set_text_fmt(claude_footer, "Claude Code%s%s", plan && plan[0] ? " | " : "", plan ? plan : "");
+  lv_obj_clear_flag(claude_footer, LV_OBJ_FLAG_HIDDEN);
+  provider_theme(true);
+}
+
 EMSCRIPTEN_KEEPALIVE void cyd_set_codex_footer(const char *credits, const char *plan, int resets) {
   lv_label_set_text(codex_credits, credits);
   if (resets >= 0) lv_label_set_text_fmt(codex_resets, "%d", resets);
   else lv_label_set_text(codex_resets, "Not reported");
-  lv_label_set_text(codex_plan, plan);
+  cyd_compact_plan(codex_plan,plan);
+  lv_obj_t *items[]={codex_credits_title,codex_credits,codex_resets_title,codex_resets,codex_plan};
+  const int xs[]={12,60,110,155,260};
+  for(unsigned i=0;i<5;++i){lv_obj_set_parent(items[i],usage_screen);lv_obj_set_pos(items[i],xs[i],207);}
+  lv_obj_set_style_max_width(codex_credits,46,0);lv_obj_set_style_max_width(codex_resets,98,0);
+  lv_obj_set_width(codex_plan,50);
 }
 
 EMSCRIPTEN_KEEPALIVE void cyd_show_launcher(void) {
@@ -733,6 +821,11 @@ EMSCRIPTEN_KEEPALIVE void cyd_show_openrouter(void) {
 }
 
 EMSCRIPTEN_KEEPALIVE void cyd_set_antigravity(const char *account, const char *gemini5, const char *gemini5sub, const char *geminiweek, const char *geminiweeksub, const char *claude5, const char *claude5sub, const char *claudeweek, const char *claudeweeksub) {
+  lv_obj_t *hidden[]={claude_mark,codex_mark,provider_eyebrow,primary_warn,codex_credits_title,codex_credits,codex_resets_title,codex_resets,codex_plan,claude_footer};
+  for(unsigned i=0;i<sizeof(hidden)/sizeof(hidden[0]);++i)lv_obj_add_flag(hidden[i],LV_OBJ_FLAG_HIDDEN);
+  lv_obj_set_style_bg_color(usage_screen,lv_color_hex(0x09090B),0);
+
+  lv_obj_add_flag(claude_mark, LV_OBJ_FLAG_HIDDEN);
   motion_reset = motion_identity(account, 2);
   if (motion_reset) { cyd_motion_enter(g5, 0); cyd_motion_enter(c5, 60); cyd_motion_enter(gw, 120); cyd_motion_enter(cw, 180); }
   lv_obj_add_flag(error_card, LV_OBJ_FLAG_HIDDEN);
@@ -749,6 +842,11 @@ EMSCRIPTEN_KEEPALIVE void cyd_set_antigravity(const char *account, const char *g
 }
 
 EMSCRIPTEN_KEEPALIVE void cyd_set_error(const char *account, const char *detail) {
+  lv_obj_t *hidden[]={claude_mark,codex_mark,provider_eyebrow,primary_warn,codex_credits_title,codex_credits,codex_resets_title,codex_resets,codex_plan,claude_footer};
+  for(unsigned i=0;i<sizeof(hidden)/sizeof(hidden[0]);++i)lv_obj_add_flag(hidden[i],LV_OBJ_FLAG_HIDDEN);
+  lv_obj_set_style_bg_color(usage_screen,lv_color_hex(0x09090B),0);
+
+  lv_obj_add_flag(claude_mark, LV_OBJ_FLAG_HIDDEN);
   motion_provider = 0;
   lv_obj_add_flag(grid, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(primary_card, LV_OBJ_FLAG_HIDDEN);

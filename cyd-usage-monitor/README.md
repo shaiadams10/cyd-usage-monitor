@@ -1,7 +1,7 @@
 # CYD CLI Usage Monitor
 
 An ESP32 touchscreen monitor for the Hosyond/LCDWiki E32R40T that displays usage snapshots
-from locally authenticated OpenAI Codex and Google Antigravity CLIs plus
+from locally authenticated OpenAI Codex, Google Antigravity and Claude Code CLIs plus
 account-wide OpenRouter credits and spend. A small Docker-hosted dashboard
 manages isolated CLI profiles, private OpenRouter setup, and the CYD API.
 
@@ -144,7 +144,7 @@ private settings and backups outside the public checkout.
 ## How it works
 
 ```text
-Codex /status + Antigravity /usage + OpenRouter documented read APIs
+Codex /status + Antigravity /usage + Claude Code /usage + OpenRouter documented read APIs
                             |
        collector (isolated CLI profiles + private management key)
                  |
@@ -156,7 +156,7 @@ Codex /status + Antigravity /usage + OpenRouter documented read APIs
  ESP32-2432S028R / Wokwi
 ```
 
-The collector reads only the Codex and Antigravity CLIs' visible quota panels.
+Quota collection reads only the Codex, Antigravity and Claude Code CLIs' visible quota panels.
 It does not copy browser cookies, `auth.json`, refresh tokens, or provider
 credentials, and it does not call private provider HTTP APIs. OpenRouter is a
 narrow exception using only its documented credits, key-list, and activity
@@ -371,7 +371,7 @@ the E32R40T pin mapping above.
 
 ### 1. Configure the server
 
-Install Docker Compose, the Codex CLI, and the Antigravity CLI on a private
+Install Docker Compose, the Codex CLI, Antigravity CLI and Claude Code CLI on a private
 Linux host. Clone this repository, then copy the example configuration:
 
 ```sh
@@ -385,7 +385,7 @@ Set all of the following in the private `.env` file:
 - `CYD_API_TOKEN` — a random shared device token of at least 24 characters.
 - `CYD_LAN_BIND_ADDRESS` — the monitor host's private LAN IPv4 address.
 - `CYD_LAN_PORT` — the host port for the LAN-only device API (default 8001).
-- `AGY_HOST_PATH`, `CODEX_HOST_DIR`, and `NODE_BIN_HOST_DIR` — absolute paths
+- `AGY_HOST_PATH`, `CODEX_HOST_DIR`, `CLAUDE_HOST_PATH`, and `NODE_BIN_HOST_DIR` — absolute paths
   to the host-installed CLI executable/installations.
 - Optional WAHA settings if WhatsApp alerts are required.
 - Optional `CYD_MONITOR_SMTP_*` settings and
@@ -444,6 +444,20 @@ docker compose up -d --build
 docker compose ps
 ```
 
+Install the Linux host recovery timer after the first deployment:
+
+```sh
+python3 scripts/recover-monitor.py --project-dir "$PWD" --install
+```
+
+The deployment user's systemd manager must have lingering enabled so the timer
+runs after power restoration without an interactive login. The installer checks
+this prerequisite. See [boot recovery and maintenance](instructions/DEPLOYMENT_RUNBOOK.md#boot-recovery-and-maintenance)
+for setup, verification and disabling recovery during intentional downtime.
+Docker can leave a private-address listener stopped when the LAN address is not
+ready at startup, even with `restart: always`. The timer retries every minute
+and repairs missing network attachments using the existing local images.
+
 The Compose services run read-only, drop Linux capabilities, enable
 `no-new-privileges`, and use bounded PID and temporary-filesystem resources.
 Port 8000 is not published by Compose. Port 8001 is bound only to the private
@@ -487,7 +501,7 @@ more room than the default layout; the monitor does not use SPIFFS.
 
 On every boot the CYD now opens a pastel **CYD Apps** launcher instead of
 entering telemetry directly. Wi-Fi connects in the background while the menu
-remains responsive. Tap **Usage Monitor** for the selected Codex/Antigravity
+remains responsive. Tap **Usage Monitor** for the selected Codex/Antigravity/Claude
 account or **OpenRouter** for the independent credits-and-spend screen, then use
 the Home button in either header to return to the launcher. The OpenRouter app
 shows remaining credits, today/week/month spend, seven completed UTC days, and
@@ -625,7 +639,9 @@ selection writes are protected by the storage transaction lock. Older servers
 remain usable through the firmware's separate quota-fetch fallback.
 
 
-For one button per account, discover the current profiles in PowerShell:
+For one button per account, find each profile's ID on the protected web dashboard
+under the **Overview** or **Accounts** tab (each profile card displays a monospace ID chip
+with a one-click **Copy** button), or discover current profiles via PowerShell:
 
 ```powershell
 & "<checkout>\cyd-usage-monitor\scripts\stream-deck-next-account.ps1" -ListAccounts
@@ -911,3 +927,252 @@ alone does not update it. No Stream Deck restart is needed for these helpers.
 
 Collector tests isolate runtime storage and inherited notification credentials;
 they do not require a writable production `/app/data` directory.
+
+
+## Claude Code accounts
+
+Claude Code subscription accounts use the official CLI's `/usage` panel, with
+no inference prompts during quota collection. In **Accounts**, choose **Claude
+Code**, add a profile, and complete the official browser sign-in. Paste a returned
+authorization code only into the protected connection form when requested.
+Each account has an isolated HOME and `CLAUDE_CONFIG_DIR`; workstation credentials
+are never copied. See [authentication setup](instructions/TOKEN_GUIDE.md).
+
+The dashboard, CYD and LVGL preview show 5-hour and all-model weekly remaining
+percentages and the reset text actually reported by Claude. A missing reset is
+unavailable. Weekly exhaustion remains visible even when the 5-hour quota is full.
+Cached/last-known CLI panels cannot become new confirmed readings. Collection
+corroborates independent panels and checks account identity before and afterward.
+
+On the Linux deployment host, install a signed/checksum-verified official native
+Claude Code binary and set `CLAUDE_HOST_PATH` in the ignored `.env`. Compose mounts
+it read-only and sets `CLAUDE_BIN`; recreate the collector when replacing it.
+
+## Wake-up scheduling
+
+Open **Wake-ups** from the dashboard for a phone-friendly interface with separate
+**Send now** and **Schedules** views. Select connected accounts, choose a one-time
+or recurring local time and timezone, and review the exact model and availability
+shown for each provider, then choose the exact model and reasoning. The editable message defaults to `say OK` (up to 500 characters); no tools or project
+context belong in a wake-up. Schedules survive restarts but do not replay missed
+runs after downtime. The master stop starts off.
+
+Immediate and scheduled actions share a private SQLite ledger. Each attempt is
+reserved durably before launch, with account identity deduplication across profiles,
+a minimum five-hour-plus-two-minute interval, and at most five attempts per rolling
+24 hours. Repeated clicks use idempotency keys. Unknown results and interrupted
+reserved attempts pause the account; they are never retried automatically.
+Scheduled sending attempts once when a fresh healthy same-account panel reports
+available weekly quota, including active or unclear five-hour windows. Explicit Send
+now requests attempt one prompt regardless of window/quota state, retaining
+identity, freshness, model and durable duplicate-attempt guards. Unsupported or
+unverified model/retry controls are shown as unavailable, without model fallback.
+A reserved attempt is already in flight and may finish after Stop is pressed.
+These controls provide at-most-one attempts, not guaranteed exactly-once delivery
+by an external provider. Preserve `wakeups.sqlite3` and `.wakeups-initialized`
+together in private runtime backups; losing or corrupting the ledger stops sending.
+See [wake-up safeguards](instructions/CODEX_WAKEUP_PLAN.md).
+
+Choose **model and reasoning per provider** before sending or saving a schedule.
+The same explicit choices apply to all selected accounts of that provider. The
+CLI-discovered model list includes supported effort levels, and each account's
+access is checked before its prompt. A missing model or unavailable reasoning
+fails that account without fallback. Jobs preserve their original choices;
+existing schedules without choices require review and editing.
+
+Outcomes are logged per account and delivered in one grouped visual summary per run
+through configured alerts, including successes and ordinary skips.
+Other accounts in the current batch continue. Failed schedules pause until
+reviewed, and failed or uncertain attempts are not automatically retried.
+Antigravity exposes no native retry-count setting: the sender stops on
+reported retry/error/tool activity and after a 27-second deadline; an unreported
+internal transport retry cannot be ruled out. Codex uses zero HTTP/stream retry
+controls and the same bounded output guard; Claude disables retries and fallback.
+The monitor itself never resubmits a failed prompt. Native retry controls and
+bounded execution follow the installed CLI's verified capabilities; the guarantee is one submitted prompt, not a claim of exactly one
+internal provider HTTP request.
+
+The dashboard and shared physical/browser displays now use distinct themes:
+Claude has warm charcoal, terracotta and a burst mark; Codex has charcoal,
+emerald and an OpenAI-inspired monoline mark. Compact reset text omits the long
+IANA timezone suffix while private snapshots retain the original timezone.
+
+Claude profile IDs are also accepted by the PowerShell/VBScript Stream Deck direct-selection helpers. Update deployed helper copies before assigning a Claude profile ID.
+
+Claude quota collection uses granular error-reporting and updater controls: broad
+traffic/telemetry disable flags can suppress the CLI feature fetching required by
+`/usage`. Native cursor-rendered panels are normalized before parsing, and first-run
+workspace approval is restricted to the collector-owned empty directory.
+
+### Readable quotas and current wake-up models
+
+ChatGPT and Claude use the same balanced two-card quota layout on the dashboard,
+physical CYD and browser preview. Larger high-contrast remaining bars and percentage
+labels emphasize both windows equally. ChatGPT retains its credits, available
+reset count, plan and window reset times.
+
+Wake-up model choices come from the installed official CLI, refreshed every five
+minutes and independently checked per account. No model family is hardcoded into
+the picker. An outdated CLI can return an outdated catalogue: update the collector's
+configured official binary after verification, then recreate the collector so its
+read-only bind mount receives the new binary. The November 4 rollout uses integrity-verified Codex 0.166.0 for
+model discovery and sending, reporting current GPT-6 models alongside available
+5.6 choices. `CODEX_WAKEUP_HOST_DIR` optionally mounts this newer official install
+(defaults to `CODEX_HOST_DIR`); `CODEX_HOST_DIR` retains the quota-compatible CLI.
+A same-account comparison found 0.147.0 reports the banked-reset notice while
+0.166.0 omits it, so quota collection remains on 0.147.0. Both CLIs use the same
+isolated official profile; no credentials are copied or parsed. Retired/unavailable selections fail visibly without
+fallback. Internal hidden models and delegation-only Ultra effort are omitted from
+this bounded wake-up feature.
+
+The shared **Message** field applies to both Send now and Schedule. It defaults to
+`say OK`; keep custom text short. The review shows the exact message before an
+immediate send; saved schedules retain their own text and restore it when edited.
+Plain text is passed as one argument, with no shell interpolation or automatic
+resend. Empty, overlong, control-character, CLI-option and slash-command inputs
+are rejected before queuing. Duplicate request IDs include the exact message.
+Old queued jobs/schedules preserve their original `say okay` text during migration.
+Custom text remains in the protected private ledger, rather than alert or console
+logs. Editing a schedule cancels any old unreserved jobs from that schedule.
+
+### Managing wake-ups on mobile and desktop
+
+Open **Wake-ups** in the dashboard navigation to see your saved schedules first.
+Each schedule card shows its name, large local time, selected weekdays, timezone,
+status, account/provider icons, models and reasoning, exact message and next run.
+Use **Edit schedule**, **Pause/Resume** or **Delete** directly on the card. Deletion
+asks for confirmation and keeps saved activity. Filter to active or paused/completed
+schedules without changing them. When the master control is stopped, enabled
+schedules show **Ready** and their planned time; they do not send.
+
+**New schedule** and **Send now** open separate focused forms. Search and select
+accounts grouped by provider; hidden search results retain their selection.
+Models apply across selected accounts from the same provider. Saved schedules
+restore their accounts, choices, exact message and timing when edited. A new form
+starts fresh. **Activity** shows per-account results and safe failure reasons;
+successful immediate requests open that view automatically. Sending safeguards,
+CSRF protection and durable duplicate guards are unchanged.
+
+The wake-ups navigation uses the dashboard's existing item dimensions, typography
+and active indicator. Its Overview, Accounts, Alerts and Utilities links return to
+the corresponding dashboard section. Provider icons are local SVGs, with no remote
+image requests: the OpenAI knot and Claude burst come from
+[Simple Icons](https://github.com/simple-icons/simple-icons), and Antigravity uses
+[Google's official mark](https://antigravity.google/favicon.svg). Icon source URLs
+are retained in the assets. Marks identify their respective providers.
+
+### Wake-up summary notifications
+
+Every completed scheduled run or **Send now** request creates one durable summary,
+covering successful, skipped, failed and unconfirmed accounts. Scheduled summaries
+retain the schedule name and planned local time; Send now summaries explicitly
+identify an immediate request. Results are grouped by provider and selected model,
+with account names, reasons and an aligned next-reset column.
+
+The collector renders a JPEG from a local template, local provider icons and the
+pinned Pillow dependency (`python -m pip install -r server/requirements.txt` when
+running server tests from this project). Rendering makes no AI or external asset
+requests. WhatsApp receives one image message with a text caption through WAHA's
+[documented sendImage API](https://waha.devlike.pro/docs/how-to/send-messages/).
+If WhatsApp delivery fails, the existing deduplicated email fallback includes the
+same image, an HTML inline preview and the complete plain-text summary. Email-only
+configuration works too. Rendering failure falls back to text. No channel is
+reconfigured, and collection-outage notification behavior is preserved.
+
+Reset times use `CYD_MONITOR_TIMEZONE`, including daylight saving changes. After
+one successful prompt, a separate read-only CLI quota check tries to confirm the
+reset on the same account. Confirmed reset times are aligned in the report’s right column. When the window
+was confirmed idle but post-send verification cannot finish, the receipt shows a
+labelled **Estimated** reset based on completion plus five hours. Existing or
+unconfirmed windows never acquire an assumed new five-hour reset. This is an estimate, not a provider
+promise. Failed/unconfirmed sends never invent a confirmed reset. Raw CLI times
+without an epoch are shown only in their reported timezone.
+
+A fresh same-account reset clock is retained as **CLI reported** even when the
+quota still rounds to 100% and window activity is uncertain. Activity shows
+**Sent once** immediately after completion, then updates its next-reset line.
+Up to three read-only reset checks overlap across accounts; they never submit a
+prompt or change a successful send into a failure. One final receipt still
+waits for those checks and contains all account outcomes.
+
+A run is queued for notification atomically with its final results. Each receipt
+is claimed durably before external delivery, so concurrent workers and restarts
+cannot send one alert per account or replay uncertain delivery. Delivery failure
+remains visible in Activity; an accepted alert is not automatically sent again.
+If a worker crashes, expired work is closed with saved account results and any
+unconfirmed reservations, summarized once, and never reclaimed for inference.
+Missed queued starts are reported as skipped rather than sent late.
+
+The master enabled/disabled preference is persisted in the existing private SQLite
+ledger and restored after process/container restarts. Normal sending failures,
+notification failures and restarts do not change that preference. An uncertain
+account or failed schedule can still be paused independently. A detected clock
+jump holds sending separately and keeps the saved preference; fix the clock, then
+stop and enable wake-ups to acknowledge the hold. Missing/corrupt storage fails
+closed and must be restored with its initialization marker; it must never be
+replaced to clear safety history.
+
+The visual template is checked with seven Codex accounts, one Antigravity and one
+Claude account, plus 50-account batches, long names, missing reset readings and
+mixed outcomes. The report keeps confirmed times and estimates distinct, with
+one timezone label at the top. Up to 50 account outcomes fit one bounded JPEG; custom prompt text is
+never included in a notification image or caption.
+
+### Provider defaults and explicit Send now
+
+A confirmed failed request and an unconfirmed attempt have distinct guarded
+results. Later requests retain the actual previous failure reason rather than
+being labelled skipped/uncertain. These guards still prevent resubmission until
+operator review; no automatic retries or account resumes are added.
+
+For usage/rate-limit failures, the receipt includes fresh same-account CLI quota
+facts: **Weekly quota exhausted**, **Five-hour quota exhausted**, or both, with
+each reported reset. A fresh cached panel avoids an extra read; missing facts
+trigger one bounded read-only panel check alongside other accounts' reset checks.
+Unreported, stale or conflicting facts leave the limit type explicitly unconfirmed.
+A disabled five-hour pool caused by the weekly limit is not counted as separate
+five-hour exhaustion. Activity, WhatsApp/email text and the image show these
+details, while other accounts continue. A guard-blocked action makes clear that
+no new prompt was submitted.
+
+Use **Wake-ups → Defaults** to save a model and supported reasoning level for
+Codex, Antigravity and Claude Code. Each provider saves independently on the
+server, across browsers and restarts. New **Send now** and **New schedule** forms
+prefill these values for all selected accounts of that provider. Change the
+selection for a single action without changing its default; return to Defaults
+to save a lasting change or remove it. Existing schedules and queued jobs keep
+the exact choices saved with them. If a saved model/effort disappears, it remains
+visible as unavailable and the action waits for an explicit replacement.
+
+**Send now** is an explicit request for one prompt, whether the five-hour window
+is active, idle or uncertain. It does not skip solely because the CLI prints a
+reset clock time. It still checks fresh official account identity, the
+selected model, master state and all durable duplicate/uncertainty/interval guards.
+A provider can reject exhausted quota; the failure is reported and never retried.
+Schedules also attempt once with active or unclear five-hour windows, but skip
+when fresh weekly quota is exhausted or unavailable. Existing schedules use this
+behavior too. No additional prompt is sent to retry an earlier skipped run.
+A clock label around now+5h can indicate either a prospective idle window or one
+started moments ago; the monitor does not treat that coincidence as proof.
+Successful sends with an unclear/active window do not assume a timer restart.
+Activity and receipts distinguish exhausted weekly quota from unavailable quota
+and include the exhausted window's reported reset. Skipped clock labels are
+marked CLI reported. Saved results retain bounded normalized preflight facts
+(quota freshness, remaining percentages and window state) for diagnosis.
+
+For immediate Codex/Claude sends, identity is checked through the official local
+`account/read` / `claude auth status` interfaces instead of opening a quota panel
+before sending. A healthy same-account panel under two minutes old can supply
+existing reset facts; stale panels cannot. Codex rechecks identity before launch
+through `account/read` as well. Schedules still collect a fresh eligibility panel,
+and Antigravity retains its panel-based identity checks. CLI startup and provider
+response times vary; the UI distinguishes checking, sending and reset checking
+from actual failures and interrupted attempts.
+
+The image receipt uses a compact light report layout: provider marks, account
+rows, outcome labels, failure reasons and an aligned reset-time column. Times use
+the configured timezone, stated once at the top, with the day/estimate beneath
+each time. WhatsApp text follows collection-alert conventions: bold headings,
+provider/model groups, status emojis, quoted failure reasons and readable spacing.
+Large batches use a complete summary caption plus the full image, within caption
+limits; email retains the full text and inline report with formatted headings.

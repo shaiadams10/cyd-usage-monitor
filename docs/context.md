@@ -5,8 +5,37 @@
 CYD Usage Monitor is the sole project in the current public repository tree.
 It includes the collector, authenticated dashboard/device API, ESP32 firmware,
 shared LVGL WebAssembly preview and optional Windows account-switching helpers.
+Codex, Antigravity and Claude Code support official CLI collection and separate
+operator-controlled, guarded immediate/scheduled wake-ups. OpenRouter remains a
+read-only documented management-API integration.
 
 ## Recent Changes
+
+### 2026-11-05 — Claude Code, guarded wake-ups and schedule eligibility
+- Publish pending CYD changes since the October diagnostics release, including
+  Claude subscription collection, dashboard/device/shared LVGL support, larger
+  quota bars, current model discovery and separate Codex collection/send binaries.
+- Add authenticated immediate and timezone-aware scheduled sends, editable
+  messages, provider model/reasoning defaults, durable account/attempt guards,
+  no automatic prompt retry, grouped local image/text receipts and truthful
+  progress, failure attribution and reset reporting.
+- Fix the morning schedule's overly strict idle-window gate at the operator's
+  request. Attempt once with active/unclear five-hour windows when fresh healthy
+  same-account panels report positive weekly quota. Preserve all durable guards,
+  retain bounded preflight facts and show exhausted-window resets on skips.
+- Include Linux boot recovery and Windows helper diagnostic-source safeguards.
+  Keep publication CYD-only, with canonical source and public documentation;
+  exclude private configuration, runtime data and duplicate backup copies.
+- Existing private deployment passed all 232 isolated Linux server tests (one
+  optional native skip), desktop/mobile origin checks and container/collector
+  health. No live prompt or notification was sent by publication validation.
+- Release checkout passed 232 Windows server tests (two expected skips), 29
+  helper tests, example-config firmware compilation, real LVGL regressions,
+  WebAssembly rebuild and JavaScript syntax. Gitleaks and private-value review
+  passed; publication retains only the 107 canonical public source/doc files.
+- Files: AGENTS.md,README.md,.github/workflows/ci.yml,cyd-usage-monitor/{AGENTS.md,
+  README.md,CHANGELOG.md,Dockerfile,.env.example,docker-compose.yml,instructions/,
+  server/,scripts/,src/,simulator/},docs/{context.md,map.md}.
 
 ### 2026-10-16 — Reliable Collection and Searchable Diagnostics
 - Recover Codex slash-command input by disabling paste-burst handling and startup

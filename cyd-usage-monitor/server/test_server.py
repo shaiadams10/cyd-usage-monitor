@@ -5,6 +5,7 @@ import os
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 import urllib.error
 import urllib.request
@@ -31,6 +32,88 @@ class QuietHandler(app.Handler):
 
 
 class ServerApiTests(unittest.TestCase):
+    def test_claude_profile_creation_and_display(self):
+        status, profile, _ = self.request("/api/admin/profiles", method="POST", payload={"provider": "claude", "label": "Claude demo"}, csrf=True)
+        self.assertEqual(status, 201)
+        self.assertTrue(profile["id"].startswith("claude-"))
+        snapshot = {"provider": "claude", "status": "ok", "account_name": "Claude demo",
+                    "collected_at": app.utcnow(), "metrics": {
+                        "five_hour": {"remaining_pct": 100, "reset": ""},
+                        "weekly": {"remaining_pct": 0, "reset": "Nov 7, 11pm (America/New_York)"}}}
+        payload = app.render_snapshot(snapshot)
+        self.assertEqual(payload["provider"], "claude")
+        self.assertEqual(payload["claude_5h_pct"], 100)
+        self.assertEqual(payload["claude_5h_sub"], "Reset unavailable")
+        self.assertEqual(payload["claude_weekly_pct"], 0)
+        self.assertEqual(payload["claude_weekly_sub"], "Resets Nov 7, 11pm")
+        self.assertEqual(snapshot["metrics"]["weekly"]["reset"], "Nov 7, 11pm (America/New_York)")
+        self.assertNotIn("codex_5h_pct", payload)
+        snapshot["metrics"]["weekly"]["remaining_pct"] = 101
+        with self.assertRaises(ValueError):
+            app.render_snapshot(snapshot)
+
+    def test_claude_partial_quota_does_not_invent_a_window(self):
+        payload = app.render_snapshot({"provider": "claude", "account_name": "Demo",
+            "collected_at": app.utcnow(), "metrics": {"weekly": {"remaining_pct": 0, "reset": ""}}})
+        self.assertIsNone(payload["claude_5h_pct"])
+        self.assertEqual(payload["claude_weekly_pct"], 0)
+        self.assertTrue(payload["partial"])
+
+    def test_wakeups_api_requires_dashboard_auth_and_csrf(self):
+        self.assertEqual(self.request("/api/admin/wakeups", basic=False)[0], 401)
+        self.assertEqual(self.request("/api/admin/wakeups", bearer=True, basic=False, device=True)[0], 404)
+        self.assertEqual(self.request("/static/wakeups.html", basic=False)[0], 401)
+        self.assertEqual(self.request("/static/./wakeups.html", basic=False)[0], 401)
+        self.assertEqual(self.request("/api/admin/wakeups")[0], 200)
+        self.assertEqual(self.request("/api/admin/wakeups", method="POST", payload={"action": "enabled", "enabled": True})[0], 403)
+        self.assertEqual(self.request("/api/admin/wakeups", method="POST", payload={"action": "enabled", "enabled": "yes"}, csrf=True)[0], 400)
+
+    def test_wakeup_defaults_are_authenticated_csrf_protected_and_durable(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(app,"DATA_DIR",Path(directory)):
+            capability={"available":True,"models":[{"id":"example-model","reasoning_levels":["low","medium"]}]}
+            app.WakeupStore(app.DATA_DIR).set_capabilities({"codex":SimpleNamespace(public=lambda:capability)})
+            payload={"action":"save_defaults","provider_settings":{"codex":{"model":"example-model","reasoning":"low"}}}
+            self.assertEqual(self.request("/api/admin/wakeups",method="POST",payload=payload)[0],403)
+            self.assertEqual(self.request("/api/admin/wakeups",method="POST",payload=payload,basic=False,csrf=True)[0],401)
+            self.assertEqual(self.request("/api/admin/wakeups",method="POST",payload=payload,csrf=True)[0],200)
+            status,state,_=self.request("/api/admin/wakeups")
+            self.assertEqual(state["defaults"],payload["provider_settings"])
+            self.assertEqual(state["jobs"],[]);self.assertEqual(state["attempts"],[])
+            self.assertFalse(state["enabled"])
+            self.assertEqual(self.request("/api/admin/wakeups",method="POST",payload={"action":"clear_default","provider":"codex"},csrf=True)[0],200)
+
+    def test_wakeups_missing_ledger_reports_stopped_without_disconnection(self):
+        with patch.object(app.WakeupStore, "status", side_effect=ValueError("ledger unavailable")):
+            status, body, _ = self.request("/api/admin/wakeups")
+        self.assertEqual(status, 503)
+        self.assertIn("Sending is stopped", body["error"])
+
+    def test_wakeups_http_schedule_and_manual_idempotency(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(app, "DATA_DIR", Path(directory)):
+            # Profile configuration remains a fixture; only the new ledger is isolated.
+            choice = {"codex": {"model": "synthetic-model", "reasoning": "low"}}
+            capability = {"available": True, "model": "synthetic-model", "reasoning": "low", "reason": "",
+                          "models": [{"id": "synthetic-model", "label": "Synthetic model", "reasoning_levels": ["low"]}]}
+            app.WakeupStore(app.DATA_DIR).set_capabilities({"codex": SimpleNamespace(public=lambda: capability)})
+            status, _, _ = self.request("/api/admin/wakeups", method="POST", csrf=True,
+                payload={"action": "enabled", "enabled": True})
+            self.assertEqual(status, 200)
+            schedule = {"action": "save_schedule", "profile_ids": [self.profile["id"]],
+                        "kind": "weekly", "timezone": "America/New_York", "time": "08:00", "weekdays": [0, 1, 2, 3, 4], "provider_settings": choice}
+            status, saved, _ = self.request("/api/admin/wakeups", method="POST", csrf=True, payload=schedule)
+            self.assertEqual(status, 200)
+            request = {"action": "now", "profile_ids": [self.profile["id"]], "idempotency_key": "synthetic-browser-request-123", "provider_settings": choice}
+            first = self.request("/api/admin/wakeups", method="POST", csrf=True, payload=request)
+            second = self.request("/api/admin/wakeups", method="POST", csrf=True, payload=request)
+            self.assertEqual(first[0], 200)
+            self.assertEqual(second[0], 200)
+            status, state, _ = self.request("/api/admin/wakeups")
+            self.assertEqual(len(state["jobs"]), 1)
+            self.assertEqual(state["jobs"][0]["state"], "queued")
+            self.assertEqual(len(state["attempts"]), 0)
+            self.assertEqual(state["schedules"][0]["id"], saved["id"])
+            self.assertEqual(state["jobs"][0]["provider_settings"], choice)
+            self.assertEqual(state["schedules"][0]["provider_settings"], choice)
     @classmethod
     def setUpClass(cls):
         cls.httpd = app.ThreadingHTTPServer(("127.0.0.1", 0), QuietHandler)
@@ -239,6 +322,9 @@ class ServerApiTests(unittest.TestCase):
         self.assertIn(b'class="button remove compact hidden"', dashboard)
         self.assertIn(b"Incident history", dashboard)
         self.assertIn(b"first evidence", dashboard)
+        self.assertIn(b"profile-id-chip", dashboard)
+        self.assertIn(b"profileIdChip", dashboard)
+        self.assertIn(b"data-copy-text", dashboard)
         self.assertNotIn(b"account-meta", dashboard)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         status, body, _ = self.request("/api/admin/cyd-status")

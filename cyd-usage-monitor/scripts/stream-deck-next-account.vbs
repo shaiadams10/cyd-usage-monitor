@@ -7,7 +7,7 @@ If WScript.Arguments.Count > 1 Then WScript.Quit 2
 profileId = ""
 If WScript.Arguments.Count = 1 Then
     profileId = WScript.Arguments(0)
-    If Not Matches(profileId, "^(codex|antigravity)-[a-f0-9]{10}$") Then WScript.Quit 2
+    If Not Matches(profileId, "^(codex|antigravity|claude)-[a-f0-9]{10}$") Then WScript.Quit 2
 End If
 endpoint = PrivateSetting("CYD_USAGE_MONITOR_NEXT_ACCOUNT_URL")
 token = PrivateSetting("CYD_API_TOKEN")

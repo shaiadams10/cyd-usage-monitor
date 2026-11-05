@@ -6,7 +6,7 @@
 
 **Your AI quotas, at a glance. On your desk and in your browser.**
 
-A self-hosted dashboard and ESP32 touchscreen for Codex, Antigravity, and OpenRouter.
+A self-hosted dashboard and ESP32 touchscreen for Codex, Antigravity, Claude Code, and OpenRouter.
 
 [![CI](https://github.com/shaiadams10/cyd-usage-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/shaiadams10/cyd-usage-monitor/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -43,6 +43,7 @@ Use the browser dashboard on its own, or add the physical display. Both consume 
 | Provider | Collected data | Source |
 | --- | --- | --- |
 | OpenAI Codex | Five-hour and weekly quota, reset times, credits, available reset count when reported | Authenticated CLI `/status` and its visible startup notice |
+| Claude Code | Five-hour and all-model weekly quota, reset times when reported | Authenticated CLI `/usage` with official CLI identity checks |
 | Google Antigravity | Gemini and Claude five-hour and weekly quota, reset status | Authenticated CLI `/usage` |
 | OpenRouter | Account-wide credits, spend, activity | Documented management API read endpoints |
 

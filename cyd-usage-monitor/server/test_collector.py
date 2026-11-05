@@ -15,6 +15,187 @@ except ImportError:
 
 
 class CollectorParserTests(unittest.TestCase):
+    def test_wakeup_failure_notification_is_claimed_once_and_uses_configured_email(self):
+        event = {"notification_id": "notification-example", "profile_id": "claude-0123456789",
+                 "provider": "claude", "state": "failed", "model": "chosen-model", "reasoning": "low",
+                 "reason": "Selected model is unavailable.", "attempt_id": "attempt-example"}
+        store = Mock()
+        store.claim_notifications.side_effect = [[event], []]
+        with patch.object(collector, "waha_settings", return_value={}), \
+                patch.object(collector, "email_fallback_configured", return_value=True), \
+                patch.object(collector, "send_email_message", return_value=(True, "accepted")) as send, \
+                patch.object(collector, "record_event"):
+            collector.dispatch_wakeup_notifications(store, [{"id": event["profile_id"], "label": "Example account"}])
+            collector.dispatch_wakeup_notifications(store, [{"id": event["profile_id"], "label": "Example account"}])
+        send.assert_called_once()
+        self.assertIn("Selected model is unavailable.", send.call_args.args[1])
+        self.assertIn("chosen-model", send.call_args.args[1])
+        store.finish_notification.assert_called_once_with("notification-example", True)
+
+    def test_wakeup_notification_delivery_failure_is_recorded_without_retry(self):
+        store = Mock()
+        store.claim_notifications.return_value = [{"notification_id": "notification-example", "provider": "codex"}]
+        with patch.object(collector, "waha_settings", return_value={}), \
+                patch.object(collector, "email_fallback_configured", return_value=True), \
+                patch.object(collector, "send_email_message", side_effect=OSError("transport unavailable")) as send, \
+                patch.object(collector, "record_event"):
+            collector.dispatch_wakeup_notifications(store, [])
+        send.assert_called_once()
+        store.finish_notification.assert_called_once_with("notification-example", False)
+
+    def test_summary_groups_providers_and_distinguishes_manual_from_scheduled(self):
+        results = [{"profile_id":provider+"-0123456789", "label":name, "provider":provider, "state":state, "model":"chosen-model", "reasoning":"low", "reason":"Model is unavailable."} for provider,name,state in [("claude","Claude account","failed"),("codex","OpenAI account","sent"),("antigravity","Google account","skipped")]]
+        event = {"kind":"run_summary", "source":"manual", "results":results, "created_at":"2026-11-04T13:00:00Z"}
+        subject, message = collector.format_wakeup_summary(event, [])
+        self.assertIn("Send now",subject)
+        self.assertIn("not a schedule",message)
+        self.assertIn("*1 woken*",message);self.assertIn("*1 skipped*",message);self.assertIn("*1 failed*",message)
+        self.assertLess(message.index("*ChatGPT / Codex*"),message.index("*Antigravity*"))
+        self.assertLess(message.index("*Antigravity*"),message.index("*Claude Code*"))
+        self.assertIn("*Claude account* — Failed",message)
+        self.assertIn("Model is unavailable.",message)
+        event.update(source="schedule:"+"a"*32, run_context={"schedule_label":"Morning start", "scheduled_for":"2026-11-04T13:00:00Z", "timezone":"America/New_York"})
+        subject, message = collector.format_wakeup_summary(event, [])
+        self.assertIn("Scheduled",subject)
+        self.assertIn("Morning start",message)
+        self.assertIn("*Times:* " + collector.ALERT_TIMEZONE_NAME,message)
+        self.assertNotIn("not a schedule",message)
+
+    def test_one_waha_summary_with_email_fallback_not_one_alert_per_account(self):
+        event = {"kind":"run_summary", "notification_id":"summary-example", "source":"manual", "results":[{"provider":"codex","profile_id":"codex-0123456789","state":"sent"},{"provider":"claude","profile_id":"claude-0123456789","state":"failed","reason":"Unavailable model"}]}
+        store=Mock();store.claim_notifications.side_effect=[[event],[]]
+        with patch.object(collector,"waha_settings",return_value={"api_key":"synthetic","chat_id":"synthetic"}), patch.object(collector,"deliver_waha_message",return_value=(False,"Fallback email delivery accepted by the SMTP server.")) as send, patch.object(collector,"send_email_message") as email, patch.object(collector,"record_event"):
+            collector.dispatch_wakeup_notifications(store,[])
+            collector.dispatch_wakeup_notifications(store,[])
+        send.assert_called_once()
+        self.assertEqual(send.call_args.args[0],"wakeup_summary")
+        self.assertIn("Codex",send.call_args.args[1]);self.assertIn("Claude Code",send.call_args.args[1])
+        email.assert_not_called()  # Existing WAHA helper already delivered fallback.
+        store.finish_notification.assert_called_once_with("summary-example",True)
+
+    def test_successful_run_also_sends_summary_without_logging_private_body(self):
+        event={"notification_id":"summary-example","source":"manual","results":[{"provider":"codex","label":"Private label", "state":"sent"}]}
+        store=Mock();store.claim_notifications.return_value=[event]
+        with patch.object(collector,"waha_settings",return_value={}), patch.object(collector,"email_fallback_configured",return_value=True), patch.object(collector,"send_email_message",return_value=(True,"accepted")) as send, patch.object(collector,"record_event") as record:
+            collector.dispatch_wakeup_notifications(store,[])
+        send.assert_called_once();self.assertIn("1 woken",send.call_args.args[1])
+        self.assertNotIn("Private label",repr(record.call_args_list))
+        store.finish_notification.assert_called_once_with("summary-example",True)
+
+    def test_visual_waha_summary_is_one_image_request_with_caption(self):
+        event={"kind":"run_summary","source":"manual","created_at":"2026-11-04T13:00:00Z","results":[{"provider":"codex","state":"sent","label":"Example account"}]}
+        try:
+            from .wakeup_report import render_summary
+        except ImportError:
+            from wakeup_report import render_summary
+        image=render_summary(event,"America/New_York")
+        response=Mock();response.status=200;response.__enter__=Mock(return_value=response);response.__exit__=Mock(return_value=False)
+        with patch.object(collector,"waha_settings",return_value={"api_key":"synthetic-key","chat_id":"synthetic-chat","session":"synthetic","url":"http://127.0.0.1:1"}), patch.object(collector.urlrequest,"urlopen",return_value=response) as send:
+            self.assertTrue(collector.deliver_waha_message("wakeup_summary","Send now summary","synthetic-run",image=image)[0])
+        send.assert_called_once();request=send.call_args.args[0]
+        self.assertTrue(request.full_url.endswith("/api/sendImage"))
+        payload=json.loads(request.data)
+        self.assertEqual(payload["caption"],"Send now summary")
+        self.assertEqual(collector.base64.b64decode(payload["file"]["data"]),image)
+        self.assertNotIn("url",payload["file"])
+
+    def test_visual_email_keeps_plain_text_and_inline_jpeg(self):
+        settings={"host":"smtp.example.invalid","port":587,"security":"starttls","username":"synthetic","password":"synthetic","sender":"from@example.invalid","recipients":["to@example.invalid"]}
+        with patch.object(collector,"email_settings",return_value=settings), patch.object(collector.smtplib,"SMTP") as smtp:
+            self.assertTrue(collector.send_email_message("Scheduled wake-up","*Grouped text summary*\n<Example label>",image=b"synthetic-jpeg")[0])
+        message=smtp.return_value.send_message.call_args.args[0]
+        parts=list(message.walk())
+        self.assertTrue(any(part.get_content_type()=="text/plain" and "Grouped text summary" in part.get_content() for part in parts))
+        self.assertTrue(any(part.get_content_type()=="text/html" and "cid:cyd-wakeup-summary" in part.get_content() and "<strong>Grouped text summary</strong>" in part.get_content() and "&lt;Example label&gt;" in part.get_content() for part in parts))
+        self.assertEqual([part.get_payload(decode=True) for part in parts if part.get_content_type()=="image/jpeg"],[b"synthetic-jpeg"])
+
+    def test_report_render_failure_still_sends_one_text_summary(self):
+        try:
+            from . import wakeup_report
+        except ImportError:
+            import wakeup_report
+        event={"kind":"run_summary","notification_id":"summary-example","source":"manual","results":[{"provider":"codex","state":"sent"}]}
+        store=Mock();store.claim_notifications.return_value=[event]
+        with patch.object(wakeup_report,"render_summary",side_effect=ValueError("synthetic rendering failure")), patch.object(collector,"waha_settings",return_value={}), patch.object(collector,"email_fallback_configured",return_value=True), patch.object(collector,"send_email_message",return_value=(True,"accepted")) as send, patch.object(collector,"record_event"):
+            collector.dispatch_wakeup_notifications(store,[])
+        send.assert_called_once();self.assertNotIn("image",send.call_args.kwargs)
+        store.finish_notification.assert_called_once_with("summary-example",True)
+
+    def test_durable_run_to_local_waha_image_and_smtp_fallback(self):
+        import http.server
+        import threading
+        try:
+            from .wakeups import WakeupAdapter, WakeupStore
+        except ImportError:
+            from wakeups import WakeupAdapter, WakeupStore
+        for status in (200, 500):
+            with self.subTest(status=status):
+                requests=[]
+                class Handler(http.server.BaseHTTPRequestHandler):
+                    def log_message(self,*args):pass
+                    def do_POST(self):
+                        requests.append((self.path,json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+                        self.send_response(status);self.send_header("Content-Type","application/json");self.end_headers();self.wfile.write(b"{}")
+                server=http.server.ThreadingHTTPServer(("127.0.0.1",0),Handler)
+                thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+                try:
+                    profiles=[{"id":provider+"-0123456789","provider":provider,"label":provider+" sample"} for provider in ("codex","antigravity","claude")]
+                    store=WakeupStore(collector.DATA_DIR / str(status));sent=[]
+                    def send(profile,prompt,attempt):
+                        sent.append(profile["id"])
+                        return {"state":"failed","reason":"Unavailable model"} if profile["provider"]=="claude" else {"state":"sent"}
+                    def preflight(profile):return {"account_identity":profile["provider"]+"@example.invalid","identity_verified":True,"collected_at":collector.utcnow(),"weekly_remaining_pct":50,"window_state":"idle"}
+                    adapters={provider:WakeupAdapter("current-model","low",send,preflight,True,catalogue=[{"id":"current-model","reasoning_levels":["low"]}]) for provider in ("codex","antigravity","claude")}
+                    store.set_capabilities(adapters);store.set_enabled(True)
+                    store.enqueue_now([profile["id"] for profile in profiles],"synthetic-request-012345",{provider:{"model":"current-model","reasoning":"low"} for provider in adapters})
+                    store.process_due(profiles,adapters)
+                    settings={"host":"smtp.example.invalid","port":465,"security":"tls","username":"synthetic","password":"synthetic","sender":"from@example.invalid","recipients":["to@example.invalid"]}
+                    with patch.object(collector,"waha_settings",return_value={"api_key":"synthetic","chat_id":"synthetic-chat","session":"synthetic","url":f"http://127.0.0.1:{server.server_port}"}), patch.object(collector,"email_settings",return_value=settings), patch.object(collector.smtplib,"SMTP_SSL") as smtp:
+                        collector.dispatch_wakeup_notifications(store,profiles)
+                        collector.dispatch_wakeup_notifications(WakeupStore(store.directory),profiles)
+                    self.assertEqual(len(sent),3)
+                    self.assertEqual(len(requests),1)
+                    self.assertEqual(requests[0][0],"/api/sendImage")
+                    self.assertIn("2 woken",requests[0][1]["caption"])
+                    self.assertIn("1 failed",requests[0][1]["caption"])
+                    self.assertEqual(store.status(profiles)["notifications"][0]["delivery_state"],"delivered")
+                    self.assertTrue(store.status(profiles)["enabled"])
+                    if status==500:
+                        smtp.return_value.send_message.assert_called_once()
+                        message=smtp.return_value.send_message.call_args.args[0]
+                        self.assertTrue(any(part.get_content_type()=="image/jpeg" for part in message.walk()))
+                    else:smtp.assert_not_called()
+                finally:
+                    server.shutdown();server.server_close();thread.join(timeout=3)
+
+    def test_whatsapp_summary_uses_collection_alert_style_and_one_model_heading(self):
+        event={"source":"manual","created_at":"2026-11-04T13:00:00Z","results":[{"provider":"codex","label":label,"state":state,"model":"current-model","reasoning":"low","reason":"Model unavailable."} for label,state in [("Personal","sent"),("Work","failed")]]}
+        subject,message=collector.format_wakeup_summary(event,[])
+        self.assertIn("⚡ *CYD Usage Monitor · Send now wake-up*",message)
+        self.assertIn("🟢 *ChatGPT / Codex*",message)
+        self.assertIn("✅ *Personal* — Woken",message)
+        self.assertIn("❌ *Work* — Failed",message)
+        self.assertIn("> Model unavailable.",message)
+        self.assertEqual(message.count("_current-model · low reasoning_"),1)
+        self.assertEqual(message.count(collector.ALERT_TIMEZONE_NAME),1)
+        response=Mock();response.status=200;response.__enter__=Mock(return_value=response);response.__exit__=Mock(return_value=False)
+        long_event=dict(event,results=event["results"]*10)
+        _,long_message=collector.format_wakeup_summary(long_event,[])
+        with patch.object(collector,"waha_settings",return_value={"api_key":"synthetic","chat_id":"synthetic","session":"synthetic","url":"http://127.0.0.1:1"}),patch.object(collector.urlrequest,"urlopen",return_value=response) as send:
+            collector.deliver_waha_message("wakeup_summary",long_message,"example-summary",image=b"synthetic-jpeg")
+        caption=json.loads(send.call_args.args[0].data)["caption"]
+        self.assertLessEqual(len(caption),950)
+        self.assertIn("*10 woken*",caption);self.assertIn("*10 failed*",caption)
+        self.assertIn("Full account results",caption)
+
+    def test_usage_failure_summary_names_window_and_reset(self):
+        result = {"provider":"claude", "label":"Claude account", "state":"failed", "failure_kind":"usage_limit", "reason":"Not sent: previous request was rejected for usage or rate limits.", "quota_limits":[{"window":"weekly", "reset_text":"Nov 7, 11pm", "reset_timezone":collector.ALERT_TIMEZONE_NAME}]}
+        _, message = collector.format_wakeup_summary({"source":"manual", "results":[result]},[])
+        self.assertIn("Weekly quota exhausted",message)
+        self.assertIn("Nov 7, 11pm",message)
+        self.assertIn("Failed",message)
+        self.assertNotIn("— Skipped",message)
+
     def setUp(self):
         # Every test must isolate all runtime paths, including optional SMTP
         # secrets. Otherwise a read acquires a lock under the production path.
@@ -918,3 +1099,12 @@ class CollectionSchedulingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WakeupExecutableTests(unittest.TestCase):
+    def test_modern_codex_override_never_changes_quota_executable(self):
+        with patch.dict(collector.os.environ, {"CODEX_WAKEUP_BIN": "current-codex"}), patch.object(collector.shutil, "which", return_value="current-codex"), patch.object(collector,"cli_executable",return_value="quota-codex") as quota:
+            self.assertEqual(collector.wakeup_cli_executable("codex"),"current-codex")
+            quota.assert_not_called()
+            self.assertEqual(collector.wakeup_cli_executable("claude"),"quota-codex")
+            quota.assert_called_once_with("claude")

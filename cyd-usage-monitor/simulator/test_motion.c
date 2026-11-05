@@ -45,11 +45,18 @@ int main(void) {
     assert(strcmp(lv_label_get_text(codex_resets), "2") == 0);
     cyd_set_codex_footer("500", "Pro", 0);
     assert(strcmp(lv_label_get_text(codex_resets), "0") == 0);
+    for(unsigned i=0;i<3;++i){
+        codex(25);
+        cyd_set_codex_footer("500", "ChatGPT Pro", 2);
+        advance(66);
+        assert(strcmp(lv_label_get_text(codex_plan), "Pro") == 0);
+    }
     cyd_set_codex_footer("None", "Plus", -1);
     assert(strcmp(lv_label_get_text(codex_resets), "Not reported") == 0);
     advance(66);
     lv_obj_update_layout(details_card);
-    assert(codex_resets->coords.y2 < details_card->coords.y2);
+    assert(codex_resets->coords.y2 < SCREEN_H);
+    assert(lv_obj_get_parent(codex_resets)==usage_screen);
     assert(codex_resets->coords.x2 < codex_plan->coords.x1);
 
     /* Returning to a populated screen used to reset values after arrival. */
@@ -82,6 +89,46 @@ int main(void) {
     advance(30000); codex(-20); assert(cyd_bars[0].shine);
     advance(1100); assert(!cyd_bars[0].shine);
 
+    /* Claude's idle 5h allowance must not obscure exhausted weekly quota. */
+    cyd_set_claude("Demo Claude", 100, "Reset unavailable", 0, "Nov 7, 11pm", "Max");
+    assert(lv_bar_get_value(primary_bar) == 1000);
+    assert(lv_bar_get_value(weekly_bar) == 0);
+    assert(strcmp(lv_label_get_text(primary_warn), "WEEKLY QUOTA EXHAUSTED") == 0);
+    assert(!lv_obj_has_flag(claude_mark, LV_OBJ_FLAG_HIDDEN));
+    lv_obj_update_layout(usage_screen);
+    assert(lv_obj_get_x(primary_card)<lv_obj_get_x(details_card));
+    assert(lv_obj_get_y(primary_card)==lv_obj_get_y(details_card));
+    assert(lv_color_to32(lv_obj_get_style_bg_color(usage_screen,0))==lv_color_to32(lv_color_hex(0x17120F)));
+    assert(lv_obj_has_flag(codex_mark,LV_OBJ_FLAG_HIDDEN));
+    assert(lv_obj_has_flag(mascot, LV_OBJ_FLAG_HIDDEN));
+    assert(lv_obj_has_flag(codex_credits_title, LV_OBJ_FLAG_HIDDEN));
+    assert(lv_obj_has_flag(codex_resets_title, LV_OBJ_FLAG_HIDDEN));
+    assert(strcmp(lv_label_get_text(claude_footer), "Claude Code | Max") == 0);
+    cyd_set_claude("Another Claude", -1, "Not reported by CLI", 70, "Reset later", "");
+    assert(lv_bar_get_value(primary_bar) == 0);
+    assert(lv_bar_get_value(weekly_bar) == 700);
+    assert(strcmp(lv_label_get_text(primary_value), "N/A") == 0);
+    assert(lv_obj_has_flag(primary_warn, LV_OBJ_FLAG_HIDDEN));
+    cyd_set_claude("Another Claude", 40, "Reset later", -1, "Not reported by CLI", "");
+    assert(lv_bar_get_value(weekly_bar) == 0);
+    assert(strcmp(lv_label_get_text(weekly_value), "N/A") == 0);
+    advance(1100);
+    assert(lv_bar_get_value(primary_bar) == 400);
+    codex(25);
+    lv_obj_update_layout(usage_screen);
+    assert(lv_obj_get_x(primary_card)<lv_obj_get_x(details_card));
+    assert(lv_obj_get_y(primary_card)==lv_obj_get_y(details_card));
+    assert(lv_obj_get_width(primary_card)==lv_obj_get_width(details_card));
+    assert(lv_obj_get_height(primary_bar)==20 && lv_obj_get_height(weekly_bar)==20);
+    assert(primary_bar->coords.y2 < primary_sub->coords.y1);
+    assert(weekly_bar->coords.y2 < weekly_sub->coords.y1);
+    assert(!lv_obj_has_flag(codex_mark,LV_OBJ_FLAG_HIDDEN));
+    assert(lv_color_to32(lv_obj_get_style_bg_color(usage_screen,0))==lv_color_to32(lv_color_hex(0x0D1715)));
+    assert(lv_obj_has_flag(claude_mark, LV_OBJ_FLAG_HIDDEN));
+    assert(lv_obj_has_flag(claude_footer, LV_OBJ_FLAG_HIDDEN));
+    assert(!lv_obj_has_flag(codex_credits_title, LV_OBJ_FLAG_HIDDEN));
+    assert(!lv_obj_has_flag(codex_resets_title, LV_OBJ_FLAG_HIDDEN));
+
     cyd_set_antigravity("Demo AG", "90%", "Reset later", "65%", "Reset later", "40%", "Reset later", "20%", "Reset later");
     advance(1100);
     assert(lv_bar_get_value(lv_obj_get_child(g5, 2)) == 900);
@@ -97,6 +144,9 @@ int main(void) {
     assert(lv_bar_get_value(lv_obj_get_child(cw, 2)) == 1000);
     cyd_set_error("Demo AG", "Unavailable"); advance(1100);
     assert(!lv_obj_has_flag(error_card, LV_OBJ_FLAG_HIDDEN));
+    assert(lv_obj_has_flag(primary_warn,LV_OBJ_FLAG_HIDDEN));
+    assert(lv_obj_has_flag(codex_mark,LV_OBJ_FLAG_HIDDEN));
+    assert(lv_obj_has_flag(provider_eyebrow,LV_OBJ_FLAG_HIDDEN));
 
     cyd_show_openrouter(); advance(500);
     cyd_set_openrouter("Demo Router", "$24.75", 75, "$1.20", "$6.80", "$15.25", "Demo model", 10,20,35,40,60,80,100);

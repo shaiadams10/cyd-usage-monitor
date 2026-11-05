@@ -11,6 +11,7 @@
 #include "secrets.h"
 #include "mascot_img.h"
 #include "ui_motion.h"
+#include "ui_provider.h"
 
 // Hosyond/LCDWiki E32R40T onboard common-anode RGB LED.
 #define LED_RED 22
@@ -139,6 +140,7 @@ static lv_obj_t *or_state_label;
 
 // Header Widgets
 static lv_obj_t *header_img;
+static lv_obj_t *claude_mark, *claude_footer, *creditsTitle, *resetsTitle, *codex_mark, *provider_eyebrow;
 static lv_obj_t *lbl_ag_mascot;
 static lv_obj_t *lbl_account_name;
 static lv_obj_t *btn_home;
@@ -242,8 +244,9 @@ static void printDeviceDiagnostics() {
     renderedFrames = renderTotalMs = renderMaxMs = httpMaxMs = 0;
     if (lbl_available_resets && activeScreen == AppScreen::UsageMonitor &&
         !lv_obj_has_flag(card_details, LV_OBJ_FLAG_HIDDEN)) {
-        Serial.printf("[DIAG] codex_footer=Resets: %s\n", lv_label_get_text(lbl_available_resets));
-        Serial.printf("[DIAG] codex_quota five_hour=%s weekly=%s\n",
+        const bool isClaude = claude_footer && !lv_obj_has_flag(claude_footer, LV_OBJ_FLAG_HIDDEN);
+        if (!isClaude) Serial.printf("[DIAG] codex_footer=Resets: %s\n", lv_label_get_text(lbl_available_resets));
+        Serial.printf("[DIAG] %s_quota five_hour=%s weekly=%s\n", isClaude ? "claude" : "codex",
                       lv_label_get_text(lbl_primary_val), lv_label_get_text(lbl_weekly_val));
     }
 }
@@ -698,6 +701,10 @@ void showOpenRouterScreen() {
 
 void showTelemetryError(const String &detail) {
     motionAccount = "";
+    if(claude_mark){
+        lv_obj_t *hidden[]={claude_mark,codex_mark,provider_eyebrow,lbl_primary_warn,creditsTitle,lbl_extra_credits,resetsTitle,lbl_available_resets,lbl_server_status,claude_footer};
+        for(lv_obj_t *item:hidden)lv_obj_add_flag(item,LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_add_flag(card_primary, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(card_details, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(lbl_col_gemini, LV_OBJ_FLAG_HIDDEN);
@@ -727,6 +734,12 @@ void buildDashboardUI() {
     lv_obj_set_style_text_font(lbl_ag_mascot, &lv_font_montserrat_16, LV_PART_MAIN);
     lv_obj_set_pos(lbl_ag_mascot, 10, 6);
     lv_obj_add_flag(lbl_ag_mascot, LV_OBJ_FLAG_HIDDEN);
+
+    claude_mark = cyd_provider_icon(scr_dashboard,true,32);
+    codex_mark = cyd_provider_icon(scr_dashboard,false,32);
+    lv_obj_set_pos(claude_mark,12,4);lv_obj_set_pos(codex_mark,12,4);
+    provider_eyebrow=lv_label_create(scr_dashboard);
+    lv_obj_add_flag(provider_eyebrow,LV_OBJ_FLAG_HIDDEN);
 
     lbl_account_name = lv_label_create(scr_dashboard);
     lv_label_set_text(lbl_account_name, "Loading Account...");
@@ -865,13 +878,13 @@ void buildDashboardUI() {
     lv_obj_set_style_text_font(lbl_weekly_sub, &lv_font_montserrat_12, LV_PART_MAIN);
     lv_obj_set_pos(lbl_weekly_sub, 10, 52);
 
-    lv_obj_t *creditsTitle = lv_label_create(card_details);
+    creditsTitle = lv_label_create(card_details);
     lv_label_set_text(creditsTitle, "Credits:");
     lv_obj_set_style_text_color(creditsTitle, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_set_style_text_font(creditsTitle, &lv_font_montserrat_12, LV_PART_MAIN);
     lv_obj_set_pos(creditsTitle, 10, 78);
 
-    lv_obj_t *resetsTitle = lv_label_create(card_details);
+    resetsTitle = lv_label_create(card_details);
     lv_label_set_text(resetsTitle, "Resets:");
     lv_obj_set_style_text_color(resetsTitle, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_set_style_text_font(resetsTitle, &lv_font_montserrat_12, LV_PART_MAIN);
@@ -905,6 +918,15 @@ void buildDashboardUI() {
     lv_obj_set_width(lbl_server_status, 100);
     lv_label_set_long_mode(lbl_server_status, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(lbl_server_status, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+
+    claude_footer = lv_label_create(scr_dashboard);
+    lv_label_set_text(claude_footer, "Claude Code");
+    lv_obj_set_style_text_font(claude_footer, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_color(claude_footer, lv_color_hex(0xD97757), LV_PART_MAIN);
+    lv_obj_set_pos(claude_footer, 10, 78);
+    lv_obj_set_width(claude_footer, 420);
+    lv_label_set_long_mode(claude_footer, LV_LABEL_LONG_DOT);
+    lv_obj_add_flag(claude_footer, LV_OBJ_FLAG_HIDDEN);
 
     // --- Collector Error Screen ---
     card_error = lv_obj_create(scr_dashboard);
@@ -1306,7 +1328,25 @@ void fetchQuotaData() {
 
             String provider = doc["provider"] | "error";
             String telemetryStatus = doc["status"] | "error";
-            if (provider != "codex" && provider != "antigravity") telemetryStatus = "error";
+            if (provider != "codex" && provider != "antigravity" && provider != "claude") telemetryStatus = "error";
+            if (telemetryStatus == "ok" && provider == "claude") {
+                bool anyWindow = false;
+                const char *keys[] = {"claude_5h_pct", "claude_weekly_pct"};
+                for (const char *key : keys) {
+                    if (doc[key].isNull()) continue;
+                    if (!doc[key].is<int>() || doc[key].as<int>() < 0 || doc[key].as<int>() > 100) {
+                        http.end();
+                        showTelemetryError("Claude quota fields are invalid. Retrying.");
+                        return;
+                    }
+                    anyWindow = true;
+                }
+                if (!anyWindow) {
+                    http.end();
+                    showTelemetryError("Claude quota windows are unavailable. Retrying.");
+                    return;
+                }
+            }
             if (telemetryStatus == "ok" && provider == "antigravity") {
                 const char *quotaKeys[] = {"gemini_5h_pct", "gemini_weekly_pct", "claude_5h_pct", "claude_weekly_pct"};
                 for (const char *key : quotaKeys) {
@@ -1343,6 +1383,12 @@ void fetchQuotaData() {
             // Apply Header
             lv_label_set_text(lbl_account_name, accountName.c_str());
             lv_obj_clear_flag(header_img, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(claude_mark, LV_OBJ_FLAG_HIDDEN);
+            if(provider!="codex"&&provider!="claude"){
+                lv_obj_t *hidden[]={codex_mark,provider_eyebrow,lbl_primary_warn,creditsTitle,lbl_extra_credits,resetsTitle,lbl_available_resets,lbl_server_status,claude_footer};
+                for(lv_obj_t *item:hidden)lv_obj_add_flag(item,LV_OBJ_FLAG_HIDDEN);
+                lv_obj_set_style_bg_color(scr_dashboard,lv_color_hex(0x09090B),0);
+            }
 
             if (provider == "error") {
                 lv_img_set_src(header_img, &mascot_img);
@@ -1425,8 +1471,11 @@ void fetchQuotaData() {
                 // SINGLE-GROUP UI FOR CHATGPT
                 // ==========================================
 
-                // Set Header Mascot: Robot Icon
-                lv_img_set_src(header_img, &mascot_img);
+                const bool isClaude = provider == "claude";
+                if (isClaude) {
+                    lv_obj_add_flag(header_img, LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_clear_flag(claude_mark, LV_OBJ_FLAG_HIDDEN);
+                } else lv_img_set_src(header_img, &mascot_img);
 
                 // Hide 2x2 Grid Layout
                 lv_obj_add_flag(lbl_col_gemini, LV_OBJ_FLAG_HIDDEN);
@@ -1442,8 +1491,12 @@ void fetchQuotaData() {
                 lv_obj_add_flag(lbl_ticker, LV_OBJ_FLAG_HIDDEN);
                 lv_obj_add_flag(card_error, LV_OBJ_FLAG_HIDDEN);
 
+                const bool fiveAvailable = !isClaude || doc["claude_5h_pct"].is<int>();
+                const bool weekAvailable = !isClaude || doc["claude_weekly_pct"].is<int>();
                 int left_pct = 0;
-                if (doc["codex_5h_pct"].is<int>()) {
+                if (isClaude) {
+                    left_pct = doc["claude_5h_pct"] | 0;
+                } else if (doc["codex_5h_pct"].is<int>()) {
                     left_pct = doc["codex_5h_pct"].as<int>();
                 } else if (doc["primary_pct"].is<int>()) {
                     left_pct = 100 - (doc["primary_pct"] | 0);
@@ -1451,15 +1504,15 @@ void fetchQuotaData() {
                 if (left_pct < 0) left_pct = 0;
                 if (left_pct > 100) left_pct = 100;
 
-                String default_p = String(left_pct) + "% left";
+                String default_p = fiveAvailable ? String(left_pct) + "% left" : String("N/A");
                 String p_val = default_p;
-                String p_tag = doc["primary_tag"] | "Usage Limit";
-                String p_sub = doc["primary_sub"] | "Reset unavailable";
-                String plan_type = doc["plan_type"] | "ChatGPT Plus";
-                int weekly_left = doc["codex_weekly_pct"].as<int>();
+                String p_tag = isClaude ? "5-Hour Limit" : String(doc["primary_tag"] | "Usage Limit");
+                String p_sub = isClaude ? String(doc["claude_5h_sub"] | "Reset unavailable") : String(doc["primary_sub"] | "Reset unavailable");
+                String plan_type = doc["plan_type"] | (isClaude ? "" : "ChatGPT Plus");
+                int weekly_left = isClaude ? (doc["claude_weekly_pct"] | 0) : doc["codex_weekly_pct"].as<int>();
                 if (weekly_left < 0) weekly_left = 0;
                 if (weekly_left > 100) weekly_left = 100;
-                String weekly_sub = doc["codex_weekly_sub"] | "Weekly reset unavailable";
+                String weekly_sub = isClaude ? String(doc["claude_weekly_sub"] | "Weekly reset unavailable") : String(doc["codex_weekly_sub"] | "Weekly reset unavailable");
 
                 lv_label_set_text(lbl_primary_val, p_val.c_str());
                 lv_label_set_text(lbl_primary_tag, p_tag.c_str());
@@ -1468,30 +1521,34 @@ void fetchQuotaData() {
 
                 lv_obj_set_size(bar_primary, 440, 16);
                 lv_obj_set_pos(bar_primary, 8, 54);
-                cyd_motion_bar(bar_primary, left_pct, motionReset);
+                cyd_motion_bar(bar_primary, left_pct, motionReset || !fiveAvailable);
 
                 lv_label_set_text(lbl_primary_sub, p_sub.c_str());
                 lv_obj_set_style_text_font(lbl_primary_sub, &lv_font_montserrat_14, LV_PART_MAIN);
                 lv_obj_set_pos(lbl_primary_sub, 10, 80);
 
-                String weekly_value = String(weekly_left) + "% left";
+                String weekly_value = weekAvailable ? String(weekly_left) + "% left" : String("N/A");
                 lv_label_set_text(lbl_weekly_val, weekly_value.c_str());
                 lv_label_set_text(lbl_weekly_tag, "Weekly Limit");
                 lv_obj_set_size(bar_weekly, 440, 12);
                 lv_obj_set_pos(bar_weekly, 8, 36);
-                cyd_motion_bar(bar_weekly, weekly_left, motionReset);
+                cyd_motion_bar(bar_weekly, weekly_left, motionReset || !weekAvailable);
                 lv_label_set_text(lbl_weekly_sub, weekly_sub.c_str());
                 lv_obj_set_pos(lbl_weekly_sub, 10, 52);
-                const uint32_t weekly_color = weekly_left <= 20 ? 0xF43F5E : weekly_left <= 50 ? 0xF59E0B : 0x10B981;
+                const uint32_t weekly_color = !weekAvailable ? 0x8A929C : weekly_left <= 20 ? 0xF43F5E : weekly_left <= 50 ? 0xF59E0B : 0x10B981;
                 lv_obj_set_style_text_color(lbl_weekly_val, lv_color_hex(weekly_color), LV_PART_MAIN);
                 lv_obj_set_style_bg_color(bar_weekly, lv_color_hex(weekly_color), LV_PART_INDICATOR);
 
                 // Color-code primary bar & value based on quota remaining (100 -> 0)
-                if (left_pct <= 0 || weekly_left <= 0) {
-                    lv_label_set_text(lbl_primary_warn, weekly_left <= 0 ? "WEEKLY QUOTA EXHAUSTED" : "5-HOUR QUOTA EXHAUSTED");
+                if ((fiveAvailable && left_pct <= 0) || (weekAvailable && weekly_left <= 0)) {
+                    lv_label_set_text(lbl_primary_warn, weekAvailable && weekly_left <= 0 ? "WEEKLY QUOTA EXHAUSTED" : "5-HOUR QUOTA EXHAUSTED");
                     lv_obj_clear_flag(lbl_primary_warn, LV_OBJ_FLAG_HIDDEN);
                     lv_obj_set_style_bg_color(bar_primary, lv_color_hex(0xF43F5E), LV_PART_INDICATOR);
                     lv_obj_set_style_text_color(lbl_primary_val, lv_color_hex(0xF43F5E), LV_PART_MAIN);
+                } else if (!fiveAvailable) {
+                    lv_obj_add_flag(lbl_primary_warn, LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_set_style_bg_color(bar_primary, lv_color_hex(0x8A929C), LV_PART_INDICATOR);
+                    lv_obj_set_style_text_color(lbl_primary_val, lv_color_hex(0x8A929C), LV_PART_MAIN);
                 } else if (left_pct <= 20) {
                     lv_obj_add_flag(lbl_primary_warn, LV_OBJ_FLAG_HIDDEN);
                     lv_obj_set_style_bg_color(bar_primary, lv_color_hex(0xF43F5E), LV_PART_INDICATOR);
@@ -1506,6 +1563,17 @@ void fetchQuotaData() {
                     lv_obj_set_style_text_color(lbl_primary_val, lv_color_hex(0x10B981), LV_PART_MAIN);
                 }
 
+                lv_obj_t *codexFooter[] = {creditsTitle, resetsTitle, lbl_extra_credits, lbl_available_resets, lbl_server_status};
+                for (lv_obj_t *item : codexFooter) {
+                    if (isClaude) lv_obj_add_flag(item, LV_OBJ_FLAG_HIDDEN);
+                    else lv_obj_clear_flag(item, LV_OBJ_FLAG_HIDDEN);
+                }
+                if (isClaude) {
+                    String footer = "Claude Code" + (plan_type.length() ? " | " + plan_type : String(""));
+                    lv_label_set_text(claude_footer, footer.c_str());
+                    lv_obj_clear_flag(claude_footer, LV_OBJ_FLAG_HIDDEN);
+                } else lv_obj_add_flag(claude_footer, LV_OBJ_FLAG_HIDDEN);
+
                 // Styled Credits in Cyan (#38bdf8) and Plan Type
                 String cred_label = extraCredits;
                 lv_label_set_text(lbl_extra_credits, cred_label.c_str());
@@ -1514,6 +1582,23 @@ void fetchQuotaData() {
                 lv_label_set_text(lbl_available_resets, resetLabel.c_str());
                 lv_label_set_text(lbl_server_status, plan_type.c_str());
                 lv_obj_set_style_text_color(lbl_server_status, lv_color_hex(0x10B981), LV_PART_MAIN);
+                cyd_provider_view view={scr_dashboard,card_primary,card_details,lbl_primary_val,lbl_weekly_val,lbl_primary_tag,lbl_weekly_tag,
+                    lbl_primary_sub,lbl_weekly_sub,bar_primary,bar_weekly,lbl_primary_warn,provider_eyebrow};
+                cyd_provider_theme(&view,isClaude,480,320);
+                lv_obj_add_flag(header_img,LV_OBJ_FLAG_HIDDEN);
+                lv_obj_clear_flag(isClaude?claude_mark:codex_mark,LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(isClaude?codex_mark:claude_mark,LV_OBJ_FLAG_HIDDEN);
+                lv_obj_set_pos(claude_footer,15,272);
+                lv_obj_set_height(claude_footer,18);
+
+                if(!isClaude){
+                    lv_obj_t *items[]={creditsTitle,lbl_extra_credits,resetsTitle,lbl_available_resets,lbl_server_status};
+                    const int xs[]={18,90,165,233,390};
+                    for(unsigned i=0;i<5;++i){lv_obj_set_parent(items[i],scr_dashboard);lv_obj_set_pos(items[i],xs[i],276);}
+                    lv_obj_set_width(lbl_server_status,75);
+                    cyd_compact_plan(lbl_server_status,plan_type.c_str());
+                }
+
             }
 
             if (motionReset) {

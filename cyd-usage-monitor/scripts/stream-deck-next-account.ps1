@@ -62,7 +62,7 @@ $endpoint = Get-PrivateUserSetting -Name "CYD_USAGE_MONITOR_NEXT_ACCOUNT_URL"
 $token = Get-PrivateUserSetting -Name "CYD_API_TOKEN"
 $origin = Get-PrivateApiOrigin $endpoint
 if ($ListAccounts -and $ProfileId) { throw "Use either -ListAccounts or -ProfileId." }
-if ($ProfileId -and $ProfileId -cnotmatch '^(codex|antigravity)-[a-f0-9]{10}$') {
+if ($ProfileId -and $ProfileId -cnotmatch '^(codex|antigravity|claude)-[a-f0-9]{10}$') {
     throw "Invalid profile ID."
 }
 if ($ListAccounts) {

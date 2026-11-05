@@ -93,7 +93,9 @@ services:
       TZ: ${CYD_MONITOR_TIMEZONE:-UTC}
       CYD_MONITOR_PROFILE_ROOT: /profiles
       AGY_BIN: /opt/cyd-cli/agy
+      CLAUDE_BIN: /opt/cyd-cli/claude
       CODEX_BIN: /opt/cyd-codex/node_modules/.bin/codex
+      CODEX_WAKEUP_BIN: /opt/cyd-codex-wakeup/node_modules/.bin/codex
       CYD_NODE_BIN: /opt/cyd-cli/node-bin
       WAHA_URL: ${WAHA_URL:-http://127.0.0.1:3000}
       WAHA_API_KEY: ${WAHA_API_KEY:-}
@@ -110,7 +112,9 @@ services:
       - ${CYD_MONITOR_HOST_DATA_DIR:-./data}:/app/data
       - ${CYD_MONITOR_HOST_PROFILE_DIR:-./profiles}:/profiles
       - ${AGY_HOST_PATH:?Set AGY_HOST_PATH in .env}:/opt/cyd-cli/agy:ro
+      - ${CLAUDE_HOST_PATH:?Set CLAUDE_HOST_PATH in .env}:/opt/cyd-cli/claude:ro
       - ${CODEX_HOST_DIR:?Set CODEX_HOST_DIR in .env}:/opt/cyd-codex:ro
+      - ${CODEX_WAKEUP_HOST_DIR:-${CODEX_HOST_DIR}}:/opt/cyd-codex-wakeup:ro
       - ${NODE_BIN_HOST_DIR:?Set NODE_BIN_HOST_DIR in .env}:/opt/cyd-cli/node-bin:ro
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=64m

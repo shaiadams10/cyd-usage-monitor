@@ -94,6 +94,15 @@ class TransportTests(unittest.TestCase):
         self.assertTrue(all(token == "Bearer synthetic-device-token" for _, token in self.hits))
         self.assertEqual(self.invoke("ps", args=("-ListAccounts",)).returncode, 0)
 
+    def test_claude_direct_selection_uses_existing_authenticated_transport(self):
+        for kind in ("ps", "vbs"):
+            with self.subTest(kind=kind):
+                args = ("-ProfileId", "claude-aaaaaaaaaa") if kind == "ps" else ("claude-aaaaaaaaaa",)
+                self.assertEqual(self.invoke(kind, args=args).returncode, 0)
+        self.assertEqual(len(self.hits), 2)
+        self.assertTrue(all(path == "/api/v1/select-account" for path, _ in self.hits))
+        self.assertTrue(all(token == "Bearer synthetic-device-token" for _, token in self.hits))
+
     def test_redirect_is_never_followed_and_token_not_printed(self):
         type(self).redirect = True
         for kind in ("ps", "vbs"):

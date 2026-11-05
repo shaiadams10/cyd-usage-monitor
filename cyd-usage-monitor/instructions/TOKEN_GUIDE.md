@@ -67,3 +67,21 @@ device or firmware binary is lost or distributed.
 Never publish a firmware binary built with real Wi-Fi or device credentials.
 Follow `instructions/FLASHING_GUIDE.md`; the dashboard's **Utilities** tab links to
 the same admin-protected guide.
+# Claude Code subscription accounts
+
+Install a verified official Linux native Claude Code binary on the deployment
+host and set `CLAUDE_HOST_PATH` to that binary in the ignored host `.env`.
+The collector mounts it read-only at `/opt/cyd-cli/claude`; `CLAUDE_BIN` selects
+that path. Recreate the collector after replacing a binary mount.
+
+In the dashboard, choose **Accounts → Claude Code → Add and connect**. Open the
+official authorization link in the intended account's browser profile. If Claude
+returns an authorization code, enter it into the protected connection form.
+Authentication is performed by `claude auth login` inside an isolated HOME and
+`CLAUDE_CONFIG_DIR`. The collector checks `claude auth status` for subscription
+identity before and after reading `/usage`. No credential files are imported.
+Keep generated profiles, authorization data, and private account identifiers out
+of Git. The dashboard clears temporary authorization details after completion.
+
+Quota reads use only `/usage`, never a model prompt. Wake-up sends are a separate,
+explicit operator action with their own safeguards and private durable history.

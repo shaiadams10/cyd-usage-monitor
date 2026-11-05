@@ -23,9 +23,11 @@ from pathlib import Path
 try:
     from .storage import data_lock, read_json, read_json_unlocked, update_json, write_json, write_json_unlocked
     from .diagnostics import query_events, redact
+    from .wakeups import WakeupStore
 except ImportError:  # Docker runs this file as a top-level script.
     from storage import data_lock, read_json, read_json_unlocked, update_json, write_json, write_json_unlocked
     from diagnostics import query_events, redact
+    from wakeups import WakeupStore
 
 
 DATA_DIR = Path(os.environ.get("CYD_MONITOR_DATA_DIR", "/app/data"))
@@ -55,7 +57,7 @@ SELECTION_SOURCES = {"codex-hook", "antigravity-watch", "antigravity-hook", "str
 def selection_history(settings: dict, *, source: str, action: str, app: str,
                       profile_id: str | None = None) -> None:
     """Bounded metadata in the existing atomic settings write; no polling I/O."""
-    provider = next((p for p in ("codex", "antigravity")
+    provider = next((p for p in ("codex", "antigravity", "claude")
                      if isinstance(profile_id, str) and profile_id.startswith(p + "-")), "none")
     entry = {"time": utcnow(), "source": source, "action": action, "app": app,
              "provider": provider,
@@ -305,8 +307,13 @@ def cyd_payload(profile_id: str | None = None) -> dict:
     return payload
 
 
+def compact_reset_text(value: str) -> str:
+    """Keep the CLI timezone in snapshots, omit its long suffix on small screens."""
+    return re.sub(r"\s*\((?:[A-Za-z_+-]+/)+[A-Za-z_+/-]+\)\s*$", "", value).strip()
+
+
 def render_snapshot(snapshot: dict) -> dict:
-    if snapshot.get("provider") not in {"codex", "antigravity"}:
+    if snapshot.get("provider") not in {"codex", "antigravity", "claude"}:
         raise ValueError("Unknown quota provider")
     def validate_metric(metric: dict) -> None:
         if not isinstance(metric, dict):
@@ -348,6 +355,30 @@ def render_snapshot(snapshot: dict) -> dict:
         result["partial"] = not all(result[group + "_available"] for group in ("gemini", "claude"))
         return result
 
+    if snapshot.get("provider") == "claude":
+        metrics = snapshot["metrics"]
+        result = {
+            "provider": "claude", "status": "ok", "account_name": snapshot["account_name"],
+            "plan_type": snapshot.get("plan_type", "Claude Code"),
+            "collected_at": snapshot["collected_at"], "source": snapshot.get("source", "claude CLI"),
+            "status_ticker": "* Claude Code CLI · " + snapshot["collected_at"],
+        }
+        reported = 0
+        for key, suffix in (("five_hour", "5h"), ("weekly", "weekly")):
+            metric = metrics.get(key)
+            if metric is None:
+                result[f"claude_{suffix}_pct"] = None
+                result[f"claude_{suffix}_sub"] = "Not reported by CLI"
+                continue
+            validate_metric(metric)
+            reported += 1
+            result[f"claude_{suffix}_pct"] = metric["remaining_pct"]
+            result[f"claude_{suffix}_sub"] = "Resets " + compact_reset_text(metric["reset"]) if metric["reset"] else "Reset unavailable"
+        if not reported:
+            raise ValueError("No Claude quota windows reported")
+        result["partial"] = reported != 2
+        return result
+
     metrics = snapshot["metrics"]
     if "five_hour" in metrics and "weekly" not in metrics:
         raise ValueError("Missing weekly quota")
@@ -360,10 +391,10 @@ def render_snapshot(snapshot: dict) -> dict:
         "provider": "codex", "status": "ok", "account_name": snapshot["account_name"],
         "plan_type": snapshot.get("plan_type", "ChatGPT"), "primary_val": f"{remaining}% left",
         "primary_pct": 100 - remaining, "primary_tag": "5-Hour Limit" if metrics.get("five_hour") else snapshot.get("limit_label", "Usage Limit"),
-        "primary_sub": "Resets " + primary["reset"], "extra_credits": snapshot.get("credits", "None"),
+        "primary_sub": "Resets " + compact_reset_text(primary["reset"]), "extra_credits": snapshot.get("credits", "None"),
         "available_resets": snapshot.get("available_resets"),
-        "codex_5h_pct": primary["remaining_pct"], "codex_5h_sub": "Resets " + primary["reset"],
-        "codex_weekly_pct": weekly["remaining_pct"], "codex_weekly_sub": "Resets " + weekly["reset"],
+        "codex_5h_pct": primary["remaining_pct"], "codex_5h_sub": "Resets " + compact_reset_text(primary["reset"]),
+        "codex_weekly_pct": weekly["remaining_pct"], "codex_weekly_sub": "Resets " + compact_reset_text(weekly["reset"]),
         "status_ticker": "* Codex CLI · " + snapshot["collected_at"], "collected_at": snapshot["collected_at"],
         "source": snapshot.get("source", "codex CLI"),
     }
@@ -615,6 +646,8 @@ class Handler(BaseHTTPRequestHandler):
             target = (STATIC_DIR / relative).resolve()
             if STATIC_DIR.resolve() not in target.parents or not target.is_file():
                 return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            if target.name.startswith("wakeups.") and not self.require_admin():
+                return
             body = target.read_bytes()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", mimetypes.guess_type(target.name)[0] or "application/octet-stream")
@@ -652,6 +685,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "invalid cursor"}, HTTPStatus.BAD_REQUEST)
             return self.send_json(query_events(DATA_DIR, provider=query.get("provider", [""])[0],
                                                outcome=query.get("outcome", [""])[0], query=query.get("q", [""])[0], before=before))
+        if path == "/api/admin/wakeups":
+            if not self.require_admin():
+                return
+            try:
+                return self.send_json(WakeupStore(DATA_DIR).status(profiles_config().get("profiles", [])))
+            except (ValueError, OSError):
+                return self.send_json({"error": "Wake-up ledger is unavailable. Sending is stopped."}, HTTPStatus.SERVICE_UNAVAILABLE)
         if path == "/api/v1/collector-status":
             if not self.require_admin():
                 return
@@ -749,6 +789,14 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
             return self.send_json({"error": "invalid request"}, HTTPStatus.BAD_REQUEST)
         path = urllib.parse.urlparse(self.path).path
+        if path == "/api/admin/wakeups":
+            try:
+                result = WakeupStore(DATA_DIR).apply_action(body, profiles_config().get("profiles", []))
+            except (ValueError, TypeError) as error:
+                return self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            except OSError:
+                return self.send_json({"error": "Wake-up ledger is unavailable. Sending is stopped."}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return self.send_json(result)
         if path == "/api/admin/profiles":
             provider_value = body.get("provider", "")
             label_value = body.get("label", "")
@@ -756,7 +804,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "provider and label must be text"}, HTTPStatus.BAD_REQUEST)
             provider = provider_value.lower()
             label = label_value.strip()
-            if provider not in {"codex", "antigravity"}:
+            if provider not in {"codex", "antigravity", "claude"}:
                 return self.send_json({"error": "provider is required"}, HTTPStatus.BAD_REQUEST)
             if len(label) > 80:
                 return self.send_json({"error": "label must be 80 characters or fewer"}, HTTPStatus.BAD_REQUEST)
@@ -945,7 +993,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"status": "ok"})
         if path == "/api/admin/remove-profile":
             profile_id = body.get("profile_id")
-            if not isinstance(profile_id, str) or not re.fullmatch(r"(?:codex|antigravity)-[0-9a-f]{10}", profile_id):
+            if not isinstance(profile_id, str) or not re.fullmatch(r"(?:codex|antigravity|claude)-[0-9a-f]{10}", profile_id):
                 return self.send_json({"error": "unknown profile"}, HTTPStatus.NOT_FOUND)
             request_id = str(uuid.uuid4())
             with data_lock(DATA_DIR):

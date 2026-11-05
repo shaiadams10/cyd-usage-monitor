@@ -35,6 +35,8 @@ jobs:
               raise SystemExit("Unexpected public files: " + ", ".join(sorted(set(bad))))
           print("CYD-only source tree verified")
           PY
+      - name: Install pinned server dependencies
+        run: python -m pip install -r cyd-usage-monitor/server/requirements.txt
       - name: Run server and storage tests
         run: python -m unittest discover -s cyd-usage-monitor/server -v
       - name: Validate Compose configuration
@@ -52,6 +54,7 @@ jobs:
           pathlib.Path("dashboard-inline.js").write_text(scripts[-1], encoding="utf-8")
           PY
           node --check dashboard-inline.js
+          node --check cyd-usage-monitor/server/static/wakeups.js
 
   firmware-and-wasm:
     runs-on: windows-latest
@@ -99,6 +102,7 @@ jobs:
               "cyd_publish_provider_mascots",
               "cyd_set_codex",
               "cyd_set_codex_footer",
+              "cyd_set_claude",
               "cyd_set_antigravity",
               "cyd_set_error",
               "cyd_set_openrouter",

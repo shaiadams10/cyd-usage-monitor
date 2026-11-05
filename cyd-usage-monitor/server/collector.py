@@ -8,6 +8,7 @@ dashboard-managed key. It writes only normalized snapshots to shared storage.
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import hashlib
 import json
@@ -257,7 +258,7 @@ def percentage(value: str) -> int:
 
 def extract_login_url(output: str) -> str:
     """Reassemble URLs that a narrow terminal wraps across multiple lines."""
-    match = re.search(r"https?://.*?(?=\n\s*\n|\n\s*(?:If |authorization code)|\Z)", output, re.I | re.S)
+    match = re.search(r"https?://.*?(?=\n\s*\n|\n\s*(?:If |authorization code|Paste code here)|\Z)", output, re.I | re.S)
     return re.sub(r"\s+", "", match.group(0)) if match else ""
 
 
@@ -386,6 +387,103 @@ def parse_antigravity_usage(raw: str) -> dict:
             "metrics": metrics, "credits": "None", "missing_groups": missing}
 
 
+def normalize_claude_terminal(raw: str) -> str:
+    """Preserve row/word boundaries from Ink without replaying unbounded moves.
+
+    This is a parser view of one raw request segment, not a terminal emulator.
+    A cursor move only needs one separator; never allocate its numeric distance.
+    Raw transcript lengths remain unchanged for independent-request offsets.
+    """
+    text = raw.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\x1b\[[0-9;]*[BEHFf]", "\n", text)
+    text = re.sub(r"\x1b\[[0-9;]*[GC]", " ", text)
+    return strip_terminal(text)
+
+
+def parse_claude_usage(raw: str) -> dict:
+    """Read subscription bars, never session cost or local attribution figures."""
+    text = normalize_claude_terminal(raw)
+    if re.search(r"Showing last[- ]known usage|usage endpoint is rate limited|failed to (?:fetch|load).*usage|not logged in|please (?:log|sign) in", text, re.I):
+        raise ValueError("Claude /usage is cached, unavailable, or requires sign-in")
+    starts = list(re.finditer(r"^\s*Current\s+session\s*$", text, re.M | re.I))
+    if not starts:
+        raise ValueError("Claude /usage did not contain subscription quota bars")
+    # A later partial redraw must not borrow the previous frame's weekly bar.
+    panel = text[starts[-1].start():]
+    headings = list(re.finditer(r"^\s*(Current\s+session|Current\s+week(?:\s*\([^\n]*\))?)\s*$", panel, re.M | re.I))
+    metrics = {}
+    for index, heading in enumerate(headings):
+        label = " ".join(heading.group(1).lower().split())
+        if label == "current session":
+            key = "five_hour"
+        elif label in {"current week", "current week (all models)"}:
+            key = "weekly"
+        else:
+            continue  # Model-specific weekly rows are not the all-model quota.
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(panel)
+        block = re.split(r"What's contributing|What’s contributing|Press |Esc to", panel[heading.end():end], maxsplit=1, flags=re.I)[0]
+        value = re.search(r"(?<![\d.])(-?\d+(?:\.\d+)?)%\s+used\b", block, re.I)
+        if not value:
+            raise ValueError(f"Claude /usage has incomplete {key} quota")
+        # Keep the original timezone-bearing text; an idle window may omit reset.
+        reset = re.search(r"^\s*Resets?\s+([^\n]+)", block, re.M | re.I)
+        used = float(value.group(1))
+        metrics[key] = {"remaining_pct": 100 - percentage(value.group(1)),
+                        "used_percentage": used, "reset_reported": reset is not None,
+                        "reset": reset.group(1).strip() if reset else ""}
+        if key == "five_hour":
+            # Interpretation of the CLI panel: exact zero with no active reset
+            # denotes an idle window. This is not an Anthropic delivery/window
+            # guarantee, and must only be used after independent fresh panels.
+            # Preserve fractional use so e.g. 0.4% never becomes idle by rounding.
+            metrics[key]["window_state"] = "idle" if used == 0.0 and reset is None else "active"
+    if set(metrics) != {"five_hour", "weekly"}:
+        raise ValueError("Claude /usage has not finished rendering its session and weekly quotas")
+    metrics["primary"] = dict(metrics["five_hour"])
+    return {"provider": "claude", "account_name": "Claude Code", "plan_type": "Claude Code",
+            "metrics": metrics, "limit_label": "5-Hour Limit", "credits": "None"}
+
+
+def claude_account_status(executable: str, env: dict[str, str], workdir: Path) -> dict:
+    """Use only the official read-only CLI identity command, never credentials."""
+    try:
+        result = subprocess.run([executable, "auth", "status"], env=env, cwd=str(workdir),
+                                capture_output=True, text=True, timeout=15, check=False)
+        status = json.loads(result.stdout)
+    except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+        raise RuntimeError("Claude authentication status could not be read; reconnect this profile") from error
+    if (result.returncode != 0 or not isinstance(status, dict) or status.get("loggedIn") is not True
+            or status.get("authMethod") not in {"claude.ai", "oauth_token"}):
+        raise RuntimeError("Claude requires an authenticated Claude subscription profile")
+    email = status.get("email")
+    if not isinstance(email, str) or not email.strip() or len(email) > 254:
+        raise RuntimeError("Claude did not report an unambiguous account identity")
+    return {"account_name": email.strip(), "plan_type": str(status.get("subscriptionType") or "Claude Code")[:80]}
+
+
+def claude_collection_responders(profile: dict, workdir: Path) -> list[tuple[str, str, str]]:
+    """Approve onboarding only inside this profile's collector-owned workspace."""
+    identifier = profile.get("id", "")
+    if not isinstance(identifier, str) or not re.fullmatch(r"claude-[0-9a-f]{10}", identifier):
+        raise ValueError("Invalid Claude collector profile")
+    root = PROFILE_ROOT.resolve()
+    expected = root / identifier / "workspace"
+    if workdir.resolve() != expected or not workdir.is_dir():
+        raise ValueError("Claude workspace is outside its isolated collector profile")
+    return [(
+        r"Choose\s*the\s*text\s*style\s*that\s*looks\s*best\s*with\s*your\s*terminal",
+        "\r", "Accepting Claude's default terminal theme.",
+    ), (
+        # Native 2.1.311 defaults to No, exit. Enter alone exits the CLI.
+        r"Quick\s*safety\s*check.*?❯\s*(?:1[.)]?\s*)?No,?\s*exit.*?Yes,?\s*I\s*trust\s*this\s*folder",
+        "\x1b[B\r", "Approving only the isolated collector-owned Claude workspace.",
+    ), (
+        # Older releases put Yes first; require its visible selected marker.
+        r"(?:Do\s*you\s*trust|Quick\s*safety\s*check).*?❯\s*(?:1[.)]?\s*)?Yes,?\s*I\s*trust\s*this\s*folder",
+        "\r", "Approving only the isolated collector-owned Claude workspace.",
+    )]
+
+
 def open_terminal() -> tuple[int, int]:
     """Create a normal-sized terminal; zero-sized PTYs break modern TUIs."""
     if pty is None or fcntl is None or termios is None:
@@ -399,21 +497,38 @@ def matching_pty_responses(
     text: str, responders: list[tuple[str, str, str]], handled: set[int]
 ) -> list[tuple[str, str]]:
     """Return newly matched one-shot PTY responses and mark them handled."""
-    text = strip_terminal(text)
+    text = strip_terminal(re.sub(r"\x1b\[\d*G", " ", text))
     matches: list[tuple[str, str]] = []
     for index, (pattern, response, message) in enumerate(responders):
         if index not in handled and re.search(pattern, text, re.I | re.S):
             handled.add(index)
+            # Alternative layouts of the same menu must not confirm again
+            # after its selected-row redraw is appended to the transcript.
+            handled.update(other for other, (_, _, candidate_message) in enumerate(responders)
+                           if candidate_message == message)
             matches.append((response, message))
     return matches
 
 
 def cli_version_from_transcript(text: str) -> str:
     versions = re.findall(
-        r"(?:Antigravity CLI|OpenAI Codex)\s*\(?v?(\d{1,4}\.\d{1,4}\.\d{1,4}(?:[-+][A-Za-z0-9.-]{1,40})?)\b",
-        strip_terminal(text),
+        r"(?:Antigravity CLI|OpenAI Codex|Claude Code)\s*\(?v?(\d{1,4}\.\d{1,4}\.\d{1,4}(?:[-+][A-Za-z0-9.-]{1,40})?)\b",
+        strip_terminal(re.sub(r"\x1b\[\d*G", " ", text)),
     )
     return versions[-1] if versions else ""
+
+
+def send_pty_response(master: int, response: str) -> None:
+    """Let native TUIs commit selection state before confirming a menu."""
+    if response == "\x1b[B\r":
+        # Claude's initial safety dialog can reset its selected row during
+        # startup. A native probe required a settled menu before confirmation.
+        time.sleep(1.5)
+        os.write(master, b"\x1b[B")
+        time.sleep(1.5)
+        os.write(master, b"\r")
+    else:
+        os.write(master, response.encode("utf-8"))
 
 
 class TerminalCapture(str):
@@ -482,7 +597,7 @@ def pty_command(
                     break
                 decoded = transcript.decode("utf-8", errors="replace")
                 for response, message in matching_pty_responses(decoded, responders or [], handled_responders):
-                    os.write(master, response.encode("utf-8"))
+                    send_pty_response(master, response)
                     if progress:
                         progress(message)
                 if complete and complete(decoded):
@@ -585,6 +700,8 @@ def archive_failure_evidence(profile: dict, error: Exception, diagnostics: dict)
 
 
 def profile_environment(profile: dict) -> dict[str, str]:
+    if profile.get("provider") not in {"codex", "antigravity", "claude"}:
+        raise ValueError("Unknown CLI provider")
     profile_id = profile["id"]
     root = PROFILE_ROOT / profile_id
     home = root / "home"
@@ -620,6 +737,16 @@ def profile_environment(profile: dict) -> dict[str, str]:
         if not config.exists():
             config.write_text('cli_auth_credentials_store = "file"\n', encoding="utf-8")
             os.chmod(config, 0o600)
+    elif profile["provider"] == "claude":
+        config_dir = root / "claude"
+        config_dir.mkdir(exist_ok=True)
+        os.chmod(config_dir, 0o700)
+        env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+        env["DISABLE_AUTOUPDATER"] = "1"
+        # The umbrella and DISABLE_TELEMETRY also disable feature evaluation
+        # needed by /usage. Keep quota collection functional while suppressing
+        # error reports; do not inherit either broad switch from the host.
+        env["DISABLE_ERROR_REPORTING"] = "1"
     else:
         # Make fresh server-side profiles predictable and privacy-forward. The
         # official CLI supports these persisted settings; they avoid its visual
@@ -643,12 +770,23 @@ def profile_workdir(profile: dict) -> Path:
     return workdir
 
 
+def wakeup_cli_executable(provider: str) -> str | None:
+    """Allow modern Codex metadata/sending without losing quota-panel fields."""
+    if provider == "codex" and os.environ.get("CODEX_WAKEUP_BIN", "").strip():
+        return shutil.which(os.environ["CODEX_WAKEUP_BIN"].strip())
+    return cli_executable(provider)
+
+
 def cli_executable(provider: str) -> str | None:
-    override = os.environ.get("CODEX_BIN" if provider == "codex" else "AGY_BIN")
+    executable_names = {"codex": ("CODEX_BIN", "codex"), "antigravity": ("AGY_BIN", "agy"), "claude": ("CLAUDE_BIN", "claude")}
+    if provider not in executable_names:
+        raise ValueError("Unknown CLI provider")
+    variable, name = executable_names[provider]
+    override = os.environ.get(variable)
     candidates = [override] if override else []
     candidates.extend([
-        "codex" if provider == "codex" else "agy",
-        str(Path.home() / ".local" / "bin" / ("codex" if provider == "codex" else "agy")),
+        name,
+        str(Path.home() / ".local" / "bin" / name),
         str(Path.home() / ".local" / "cyd-codex" / "node_modules" / ".bin" / "codex") if provider == "codex" else "",
     ])
     for candidate in candidates:
@@ -675,6 +813,15 @@ ANTIGRAVITY_USAGE_INPUTS: list[tuple[float, str, str]] = [
     (17.0, "/usage\r", "Confirming Antigravity's /usage panel…"),
     (25.0, "\x1b", "Closing the previous quota panel…"),
     (26.0, "/usage\r", "Retrying Antigravity's /usage panel…"),
+]
+
+# Only built-in quota commands and guarded modal dismissal; never a model turn.
+CLAUDE_USAGE_INPUTS: list[tuple[float, str, str]] = [
+    (4.0, "/usage\r", "Claude Code started. Opening /usage…"),
+    (11.0, "\x1b", "Closing the confirmed Claude usage panel…"),
+    (12.0, "/usage\r", "Confirming Claude subscription quotas…"),
+    (22.0, "\x1b", "Closing the confirmed Claude usage panel…"),
+    (23.0, "/usage\r", "Retrying Claude subscription quotas…"),
 ]
 
 
@@ -718,7 +865,7 @@ class PanelConfirmation:
     """Confirm independent CLI reads, never a redraw or partial old panel."""
 
     def __init__(self, parser: Callable[[str], dict], previous: dict | None, progress: Callable[[str], None] | None = None,
-                 require_repeat: bool = False):
+                 require_repeat: bool = False, onboarding_guard: bool = False):
         self.parser = parser
         self.previous = previous
         self.progress = progress
@@ -728,6 +875,8 @@ class PanelConfirmation:
         self.request_start = 0
         self.request_sequence = 0
         self.candidate_account = ""
+        self.candidate_claude_idle = False
+        self.onboarding_guard = onboarding_guard
         self.accepted = False
 
     def begin_request(self, offset: int) -> None:
@@ -738,6 +887,12 @@ class PanelConfirmation:
 
     def allow_input(self, value: str, transcript: str) -> bool:
         """Close only a quota modal rendered by the current request."""
+        if self.onboarding_guard and value.startswith("/"):
+            text = normalize_claude_terminal(transcript)
+            pending = list(re.finditer(r"Quick\s*safety\s*check|Choose\s*the\s*text\s*style|Select\s*login\s*method", text, re.I))
+            ready = list(re.finditer(r"Claude\s*Code\s*v\d+\.\d+\.\d+", text, re.I))
+            if pending and (not ready or pending[-1].start() > ready[-1].start()):
+                return False
         if value != "\x1b":
             return True
         current = transcript[self.request_start:]
@@ -763,17 +918,19 @@ class PanelConfirmation:
         values = remaining_values(parsed.get("metrics"))
         account = parsed.get("account_name", "")
         if self.require_repeat:
+            claude_idle = parsed.get("provider") == "claude" and parsed.get("metrics", {}).get("five_hour", {}).get("window_state") == "idle"
             # Allow small real consumption between requests; reject large
             # startup corrections such as an exhausted quota flashing 100%.
             consistent = self.suspect and values.keys() == self.suspect[1].keys() and all(
                 abs(value - self.suspect[1][key]) <= 5 for key, value in values.items()
             )
-            if consistent and count > self.suspect[0] and account == self.candidate_account:
+            if consistent and count > self.suspect[0] and account == self.candidate_account and (not claude_idle or self.candidate_claude_idle):
                 self.suspect = None
                 self.accepted = True
                 return True
             self.suspect = (count, values)
             self.candidate_account = account
+            self.candidate_claude_idle = claude_idle
             self.drops = abrupt_drops(parsed, self.previous)
             return False
         drops = abrupt_drops(parsed, self.previous)
@@ -806,7 +963,7 @@ def collect_profile(profile: dict, include_transcript: bool = False, progress: C
         previous = last_good_snapshot(read_json(STATE_FILE, {"profiles": {}}).get("profiles", {}).get(profile["id"]))
     executable = cli_executable(provider)
     if not executable:
-        raise RuntimeError(f"{'codex' if provider == 'codex' else 'agy'} is not installed on the collector host")
+        raise RuntimeError(f"{provider} CLI is not installed on the collector host")
     env = profile_environment(profile)
     if provider == "codex":
         # The collector container is the isolation boundary. Codex otherwise
@@ -833,7 +990,24 @@ def collect_profile(profile: dict, include_transcript: bool = False, progress: C
             parsed = parse_codex_status(raw)
         except Exception as error:
             raise CollectionError(str(error), clean_terminal_transcript(raw), getattr(raw, "facts", {})) from error
-    else:
+    elif provider == "claude":
+        workdir = profile_workdir(profile)
+        identity = claude_account_status(executable, env, workdir)
+        def parse_current_claude(text: str) -> dict:
+            return dict(parse_claude_usage(text), **identity)
+        raw = pty_command(
+            [executable], env, CLAUDE_USAGE_INPUTS, timeout=40, cwd=str(workdir),
+            complete=(confirmation := PanelConfirmation(parse_current_claude, previous, progress, require_repeat=True, onboarding_guard=True)),
+            progress=progress,
+            responders=claude_collection_responders(profile, workdir),
+        )
+        try:
+            parsed = parse_current_claude(raw)
+            if claude_account_status(executable, env, workdir)["account_name"] != identity["account_name"]:
+                raise ValueError("Claude account identity changed during collection")
+        except Exception as error:
+            raise CollectionError(str(error), clean_terminal_transcript(raw), getattr(raw, "facts", {})) from error
+    elif provider == "antigravity":
         # /usage is a scrollable panel. Retry until its reported quota groups
         # parse rather than using a blind timeout. An omitted group can also
         # indicate an outdated CLI, not just an account entitlement change.
@@ -855,8 +1029,8 @@ def collect_profile(profile: dict, include_transcript: bool = False, progress: C
              if confirmation.drops else f"{provider.title()} quota confirmation incomplete: no two matching independent readings")
             + "; the previous reading was kept", clean_terminal_transcript(raw), getattr(raw, "facts", {}),
         )
-    if provider == "codex" and not confirmation.accepted:
-        raise CollectionError("Codex quota needs two matching /status requests; the previous reading was kept", clean_terminal_transcript(raw), getattr(raw, "facts", {}))
+    if provider in {"codex", "claude"} and not confirmation.accepted:
+        raise CollectionError(f"{provider.title()} quota needs two matching independent requests; the previous reading was kept", clean_terminal_transcript(raw), getattr(raw, "facts", {}))
     parsed["capture"] = dict(getattr(raw, "facts", {}), confirmation_requests=confirmation.request_sequence)
     parsed.update({"profile_id": profile["id"], "label": profile.get("label", ""), "status": "ok", "collected_at": utcnow(), "source": f"{provider} CLI"})
     return (parsed, clean_terminal_transcript(raw)) if include_transcript else parsed
@@ -935,7 +1109,7 @@ def record_alert_status(**changes) -> None:
     update_json(ALERTS_FILE, {}, apply_changes)
 
 
-def send_email_message(subject: str, body: str) -> tuple[bool, str]:
+def send_email_message(subject: str, body: str, *, image: bytes | None = None) -> tuple[bool, str]:
     """Send through an SMTP transport independent of WAHA and its session."""
     settings = email_settings()
     configured = email_fallback_configured(settings)
@@ -949,6 +1123,14 @@ def send_email_message(subject: str, body: str) -> tuple[bool, str]:
     email["From"] = settings["sender"]
     email["To"] = ", ".join(settings["recipients"])
     email.set_content(body)
+    if image:
+        import html
+        formatted = html.escape(body)
+        formatted = re.sub(r"\*([^*\n]+)\*", r"<strong>\1</strong>", formatted)
+        formatted = re.sub(r"_([^_\n]+)_", r"<em>\1</em>", formatted)
+        email.add_alternative('<html><body><img src="cid:cyd-wakeup-summary" alt="Wake-up summary" style="display:block;width:100%;max-width:760px;height:auto">'
+                              + '<div style="white-space:pre-wrap;font:15px/1.6 sans-serif">' + formatted + '</div></body></html>', subtype="html")
+        email.get_payload()[-1].add_related(image, maintype="image", subtype="jpeg", cid="<cyd-wakeup-summary>", filename="wakeup-summary.jpg")
     context = ssl.create_default_context()
     try:
         if settings["security"] == "tls":
@@ -971,7 +1153,7 @@ def send_email_message(subject: str, body: str) -> tuple[bool, str]:
 
 
 def send_waha_failure_email(event: str, alert_message: str, waha_error: str,
-                            notification_key: str | None = None) -> tuple[bool, str]:
+                            notification_key: str | None = None, *, image: bytes | None = None) -> tuple[bool, str]:
     """Deduplicate by incident even when retry counts and evidence change."""
     delivery_key = hashlib.sha256((event + "\0" + (notification_key or alert_message)).encode("utf-8")).hexdigest()
     status = read_json(ALERTS_FILE, {})
@@ -982,6 +1164,7 @@ def send_waha_failure_email(event: str, alert_message: str, waha_error: str,
         "[CYD Usage Monitor] WhatsApp alert delivery failed",
         "The CYD Usage Monitor detected an event, but WAHA could not deliver its WhatsApp notification.\n\n"
         f"WAHA result: {waha_error}\n\nOriginal monitor notification:\n\n{alert_message}\n",
+        **({"image": image} if image else {}),
     )
     if delivered:
         def remember(status: dict) -> None:
@@ -1099,7 +1282,7 @@ def record_incident(profile: dict, previous: dict | None, snapshot: dict) -> Non
         update_json(INCIDENTS_FILE, {"incidents": []}, update)
 
 
-def deliver_waha_message(event: str, message: str, notification_key: str | None = None) -> tuple[bool, str]:
+def deliver_waha_message(event: str, message: str, notification_key: str | None = None, *, image: bytes | None = None) -> tuple[bool, str]:
     """Deliver a dashboard/collector alert without exposing the WAHA key."""
     alert_message = message
     settings = waha_settings()
@@ -1108,15 +1291,26 @@ def deliver_waha_message(event: str, message: str, notification_key: str | None 
     if not configured:
         error = "WAHA alerts are not configured: set WAHA_API_KEY and a chat ID"
         record_alert_status(last_event=event, last_error=error)
-        _, fallback = send_waha_failure_email(event, alert_message, error, notification_key)
+        _, fallback = send_waha_failure_email(event, alert_message, error, notification_key, **({"image": image} if image else {}))
         return False, error + " " + fallback
-    payload = json.dumps({"session": settings["session"], "chatId": settings["chat_id"], "text": message}).encode("utf-8")
+    content = {"session": settings["session"], "chatId": settings["chat_id"]}
+    if image:
+        if len(message) <= 950:
+            caption = message
+        else:
+            boundaries = [message.find("\n\n" + icon + " *") for icon in ("🟢", "🔵", "🟠")]
+            boundary = min((index for index in boundaries if index >= 0), default=700)
+            caption = message[:min(boundary, 700)].rstrip() + "\n\n📋 *Full account results and reset times are in the image.*\n🛡️ *No automatic prompt retries.*"
+        content.update(file={"mimetype": "image/jpeg", "filename": "wakeup-summary.jpg", "data": base64.b64encode(image).decode("ascii")}, caption=caption)
+    else:
+        content["text"] = message
+    payload = json.dumps(content).encode("utf-8")
     request = urlrequest.Request(
-        settings["url"] + "/api/sendText", data=payload, method="POST",
+        settings["url"] + ("/api/sendImage" if image else "/api/sendText"), data=payload, method="POST",
         headers={"Content-Type": "application/json", "Accept": "application/json", "X-Api-Key": settings["api_key"]},
     )
     try:
-        with urlrequest.urlopen(request, timeout=12) as response:
+        with urlrequest.urlopen(request, timeout=25 if image else 12) as response:
             if response.status < 200 or response.status >= 300:
                 raise RuntimeError(f"WAHA returned HTTP {response.status}")
         record_alert_status(last_event=event, last_success_at=utcnow(), last_error="")
@@ -1136,12 +1330,12 @@ def deliver_waha_message(event: str, message: str, notification_key: str | None 
         if detail:
             message += f": {detail[:600]}"
         record_alert_status(last_event=event, last_error=message)
-        _, fallback = send_waha_failure_email(event, alert_message, message, notification_key)
+        _, fallback = send_waha_failure_email(event, alert_message, message, notification_key, **({"image": image} if image else {}))
         return False, message + " " + fallback
     except (OSError, ValueError, RuntimeError, urlerror.URLError) as error:
         message = f"WAHA delivery failed: {error}"
         record_alert_status(last_event=event, last_error=message)
-        _, fallback = send_waha_failure_email(event, alert_message, message, notification_key)
+        _, fallback = send_waha_failure_email(event, alert_message, message, notification_key, **({"image": image} if image else {}))
         return False, message + " " + fallback
 
 
@@ -1529,8 +1723,9 @@ class LoginSession:
         provider = profile["provider"]
         executable = cli_executable(provider)
         if not executable:
-            raise RuntimeError(f"{'codex' if provider == 'codex' else 'agy'} is not installed on the collector host")
-        command = [executable, "login", "--device-auth"] if provider == "codex" else [executable]
+            raise RuntimeError(f"{provider} CLI is not installed on the collector host")
+        command = ([executable, "login", "--device-auth"] if provider == "codex"
+                   else [executable, "auth", "login"] if provider == "claude" else [executable])
         self.process = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, env=profile_environment(profile), cwd=str(profile_workdir(profile)), close_fds=True)
         os.close(slave)
         self.output = bytearray()
@@ -1559,6 +1754,10 @@ class LoginSession:
 
     def transcript(self, output: str) -> str:
         events = "\n".join(self.events)
+        if self.profile["provider"] == "claude" and self.input_received:
+            # Readline can wrap, repaint or split the echoed code with ANSI.
+            # Never persist raw post-submission output in browser/runtime history.
+            output = "Authorization code submitted. Waiting for Claude to complete sign-in."
         return f"{events}\n\n--- provider CLI output ---\n{clean_terminal_transcript(output)}"[-16000:]
 
     def tick(self, user_input: str = "") -> tuple[str, bool]:
@@ -1572,7 +1771,7 @@ class LoginSession:
             os.write(self.master, (user_input + "\r").encode("utf-8"))
             self.last_input = user_input
             self.input_received = True
-            self.note("Received the browser authorization code and forwarded it to Antigravity.")
+            self.note(f"Received the browser authorization code and forwarded it to {self.profile['provider']}.")
         while True:
             readable, _, _ = select.select([self.master], [], [], 0)
             if not readable:
@@ -1585,6 +1784,9 @@ class LoginSession:
                 break
             self.output.extend(data)
         output = clean_terminal_transcript(self.output.decode("utf-8", errors="replace"))
+        if self.profile["provider"] == "claude" and self.last_input:
+            # PTYs may echo the authorization code. It is never dashboard history.
+            output = output.replace(self.last_input, "[authorization code submitted]")
         if self.profile["provider"] == "antigravity" and "Choose your color scheme:" in output and not self.onboarding_entered:
             # This is Antigravity's non-auth first-run wizard. Accept its
             # default so a background collector never waits on a decorative UI.
@@ -1621,13 +1823,15 @@ class LoginSession:
             self.note("Isolated workspace approved. Waiting for Antigravity to finish saving the profile.")
         if self.profile["provider"] == "codex" and re.search(r"Successfully logged in", output, re.I):
             self.login_confirmed = True
+        if self.profile["provider"] == "claude" and re.search(r"Login successful|Successfully logged in", output, re.I):
+            self.login_confirmed = True
         if self.profile["provider"] == "antigravity" and "Welcome to Antigravity CLI!" in output:
             self.login_confirmed = True
             self.ready_since = self.ready_since or time.monotonic()
         antigravity_ready = self.profile["provider"] == "antigravity" and self.login_confirmed and self.onboarding_finished and (
             self.terms_finished or "Terms of Service & Data Use" not in output
         ) and self.workspace_trusted and self.ready_since is not None and time.monotonic() - self.ready_since >= 2.0
-        self.succeeded = bool(self.login_confirmed and (self.profile["provider"] == "codex" or antigravity_ready))
+        self.succeeded = bool(self.login_confirmed and (self.profile["provider"] in {"codex", "claude"} or antigravity_ready))
         timed_out = time.monotonic() - self.started > 600
         process_ended = self.process.poll() is not None
         finished = process_ended or self.succeeded or timed_out
@@ -1635,6 +1839,8 @@ class LoginSession:
             self.failure_reason = "Provider sign-in timed out." if timed_out else "Provider CLI exited before sign-in completed."
         if finished and self.process.poll() is None:
             self.process.terminate()
+        if self.profile["provider"] == "claude" and self.input_received:
+            output = "Authorization code submitted. Waiting for Claude to complete sign-in."
         return output, finished
 
     def close(self) -> None:
@@ -1691,7 +1897,7 @@ def cleanup_login_inputs(max_age_seconds: int = 900) -> None:
 
 
 def remove_profile_directory(profile_id: str) -> None:
-    if not re.fullmatch(r"(?:codex|antigravity)-[0-9a-f]{10}", profile_id):
+    if not re.fullmatch(r"(?:codex|antigravity|claude)-[0-9a-f]{10}", profile_id):
         raise ValueError("invalid profile identifier")
     root = PROFILE_ROOT.resolve()
     target = (root / profile_id).resolve()
@@ -1832,7 +2038,7 @@ def process_requests(sessions: dict[str, LoginSession]) -> None:
                     scrub_runtime_record(records[login_request_id], status="error", phase="collection_failed", output=message)
             changed = True
         elif kind == "login":
-            executable = "codex" if profile["provider"] == "codex" else "agy"
+            executable = {"codex": "codex", "antigravity": "agy", "claude": "claude"}.get(profile["provider"], "Unknown CLI")
             if not cli_executable(profile["provider"]):
                 records[request_id] = {
                     "kind": kind, "profile_id": profile_id, "status": "error", "phase": "login_failed",
@@ -1881,8 +2087,8 @@ def process_requests(sessions: dict[str, LoginSession]) -> None:
         else:
             login_url = extract_login_url(output)
             code_match = re.search(r"(?:one-time|device) code[^\n]*\n\s*([A-Z0-9-]{4,})", output, re.I) if session.profile["provider"] == "codex" else None
-            needs_input = session.profile["provider"] == "antigravity" and not session.input_received and not session.login_confirmed and bool(
-                re.search(r"(?:paste|enter).{0,80}(?:authorization|auth).{0,40}code", output, re.I)
+            needs_input = session.profile["provider"] in {"antigravity", "claude"} and not session.input_received and not session.login_confirmed and bool(
+                re.search(r"(?:paste|enter).{0,80}(?:(?:authorization|auth).{0,40}code|code here)", output, re.I)
             )
             needs_consent = session.profile["provider"] == "antigravity" and session.terms_seen and not session.terms_finished
             records[request_id] = {
@@ -1906,6 +2112,122 @@ def process_requests(sessions: dict[str, LoginSession]) -> None:
             latest.pop("login_inputs", None)
             latest["requests"] = [request for request in latest.get("requests", []) if request.get("id") not in processed][-200:]
         update_json(CONTROL_FILE, {"requests": []}, prune_control)
+
+
+def format_wakeup_summary(event: dict, profiles: list[dict]) -> tuple[str, str]:
+    """Match collection alerts: bold sections, status icons and safe dynamic text."""
+    lookup = {profile["id"]: profile for profile in profiles}
+    clean = lambda value, limit=140: re.sub(r"\s+", " ", whatsapp_value(value))[:limit]
+    results = event.get("results")
+    if not isinstance(results, list): results = [event]
+    scheduled = str(event.get("source", "manual")).startswith("schedule:")
+    context = event.get("run_context") or {}
+    kind = "Scheduled wake-up" if scheduled else "Send now wake-up"
+    trouble = any(result.get("state") in {"failed", "unknown"} for result in results)
+    subject = f"[CYD Usage Monitor] {kind}: {'needs attention' if trouble else 'summary'}"
+    lines = [("⏰" if scheduled else "⚡") + f" *CYD Usage Monitor · {kind}*", ""]
+    def local_stamp(value):
+        try:
+            when = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(ALERT_TIMEZONE)
+            return when.strftime("%b %d, %Y · %I:%M %p")
+        except (TypeError, ValueError): return "Unknown time"
+    if scheduled:
+        lines.append("📅 *Schedule:* " + clean(context.get("schedule_label") or "Scheduled wake-up"))
+        if context.get("scheduled_for"): lines.append("🕒 *Scheduled for:* " + local_stamp(context["scheduled_for"]))
+    else:
+        lines.append("👆 *Source:* Send now — your immediate request, not a schedule.")
+    lines.append("🕘 *Completed:* " + local_stamp(event.get("created_at")))
+    lines.append("🌐 *Times:* " + ALERT_TIMEZONE_NAME)
+    counts = {state:sum(result.get("state")==state for result in results) for state in ("sent","skipped","failed","unknown")}
+    lines.extend(["",f"✅ *{counts['sent']} woken*  ·  ⏭️ *{counts['skipped']} skipped*",f"❌ *{counts['failed']} failed*  ·  ⚠️ *{counts['unknown']} unconfirmed*"])
+    try:
+        from .wakeup_report import image_reset_parts, quota_limit_lines
+    except ImportError:
+        from wakeup_report import image_reset_parts, quota_limit_lines
+    for provider,title,icon in (("codex","ChatGPT / Codex","🟢"),("antigravity","Antigravity","🔵"),("claude","Claude Code","🟠")):
+        group = [result for result in results if (result.get("provider") or str(result.get("profile_id","")).split("-",1)[0])==provider]
+        if not group: continue
+        lines.extend(["",f"{icon} *{title}*"])
+        models = {}
+        for result in group: models.setdefault((result.get("model") or "Not selected",result.get("reasoning") or "fixed"),[]).append(result)
+        for (model,effort), accounts in models.items():
+            lines.append(f"🤖 _{clean(model)} · {clean(effort)} reasoning_")
+            for result in accounts:
+                profile=lookup.get(result.get("profile_id"),{})
+                label=clean(result.get("label") or profile.get("label") or profile.get("last_account_name") or result.get("profile_id") or title,100)
+                state,mark={"sent":("Woken","✅"),"skipped":("Skipped","⏭️"),"failed":("Failed","❌"),"unknown":("Unconfirmed","⚠️")}.get(result.get("state"),("Unconfirmed","⚠️"))
+                lines.extend(["",f"{mark} *{label}* — {state}"])
+                if result.get("state")!="sent":
+                    lines.append("> " + clean(redact(result.get("reason") or "Outcome could not be confirmed.",240),240))
+                for detail in quota_limit_lines(result, ALERT_TIMEZONE_NAME, event.get("created_at")):
+                    lines.append("   🚫 *" + clean(detail, 180) + "*")
+                if result.get("state") in {"sent","skipped"} or result.get("reset_at") or result.get("reset_text"):
+                    time,note=image_reset_parts(result,ALERT_TIMEZONE_NAME,event.get("created_at"))
+                    lines.append(f"   ⏳ *Next 5h reset:* {clean(time)} · {clean(note)}")
+    lines.extend(["","🛡️ *No automatic prompt retries.*"])
+    if trouble: lines.append("Failed schedules and reserved uncertain attempts stay paused for review.")
+    lines.append("🔎 *Details:* Wake-ups → Activity")
+    return subject,"\n".join(lines)
+
+
+def dispatch_wakeup_notifications(store, profiles: list[dict]) -> None:
+    """One durable claim per run, WAHA first and existing email fallback."""
+    for event in store.claim_notifications():
+        delivered = False
+        try:
+            subject, message = format_wakeup_summary(event, profiles)
+            image = None
+            if event.get("kind") == "run_summary":
+                try:
+                    try:
+                        from .wakeup_report import render_summary
+                    except ImportError:
+                        from wakeup_report import render_summary
+                    image = render_summary(event, ALERT_TIMEZONE_NAME)
+                except Exception as error:
+                    record_event(DATA_DIR, "wakeup_report_failed", outcome="error", error_type=type(error).__name__)
+            settings = waha_settings()
+            if settings.get("api_key") and settings.get("chat_id"):
+                delivered, detail = deliver_waha_message("wakeup_summary", message, event["notification_id"], **({"image": image} if image else {}))
+                delivered = delivered or "email delivery accepted" in detail.lower() or "already delivered" in detail.lower()
+            elif email_fallback_configured():
+                delivered, _ = send_email_message(subject, message, **({"image": image} if image else {}))
+            record_event(DATA_DIR, "wakeup_notification", outcome="ok" if delivered else "error",
+                         error="" if delivered else "No configured alert channel accepted delivery; inspect wake-up history.")
+        except Exception as error:
+            record_event(DATA_DIR, "wakeup_notification_failed", outcome="error", error_type=type(error).__name__)
+        finally:
+            store.finish_notification(event["notification_id"], delivered)
+
+
+def wakeup_worker() -> None:
+    """Keep potentially slow preflights away from login handling and heartbeat."""
+    try:
+        from .wakeups import WakeupStore
+        from .wakeup_cli import build_adapters
+    except ImportError:
+        from wakeups import WakeupStore
+        from wakeup_cli import build_adapters
+    store = WakeupStore(DATA_DIR)
+    while True:
+        profiles = []
+        try:
+            config = read_json(PROFILES_FILE, {"profiles": []})
+            profiles = config.get("profiles", [])
+            adapters = build_adapters(sys.modules[__name__])
+            store.set_capabilities(adapters)
+            results = store.process_due(profiles, adapters)
+            for result in results:
+                for account in result.get("results", []):
+                    record_event(DATA_DIR, "wakeup_finished", outcome=account.get("state", "unknown"),
+                                 attempt_id=account.get("attempt_id", ""), error=account.get("reason", ""))
+        except Exception as error:
+            record_event(DATA_DIR, "wakeup_worker_failed", outcome="error", error_type=type(error).__name__)
+        try:
+            dispatch_wakeup_notifications(store, profiles)
+        except Exception as error:
+            record_event(DATA_DIR, "wakeup_notification_failed", outcome="error", error_type=type(error).__name__)
+        time.sleep(5)
 
 
 def main() -> None:
@@ -1936,6 +2258,7 @@ def main() -> None:
     next_heartbeat = next_log_cleanup = 0.0
     instance_started_at = utcnow()
     record_event(DATA_DIR, "collector_started")
+    threading.Thread(target=wakeup_worker, name="wakeup-scheduler", daemon=True).start()
 
     def publish_schedule(schedule: dict) -> None:
         """Expose scheduling state for the dashboard countdown."""
